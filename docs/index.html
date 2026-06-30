@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LunaVault FuseBox — Preserve every moment. Losslessly.</title>
+<meta name="description" content="Merge a day's camera clips into one lossless master with both microphones kept in sync. Plus quick colour-graded clip sharing.">
+<style>
+  :root{
+    --bg:#0D0905; --surface:#160C06; --surface2:#1A1008; --border:#3A2010;
+    --accent:#C07838; --accent-hi:#E09040; --gold:#E8B838; --blue:#2D7FD0;
+    --text:#F5E6D0; --muted:#A09080; --dim:#6A4828;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);
+    font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.6;
+    background-image:radial-gradient(ellipse 80% 50% at 50% -10%, #1C0F06 0%, #0D0905 60%);}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{color:var(--accent-hi)}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+  .btn{display:inline-flex;align-items:center;gap:8px;background:var(--accent);
+    color:#0D0905;font-weight:600;padding:11px 22px;border-radius:8px;font-size:15px;
+    border:1px solid var(--accent)}
+  .btn:hover{background:var(--accent-hi);color:#0D0905}
+  .btn.ghost{background:transparent;color:var(--text);border:1px solid var(--border)}
+  .btn.ghost:hover{border-color:var(--accent);color:var(--accent)}
+
+  header{text-align:center;padding:72px 0 56px}
+  .owl{width:96px;height:96px;margin:0 auto 18px;display:block}
+  h1{font-size:46px;font-weight:700;letter-spacing:-1px}
+  h1 .fuse{color:var(--accent)}
+  .tag{font-size:20px;font-style:italic;color:var(--accent);margin-top:6px}
+  .blurb{max-width:620px;margin:20px auto 30px;color:var(--muted);font-size:17px}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+
+  section{padding:46px 0;border-top:1px solid #2A1808}
+  h2{font-size:14px;letter-spacing:1.5px;color:var(--accent);text-transform:uppercase;
+    margin-bottom:22px;font-weight:700}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px}
+  .card h3{font-size:16px;margin-bottom:6px}
+  .card p{color:var(--muted);font-size:14px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;
+    vertical-align:middle}
+
+  .twomic{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
+  .mic{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px}
+  .mic .k{font-size:13px;color:var(--accent);font-weight:600}
+  .mic p{color:var(--muted);font-size:14px;margin-top:4px}
+
+  .shot{background:var(--surface2);border:1px dashed var(--border);border-radius:12px;
+    padding:40px;text-align:center;color:var(--dim);font-size:14px}
+
+  .dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}
+  .dl .card{display:flex;flex-direction:column;gap:10px}
+  .dl .plat{font-size:15px;font-weight:600}
+  .dl .note{color:var(--muted);font-size:13px}
+
+  footer{padding:40px 0 60px;text-align:center;color:var(--dim);font-size:13px;
+    border-top:1px solid #2A1808}
+  footer a{color:var(--muted)}
+  @media(max-width:640px){h1{font-size:34px}.twomic{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <svg class="owl" viewBox="0 0 145 100" xmlns="http://www.w3.org/2000/svg" aria-label="LunaVault FuseBox">
+      <defs><mask id="m"><rect width="145" height="100" fill="#fff"/><circle cx="118" cy="8" r="8" fill="#000"/></mask></defs>
+      <circle cx="114" cy="10" r="10" fill="#F0BC28" mask="url(#m)"/>
+      <circle cx="50" cy="50" r="34" fill="#C07838"/><circle cx="50" cy="50" r="34" fill="none" stroke="#925420" stroke-width="3" stroke-dasharray="4 3"/>
+      <circle cx="50" cy="50" r="27" fill="#141414"/><circle cx="50" cy="50" r="23" fill="#060610"/><circle cx="50" cy="50" r="16" fill="#1670C8"/><circle cx="50" cy="50" r="11" fill="#0C4A90"/>
+      <circle cx="52" cy="48" r="6.5" fill="#020210"/><circle cx="56" cy="40" r="4" fill="#fff" fill-opacity=".88"/>
+      <circle cx="112" cy="50" r="21" fill="#C07838"/><circle cx="112" cy="50" r="21" fill="none" stroke="#925420" stroke-width="2.5" stroke-dasharray="3 3"/>
+      <circle cx="112" cy="50" r="16" fill="#141414"/><circle cx="112" cy="50" r="13" fill="#060610"/><circle cx="112" cy="50" r="9" fill="#1670C8"/><circle cx="112" cy="50" r="6" fill="#0C4A90"/>
+      <circle cx="110" cy="48" r="3.5" fill="#020210"/><circle cx="107" cy="42" r="2.5" fill="#fff" fill-opacity=".88"/>
+      <circle cx="84" cy="33" r="4" fill="#1888F4"/><circle cx="82" cy="31" r="1.5" fill="#fff" fill-opacity=".55"/>
+      <rect x="18" y="80" width="112" height="12" rx="6" fill="#7A4018"/><circle cx="29" cy="86" r="3" fill="#5A2E0E"/><circle cx="118" cy="86" r="3" fill="#5A2E0E"/>
+    </svg>
+    <h1>LunaVault <span class="fuse">FuseBox</span></h1>
+    <div class="tag">Preserve every moment. Losslessly.</div>
+    <p class="blurb">Turn a day's worth of camera clips into one properly archived
+      master file — with both microphones kept intact and in sync — plus a quick
+      tool for trimming and colour-grading clips to share.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/LunaLab26/lunalab/releases">Download</a>
+      <a class="btn ghost" href="https://github.com/LunaLab26/lunalab">View on GitHub</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>What it does</h2>
+    <div class="grid">
+      <div class="card"><h3><span class="dot" style="background:var(--accent)"></span>Lossless merge</h3><p>Clips are stream-copied — no re-encode, no quality loss. Mismatched clips are conformed at high quality.</p></div>
+      <div class="card"><h3><span class="dot" style="background:var(--blue)"></span>Two-mic in sync</h3><p>Bluetooth mic and on-board WAV kept as separate tracks, aligned with GCC-PHAT and drift correction.</p></div>
+      <div class="card"><h3><span class="dot" style="background:var(--gold)"></span>Slow-motion aware</h3><p>Detects slow-mo clips and time-stretches the WAV (pitch-corrected) to match the slowed video.</p></div>
+      <div class="card"><h3><span class="dot" style="background:var(--accent)"></span>Colour-grade &amp; share</h3><p>Trim a moment, apply one of 28 film/cinema LUTs, and export a share-ready MP4.</p></div>
+      <div class="card"><h3><span class="dot" style="background:var(--blue)"></span>Pre-flight &amp; live ETA</h3><p>See exactly what the merge will do before you commit, with live MB/s and ETA during the render.</p></div>
+      <div class="card"><h3><span class="dot" style="background:var(--gold)"></span>Light / dark / system</h3><p>A clean, grouped interface that follows your system theme. Windows and Steam Deck ready.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The two-mic idea</h2>
+    <p style="color:var(--muted);max-width:680px">When you record with a wireless mic, the camera saves that mic into the MP4 while a separate WAV preserves the camera's on-board mic. FuseBox keeps both — clarity and a safety net — in one file.</p>
+    <div class="twomic">
+      <div class="mic"><div class="k">Camera track (MP4)</div><p>Wireless Bluetooth mic — close, clear voice. Kept stream-copied, bit-exact.</p></div>
+      <div class="mic"><div class="k">WAV backup</div><p>On-board camera mic — fuller room sound and a safety net. Stored lossless (ALAC).</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Screenshots</h2>
+    <div class="shot">Drop app screenshots into <code>docs/img/</code> and reference them here.</div>
+  </section>
+
+  <section>
+    <h2>Download</h2>
+    <div class="dl">
+      <div class="card"><span class="plat">Windows</span><span class="note">Download the latest build and run LunaVaultFuseBox.exe.</span><a class="btn" href="https://github.com/LunaLab26/lunalab/releases">Get it</a></div>
+      <div class="card"><span class="plat">Steam Deck / Linux</span><span class="note">Run from source with ./run_linux.sh, or grab a build.</span><a class="btn ghost" href="https://github.com/LunaLab26/lunalab#run-from-source">Instructions</a></div>
+    </div>
+  </section>
+
+  <footer>
+    <p><a href="https://github.com/LunaLab26/lunalab">GitHub</a> &nbsp;·&nbsp; App code MIT-licensed &nbsp;·&nbsp; Bundles FFmpeg (GPL)</p>
+    <p style="margin-top:8px">Built with the help of Claude. Preserve every moment. Losslessly.</p>
+  </footer>
+
+</div>
+</body>
+</html>
