@@ -1,0 +1,11 @@
+# Normalise line endings: LF in the repo so the Linux/Steam Deck shell
+# scripts (run_linux.sh, build_linux.sh) check out with LF and stay runnable.
+* text=auto eol=lf
+
+# Windows batch files need CRLF to run correctly
+*.bat text eol=crlf
+
+# Binary assets — never touch line endings
+*.png  binary
+*.jpg  binary
+*.ico  binary

@@ -1,0 +1,131 @@
+
+<h2 class="sr-only">LunaVault FuseBox about tab with larger logo and no repeated name</h2>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0D0905;font-family:system-ui,-apple-system,sans-serif}
+.app{background:#0D0905;border-radius:10px;overflow:hidden;border:1px solid #3A2010;position:relative}
+.bg-glow{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0}
+.tabbar{display:flex;background:#110A04;border-bottom:1px solid #3A2010;padding:0 8px;position:relative;z-index:1}
+.tab{padding:10px 20px;font-size:13px;color:#6A4828;cursor:default;border-bottom:2px solid transparent}
+.tab.active{color:#F5E6D0;border-bottom:2px solid #C07838}
+.content{padding:2rem 2.5rem;position:relative;z-index:1;max-width:700px;margin:0 auto}
+
+/* Hero — logo centred, large */
+.hero{text-align:center;padding-bottom:1.75rem;border-bottom:1px solid #3A2010;margin-bottom:1.75rem}
+.tagline{font-size:13px;color:#6A4828;letter-spacing:.06em;margin-top:.75rem}
+.version-pill{display:inline-block;font-size:10px;font-weight:500;padding:3px 9px;border-radius:20px;background:#1A1008;border:1px solid #3A2010;color:#C07838;margin-top:.6rem}
+
+/* Story */
+.story{font-size:13.5px;color:#C07838;line-height:1.85;margin-bottom:1.25rem}
+.story p{margin-bottom:.9rem}
+.story p:last-child{margin-bottom:0}
+.sig{font-size:14px;color:#F5E6D0;font-weight:500;margin-top:1rem;margin-bottom:1.5rem}
+
+/* Feedback */
+.feedback-btn{display:inline-flex;align-items:center;gap:7px;font-size:12px;padding:8px 18px;border-radius:6px;border:1px solid #3A2010;color:#F5E6D0;background:#1A1008;cursor:default;margin-bottom:1.75rem}
+
+/* Divider */
+.divider{border:none;border-top:1px solid #3A2010;margin:0 0 1.5rem}
+
+/* Credits */
+.credits-label{font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:#6A4828;margin-bottom:.75rem}
+.credit-row{display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid #1A1008}
+.credit-row:last-child{border-bottom:none}
+.credit-name{font-size:12px;font-weight:500;color:#F5E6D0;min-width:160px;flex-shrink:0}
+.credit-desc{font-size:12px;color:#6A4828;flex:1}
+.credit-link{font-size:11px;color:#1670C8;flex-shrink:0}
+</style>
+
+<div class="app">
+  <svg class="bg-glow" viewBox="0 0 720 680" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+    <ellipse cx="360" cy="340" rx="500" ry="420" fill="none" stroke="#3A2010" stroke-width="80" opacity="0.18"/>
+    <ellipse cx="100" cy="200" rx="200" ry="180" fill="#C07838" opacity="0.04"/>
+    <ellipse cx="620" cy="480" rx="160" ry="140" fill="#1670C8" opacity="0.025"/>
+  </svg>
+
+  <div class="tabbar">
+    <div class="tab">  Merge clips  </div>
+    <div class="tab">  WhatsApp clip  </div>
+    <div class="tab">  Log  </div>
+    <div class="tab active">  About  </div>
+    <div class="tab">  Donate  </div>
+  </div>
+
+  <div class="content">
+
+    <!-- Hero: logo only, large, centred -->
+    <div class="hero">
+      <svg viewBox="0 0 370 100" xmlns="http://www.w3.org/2000/svg" style="width:380px;max-width:100%;display:inline-block">
+        <defs>
+          <mask id="ma3"><rect width="370" height="100" fill="white"/><circle cx="118" cy="8" r="8" fill="black"/></mask>
+        </defs>
+        <circle cx="114" cy="10" r="10" fill="#F0BC28" mask="url(#ma3)"/>
+        <circle cx="50" cy="50" r="34" fill="#C07838"/>
+        <circle cx="50" cy="50" r="34" fill="none" stroke="#925420" stroke-width="3" stroke-dasharray="4 3"/>
+        <circle cx="50" cy="50" r="27" fill="#141414"/>
+        <circle cx="50" cy="50" r="23" fill="#060610"/>
+        <circle cx="50" cy="50" r="16" fill="#1670C8"/>
+        <circle cx="50" cy="50" r="11" fill="#0C4A90"/>
+        <circle cx="52" cy="48" r="6.5" fill="#020210"/>
+        <circle cx="56" cy="40" r="4"   fill="rgba(255,255,255,0.88)"/>
+        <circle cx="42" cy="58" r="1.8" fill="rgba(255,255,255,0.28)"/>
+        <circle cx="112" cy="50" r="21" fill="#C07838"/>
+        <circle cx="112" cy="50" r="21" fill="none" stroke="#925420" stroke-width="2.5" stroke-dasharray="3 3"/>
+        <circle cx="112" cy="50" r="16" fill="#141414"/>
+        <circle cx="112" cy="50" r="13" fill="#060610"/>
+        <circle cx="112" cy="50" r="9"  fill="#1670C8"/>
+        <circle cx="112" cy="50" r="6"  fill="#0C4A90"/>
+        <circle cx="110" cy="48" r="3.5" fill="#020210"/>
+        <circle cx="107" cy="42" r="2.5" fill="rgba(255,255,255,0.88)"/>
+        <circle cx="84" cy="33" r="4"   fill="#1888F4"/>
+        <circle cx="84" cy="33" r="4"   fill="none" stroke="rgba(80,170,255,0.4)" stroke-width="2.5"/>
+        <circle cx="82" cy="31" r="1.5" fill="rgba(255,255,255,0.55)"/>
+        <rect x="18" y="80" width="112" height="12" rx="6" fill="#7A4018"/>
+        <circle cx="29" cy="86" r="3" fill="#5A2E0E"/>
+        <circle cx="118" cy="86" r="3" fill="#5A2E0E"/>
+        <text x="148" y="50" font-family="system-ui,-apple-system,sans-serif" font-size="30" font-weight="500" fill="#F5E6D0">LunaVault</text>
+        <text x="150" y="71" font-family="system-ui,-apple-system,sans-serif" font-size="15" font-weight="400" fill="#C07838">FuseBox</text>
+      </svg>
+      <div class="tagline">Preserve every moment. Losslessly.</div>
+      <div><div class="version-pill">Version 1.2.0</div></div>
+    </div>
+
+    <!-- Story -->
+    <div class="story">
+      <p>Hello — I'm John.</p>
+      <p>I want my toddler to grow up remembering our family time in high-quality video. My goal was a streamlined solution for bundling clips from each day or occasion into a single master file — good enough to upload to YouTube and archive to Jottacloud unlimited storage. I absolutely love my Luna Ultra camera for capturing family memories, and LunaVault FuseBox was born from that passion.</p>
+      <p>I originally built this app with the help of Claude AI by Anthropic — as a means of achieving lossless video archiving from the Luna Ultra. But it isn't limited to one camera. I wanted it to be flexible across mobile phones, action cameras, DSLRs, drones, and gimbal cameras.</p>
+      <p>This app is free for anyone who shares that passion. If it saves you time or helps preserve something precious, that's everything.</p>
+    </div>
+    <div class="sig">— John</div>
+
+    <div class="feedback-btn">✉&nbsp; Send feedback or say hello ↗</div>
+
+    <hr class="divider">
+
+    <div class="credits-label">Built with</div>
+    <div>
+      <div class="credit-row">
+        <div class="credit-name">Claude AI · Anthropic</div>
+        <div class="credit-desc">App design and development</div>
+        <div class="credit-link">claude.ai ↗</div>
+      </div>
+      <div class="credit-row">
+        <div class="credit-name">FFmpeg</div>
+        <div class="credit-desc">The multimedia engine powering all video operations</div>
+        <div class="credit-link">ffmpeg.org ↗</div>
+      </div>
+      <div class="credit-row">
+        <div class="credit-name">PySide6 · Qt</div>
+        <div class="credit-desc">User interface framework</div>
+        <div class="credit-link">qt.io ↗</div>
+      </div>
+      <div class="credit-row">
+        <div class="credit-name">Python</div>
+        <div class="credit-desc">The language this app is written in</div>
+        <div class="credit-link">python.org ↗</div>
+      </div>
+    </div>
+
+  </div>
+</div>

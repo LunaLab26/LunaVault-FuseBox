@@ -1,0 +1,30 @@
+# ── Build artifacts ──────────────────────────────────────────────
+/dist/
+/build/
+__pycache__/
+*.pyc
+_temp/
+_lvfb_temp/
+~partial_*
+
+# ── Virtual environments ─────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Bundled ffmpeg binaries (large; downloaded per-platform) ─────
+/bin/ffmpeg
+/bin/ffmpeg.exe
+/bin/ffprobe
+/bin/ffprobe.exe
+
+# ── Offline pip wheels (large; re-downloadable from PyPI) ─────────
+/wheels/
+
+# ── App runtime state ────────────────────────────────────────────
+export_log.json
+settings.json
+
+# ── OS cruft ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

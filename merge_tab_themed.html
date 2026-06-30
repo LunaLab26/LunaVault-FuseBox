@@ -1,0 +1,202 @@
+
+<h2 class="sr-only">LunaVault FuseBox merge tab mockup in warm dark theme</h2>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0D0905;font-family:system-ui,-apple-system,sans-serif}
+.app{background:#0D0905;border-radius:10px;overflow:hidden;border:1px solid #3A2010}
+
+/* Tab bar */
+.tabbar{display:flex;background:#110A04;border-bottom:1px solid #3A2010;padding:0 8px}
+.tab{padding:10px 20px;font-size:13px;color:#6A4828;cursor:default;border-bottom:2px solid transparent}
+.tab.active{color:#F5E6D0;border-bottom:2px solid #C07838}
+
+/* Main content */
+.content{display:grid;grid-template-columns:1fr 300px;gap:0;min-height:560px}
+
+/* Left panel */
+.left{padding:16px;border-right:1px solid #3A2010}
+.right{padding:16px;background:#0A0703}
+
+/* Folder row */
+.folder-row{display:flex;gap:8px;margin-bottom:14px;align-items:center}
+.folder-input{flex:1;background:#150D05;border:1px solid #3A2010;border-radius:6px;padding:7px 10px;font-size:12px;color:#C07838;font-family:monospace}
+.btn-browse{background:#1A1008;border:1px solid #3A2010;border-radius:6px;padding:7px 12px;font-size:12px;color:#C07838;cursor:default;white-space:nowrap}
+.btn-browse:hover{border-color:#C07838}
+
+/* Section label */
+.sec-label{font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.07em;color:#6A4828;margin-bottom:8px}
+
+/* Clip list */
+.clip-list{background:#0A0703;border:1px solid #3A2010;border-radius:8px;overflow:hidden;margin-bottom:14px}
+.clip-header{display:grid;grid-template-columns:24px 1fr 80px 80px 28px;gap:6px;padding:7px 10px;border-bottom:1px solid #3A2010;font-size:10px;color:#6A4828;text-transform:uppercase;letter-spacing:.05em}
+.clip-row{display:grid;grid-template-columns:24px 1fr 80px 80px 28px;gap:6px;padding:8px 10px;border-bottom:1px solid #1A1008;align-items:center}
+.clip-row:last-child{border-bottom:none}
+.clip-row.selected{background:#1A1008}
+.chk{width:14px;height:14px;border:1px solid #3A2010;border-radius:3px;background:#150D05;display:flex;align-items:center;justify-content:center}
+.chk.on{background:#C07838;border-color:#C07838}
+.chk.on::after{content:'✓';font-size:9px;color:#F5E6D0}
+.clip-name{font-size:12px;color:#F5E6D0;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.clip-dur{font-size:11px;color:#6A4828;text-align:right}
+.res-badge{font-size:9px;padding:2px 5px;border-radius:3px;text-align:center;white-space:nowrap}
+.res-4k{background:#1A2A1A;color:#4ade80;border:1px solid #1F4A1F}
+.res-8k{background:#1A1A2A;color:#60a5fa;border:1px solid #1A1A4A}
+.wav-dot{width:8px;height:8px;border-radius:50%;margin:auto}
+.wav-on{background:#C07838}
+.wav-off{background:#3A2010}
+
+/* Audio mode */
+.audio-group{margin-bottom:14px}
+.radio-row{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border-radius:6px;margin-bottom:4px;border:1px solid #3A2010;background:#0A0703;cursor:default}
+.radio-row.selected{border-color:#C07838;background:#1A1008}
+.radio-dot{width:14px;height:14px;border-radius:50%;border:1.5px solid #3A2010;flex-shrink:0;margin-top:1px;display:flex;align-items:center;justify-content:center}
+.radio-dot.on{border-color:#C07838}
+.radio-dot.on::after{content:'';width:6px;height:6px;border-radius:50%;background:#C07838;display:block}
+.radio-text{font-size:12px;color:#F5E6D0}
+.radio-sub{font-size:11px;color:#6A4828;margin-top:2px}
+.warn-label{font-size:10px;color:#D97B22;margin-top:3px}
+
+/* Output fields */
+.field-group{margin-bottom:14px}
+.field-label{font-size:11px;color:#6A4828;margin-bottom:4px}
+.field-input{width:100%;background:#150D05;border:1px solid #3A2010;border-radius:6px;padding:7px 10px;font-size:12px;color:#C07838;font-family:monospace}
+
+/* Grade */
+.select-box{width:100%;background:#150D05;border:1px solid #3A2010;border-radius:6px;padding:7px 10px;font-size:12px;color:#F5E6D0;margin-bottom:14px}
+
+/* Bottom bar */
+.bottom-bar{border-top:1px solid #3A2010;padding:12px 16px;display:flex;align-items:center;gap:12px;background:#0A0703}
+.progress-track{flex:1;height:6px;background:#1A1008;border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;width:0%;background:#C07838;border-radius:3px}
+.btn-merge{background:#C07838;border:none;border-radius:6px;padding:9px 28px;font-size:13px;font-weight:500;color:#F5E6D0;cursor:default;white-space:nowrap}
+.status-txt{font-size:11px;color:#6A4828}
+
+/* Right panel sections */
+.divider{border:none;border-top:1px solid #3A2010;margin:14px 0}
+</style>
+
+<div class="app">
+  <div class="tabbar">
+    <div class="tab active">  Merge clips  </div>
+    <div class="tab">  WhatsApp clip  </div>
+    <div class="tab">  Log  </div>
+    <div class="tab">  About  </div>
+    <div class="tab">  Donate  </div>
+  </div>
+
+  <div class="content">
+    <!-- LEFT -->
+    <div class="left">
+      <div class="sec-label">Source folder</div>
+      <div class="folder-row">
+        <div class="folder-input">D:\Family\2026-06-27_Beach_Day</div>
+        <div class="btn-browse">Browse…</div>
+      </div>
+
+      <div class="sec-label">Clips detected — 4 files</div>
+      <div class="clip-list">
+        <div class="clip-header">
+          <div></div><div>Filename</div><div>Duration</div><div>Resolution</div><div>WAV</div>
+        </div>
+        <div class="clip-row selected">
+          <div class="chk on"></div>
+          <div class="clip-name">VID_20260627_091111_081.mp4</div>
+          <div class="clip-dur">00:03:42</div>
+          <div><span class="res-badge res-4k">4K</span></div>
+          <div class="wav-dot wav-on"></div>
+        </div>
+        <div class="clip-row">
+          <div class="chk on"></div>
+          <div class="clip-name">VID_20260627_091313_082.mp4</div>
+          <div class="clip-dur">00:05:18</div>
+          <div><span class="res-badge res-4k">4K</span></div>
+          <div class="wav-dot wav-on"></div>
+        </div>
+        <div class="clip-row">
+          <div class="chk on"></div>
+          <div class="clip-name">VID_20260627_094501_083.mp4</div>
+          <div class="clip-dur">00:02:07</div>
+          <div><span class="res-badge res-8k">8K</span></div>
+          <div class="wav-dot wav-off"></div>
+        </div>
+        <div class="clip-row">
+          <div class="chk on"></div>
+          <div class="clip-name">DJI_0042.mp4</div>
+          <div class="clip-dur">00:01:55</div>
+          <div><span class="res-badge res-4k">4K</span></div>
+          <div class="wav-dot wav-off"></div>
+        </div>
+      </div>
+
+      <div class="sec-label">⚠ Resolution mismatch detected</div>
+      <div style="background:#1A1008;border:1px solid #3A2010;border-radius:8px;padding:10px 12px;margin-bottom:14px">
+        <div style="font-size:12px;color:#F5E6D0;margin-bottom:6px">1 clip is 8K — differs from baseline (4K). How would you like to handle it?</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <div style="font-size:11px;padding:4px 10px;border-radius:4px;border:1px solid #C07838;color:#C07838;background:#1A1008;cursor:default">Downscale to 4K</div>
+          <div style="font-size:11px;padding:4px 10px;border-radius:4px;border:1px solid #3A2010;color:#6A4828;cursor:default">Upscale all to 8K</div>
+          <div style="font-size:11px;padding:4px 10px;border-radius:4px;border:1px solid #3A2010;color:#6A4828;cursor:default">Separate file</div>
+          <div style="font-size:11px;padding:4px 10px;border-radius:4px;border:1px solid #3A2010;color:#6A4828;cursor:default">Drop 8K clip</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div class="right">
+      <div class="sec-label">Audio track</div>
+      <div class="audio-group">
+        <div class="radio-row">
+          <div class="radio-dot"></div>
+          <div>
+            <div class="radio-text">Camera mic only</div>
+            <div class="radio-sub">Use built-in camera audio</div>
+          </div>
+        </div>
+        <div class="radio-row selected">
+          <div class="radio-dot on"></div>
+          <div>
+            <div class="radio-text">WAV backup only</div>
+            <div class="radio-sub">Replace with external recorder</div>
+          </div>
+        </div>
+        <div class="radio-row">
+          <div class="radio-dot"></div>
+          <div>
+            <div class="radio-text">Mixed — Camera + WAV 50/50</div>
+            <div class="radio-sub">Blend both sources</div>
+            <div class="warn-label">⚠ May cause echo if both mics were in the same room</div>
+          </div>
+        </div>
+      </div>
+
+      <hr class="divider">
+
+      <div class="sec-label">Colour grade</div>
+      <div class="select-box" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Natural</span><span style="color:#6A4828">▾</span>
+      </div>
+
+      <div class="sec-label">Output folder</div>
+      <div class="field-group">
+        <div class="field-input">D:\Family\Merged</div>
+      </div>
+
+      <div class="sec-label">Output filename</div>
+      <div class="field-group">
+        <div class="field-input">2026-06-27_Beach_Day.mov</div>
+      </div>
+
+      <hr class="divider">
+
+      <div style="background:#1A1008;border:1px solid #3A2010;border-radius:8px;padding:10px 12px;margin-bottom:14px">
+        <div style="font-size:10px;color:#6A4828;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Estimated transcode time</div>
+        <div style="font-size:12px;color:#F5E6D0">Best: <span style="color:#4ade80">~4 min</span> (GPU)</div>
+        <div style="font-size:12px;color:#F5E6D0">Worst: <span style="color:#C07838">~18 min</span> (CPU only)</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <div class="status-txt">Ready — 4 clips · 13:02 total</div>
+    <div class="progress-track"><div class="progress-fill"></div></div>
+    <div class="btn-merge">Merge clips</div>
+  </div>
+</div>

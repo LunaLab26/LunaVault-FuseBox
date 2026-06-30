@@ -1,0 +1,187 @@
+
+<h2 class="sr-only">LunaVault FuseBox donations tab mockup in warm dark theme</h2>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0D0905;font-family:system-ui,-apple-system,sans-serif}
+.app{background:#0D0905;border-radius:10px;overflow:hidden;border:1px solid #3A2010}
+.tabbar{display:flex;background:#110A04;border-bottom:1px solid #3A2010;padding:0 8px}
+.tab{padding:10px 20px;font-size:13px;color:#6A4828;cursor:default;border-bottom:2px solid transparent}
+.tab.active{color:#F5E6D0;border-bottom:2px solid #C07838}
+.content{padding:2rem 2.5rem;max-width:700px;margin:0 auto}
+
+/* Message */
+.message{font-size:15px;color:#C07838;line-height:1.8;margin-bottom:.75rem;font-style:italic}
+.message p{margin-bottom:.6rem}
+.sig{font-size:14px;color:#F5E6D0;font-weight:500;margin-top:.75rem;margin-bottom:1.75rem}
+
+/* Divider */
+.divider{border:none;border-top:1px solid #3A2010;margin:1.5rem 0}
+
+/* Crypto grid */
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:1.5rem}
+.card{background:#1A1008;border:1px solid #3A2010;border-radius:12px;padding:1.1rem;text-align:center}
+.card:hover{border-color:#C07838}
+.network-pill{display:inline-block;font-size:10px;font-weight:500;padding:3px 9px;border-radius:20px;margin-bottom:.6rem}
+.pill-ln{background:#2A1A08;color:#F0BC28;border:1px solid #3A2010}
+.pill-btc{background:#2A1A08;color:#C07838;border:1px solid #3A2010}
+.pill-eth{background:#0A1A2A;color:#1888F4;border:1px solid #0C2040}
+.crypto-name{font-size:13px;font-weight:500;color:#F5E6D0;margin-bottom:.75rem}
+
+/* QR placeholder */
+.qr{width:96px;height:96px;margin:0 auto .75rem;background:#0D0905;border:1px solid #3A2010;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.addr{font-size:9px;color:#6A4828;font-family:monospace;word-break:break-all;margin-bottom:.75rem;line-height:1.5;padding:0 4px}
+.copy-btn{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;font-size:11px;padding:6px 10px;border-radius:6px;border:1px solid #3A2010;color:#C07838;background:#0D0905;cursor:default}
+.copy-btn:hover{border-color:#C07838;background:#1A1008}
+
+/* Feedback row */
+.feedback-row{background:#1A1008;border:1px solid #3A2010;border-radius:10px;padding:1rem 1.25rem;display:flex;align-items:center;justify-content:space-between;gap:1rem}
+.feedback-text{font-size:13px;color:#6A4828;line-height:1.5}
+.feedback-btn{display:flex;align-items:center;gap:6px;font-size:12px;padding:8px 16px;border-radius:6px;border:1px solid #3A2010;color:#F5E6D0;background:#0D0905;cursor:default;white-space:nowrap}
+.feedback-btn:hover{border-color:#C07838;color:#C07838}
+</style>
+
+<div class="app">
+  <div class="tabbar">
+    <div class="tab">  Merge clips  </div>
+    <div class="tab">  WhatsApp clip  </div>
+    <div class="tab">  Log  </div>
+    <div class="tab">  About  </div>
+    <div class="tab active">  Donate  </div>
+  </div>
+
+  <div class="content">
+
+    <div class="message">
+      <p>There's nothing quite like a good coffee on the road with my wife and toddler.</p>
+      <p>LunaVault FuseBox is free for anyone who benefits from it — because preserving those special moments is its own reward. If you'd like to buy me a coffee along the way, it means the world and keeps this project going.</p>
+      <p>Thank you for your support.</p>
+    </div>
+    <div class="sig">— John</div>
+
+    <div class="grid">
+
+      <!-- Lightning -->
+      <div class="card">
+        <div class="network-pill pill-ln">⚡ Lightning Network</div>
+        <div class="crypto-name">Bitcoin Lightning</div>
+        <div class="qr">
+          <svg width="86" height="86" viewBox="0 0 86 86">
+            <rect width="86" height="86" fill="#0D0905"/>
+            <rect x="5" y="5" width="22" height="22" rx="2" fill="#C07838"/>
+            <rect x="8" y="8" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="11" y="11" width="10" height="10" rx="1" fill="#C07838"/>
+            <rect x="59" y="5" width="22" height="22" rx="2" fill="#C07838"/>
+            <rect x="62" y="8" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="65" y="11" width="10" height="10" rx="1" fill="#C07838"/>
+            <rect x="5" y="59" width="22" height="22" rx="2" fill="#C07838"/>
+            <rect x="8" y="62" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="11" y="65" width="10" height="10" rx="1" fill="#C07838"/>
+            <g fill="#C07838">
+              <rect x="33" y="5" width="4" height="4"/><rect x="41" y="5" width="4" height="4"/>
+              <rect x="49" y="5" width="4" height="4"/><rect x="33" y="13" width="4" height="4"/>
+              <rect x="49" y="13" width="4" height="4"/><rect x="41" y="21" width="4" height="4"/>
+              <rect x="5" y="33" width="4" height="4"/><rect x="13" y="33" width="4" height="4"/>
+              <rect x="33" y="33" width="4" height="4"/><rect x="49" y="33" width="4" height="4"/>
+              <rect x="57" y="33" width="4" height="4"/><rect x="73" y="33" width="4" height="4"/>
+              <rect x="5" y="41" width="4" height="4"/><rect x="41" y="41" width="4" height="4"/>
+              <rect x="65" y="41" width="4" height="4"/><rect x="73" y="41" width="4" height="4"/>
+              <rect x="5" y="49" width="4" height="4"/><rect x="13" y="49" width="4" height="4"/>
+              <rect x="33" y="49" width="4" height="4"/><rect x="57" y="49" width="4" height="4"/>
+              <rect x="33" y="57" width="4" height="4"/><rect x="41" y="57" width="4" height="4"/>
+              <rect x="65" y="57" width="4" height="4"/><rect x="73" y="65" width="4" height="4"/>
+              <rect x="33" y="65" width="4" height="4"/><rect x="49" y="65" width="4" height="4"/>
+              <rect x="41" y="73" width="4" height="4"/><rect x="57" y="73" width="4" height="4"/>
+              <rect x="65" y="73" width="4" height="4"/>
+            </g>
+          </svg>
+        </div>
+        <div class="addr">jdm525@strike.me</div>
+        <div class="copy-btn">⎘ Copy address</div>
+      </div>
+
+      <!-- BTC -->
+      <div class="card">
+        <div class="network-pill pill-btc">₿ Bitcoin on-chain</div>
+        <div class="crypto-name">Bitcoin</div>
+        <div class="qr">
+          <svg width="86" height="86" viewBox="0 0 86 86">
+            <rect width="86" height="86" fill="#0D0905"/>
+            <rect x="5" y="5" width="22" height="22" rx="2" fill="#C07838"/>
+            <rect x="8" y="8" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="11" y="11" width="10" height="10" rx="1" fill="#C07838"/>
+            <rect x="59" y="5" width="22" height="22" rx="2" fill="#C07838"/>
+            <rect x="62" y="8" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="65" y="11" width="10" height="10" rx="1" fill="#C07838"/>
+            <rect x="5" y="59" width="22" height="22" rx="2" fill="#C07838"/>
+            <rect x="8" y="62" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="11" y="65" width="10" height="10" rx="1" fill="#C07838"/>
+            <g fill="#C07838">
+              <rect x="41" y="5" width="4" height="4"/><rect x="49" y="5" width="4" height="4"/>
+              <rect x="33" y="13" width="4" height="4"/><rect x="41" y="13" width="4" height="4"/>
+              <rect x="33" y="21" width="4" height="4"/><rect x="49" y="21" width="4" height="4"/>
+              <rect x="5" y="33" width="4" height="4"/><rect x="21" y="33" width="4" height="4"/>
+              <rect x="57" y="33" width="4" height="4"/><rect x="73" y="33" width="4" height="4"/>
+              <rect x="13" y="41" width="4" height="4"/><rect x="33" y="41" width="4" height="4"/>
+              <rect x="41" y="41" width="4" height="4"/><rect x="65" y="41" width="4" height="4"/>
+              <rect x="5" y="49" width="4" height="4"/><rect x="33" y="49" width="4" height="4"/>
+              <rect x="49" y="49" width="4" height="4"/><rect x="57" y="49" width="4" height="4"/>
+              <rect x="33" y="57" width="4" height="4"/><rect x="49" y="57" width="4" height="4"/>
+              <rect x="73" y="57" width="4" height="4"/><rect x="41" y="65" width="4" height="4"/>
+              <rect x="57" y="65" width="4" height="4"/><rect x="65" y="65" width="4" height="4"/>
+              <rect x="33" y="73" width="4" height="4"/><rect x="49" y="73" width="4" height="4"/>
+              <rect x="65" y="73" width="4" height="4"/><rect x="73" y="73" width="4" height="4"/>
+            </g>
+          </svg>
+        </div>
+        <div class="addr">bc1qzdl6wmqxjchxz0drrmymh0qxhq86z0sq2lcc95</div>
+        <div class="copy-btn">⎘ Copy address</div>
+      </div>
+
+      <!-- ETH -->
+      <div class="card">
+        <div class="network-pill pill-eth">⟠ Ethereum ERC-20</div>
+        <div class="crypto-name">Ethereum</div>
+        <div class="qr">
+          <svg width="86" height="86" viewBox="0 0 86 86">
+            <rect width="86" height="86" fill="#0D0905"/>
+            <rect x="5" y="5" width="22" height="22" rx="2" fill="#1670C8"/>
+            <rect x="8" y="8" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="11" y="11" width="10" height="10" rx="1" fill="#1670C8"/>
+            <rect x="59" y="5" width="22" height="22" rx="2" fill="#1670C8"/>
+            <rect x="62" y="8" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="65" y="11" width="10" height="10" rx="1" fill="#1670C8"/>
+            <rect x="5" y="59" width="22" height="22" rx="2" fill="#1670C8"/>
+            <rect x="8" y="62" width="16" height="16" rx="1" fill="#0D0905"/>
+            <rect x="11" y="65" width="10" height="10" rx="1" fill="#1670C8"/>
+            <g fill="#1670C8">
+              <rect x="33" y="5" width="4" height="4"/><rect x="49" y="5" width="4" height="4"/>
+              <rect x="41" y="13" width="4" height="4"/><rect x="57" y="13" width="4" height="4"/>
+              <rect x="33" y="21" width="4" height="4"/><rect x="41" y="21" width="4" height="4"/>
+              <rect x="49" y="21" width="4" height="4"/><rect x="5" y="33" width="4" height="4"/>
+              <rect x="13" y="33" width="4" height="4"/><rect x="57" y="33" width="4" height="4"/>
+              <rect x="73" y="33" width="4" height="4"/><rect x="13" y="41" width="4" height="4"/>
+              <rect x="21" y="41" width="4" height="4"/><rect x="41" y="41" width="4" height="4"/>
+              <rect x="65" y="41" width="4" height="4"/><rect x="5" y="49" width="4" height="4"/>
+              <rect x="33" y="49" width="4" height="4"/><rect x="49" y="49" width="4" height="4"/>
+              <rect x="57" y="49" width="4" height="4"/><rect x="33" y="57" width="4" height="4"/>
+              <rect x="41" y="57" width="4" height="4"/><rect x="65" y="57" width="4" height="4"/>
+              <rect x="73" y="57" width="4" height="4"/><rect x="33" y="65" width="4" height="4"/>
+              <rect x="49" y="65" width="4" height="4"/><rect x="73" y="65" width="4" height="4"/>
+              <rect x="41" y="73" width="4" height="4"/><rect x="57" y="73" width="4" height="4"/>
+              <rect x="65" y="73" width="4" height="4"/>
+            </g>
+          </svg>
+        </div>
+        <div class="addr">0x04e5c9567581d6e82ee96656c46328460314fa4c</div>
+        <div class="copy-btn">⎘ Copy address</div>
+      </div>
+
+    </div>
+
+    <div class="feedback-row">
+      <div class="feedback-text">Have a question, bug report, or just want to say hello?<br>John reads every message.</div>
+      <div class="feedback-btn">✉ Send feedback ↗</div>
+    </div>
+
+  </div>
+</div>

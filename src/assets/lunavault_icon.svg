@@ -1,0 +1,34 @@
+<svg viewBox="0 0 145 100" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <mask id="ma"><rect width="145" height="100" fill="white"/><circle cx="118" cy="8" r="8" fill="black"/></mask>
+  </defs>
+  <!-- Gold crescent moon -->
+  <circle cx="114" cy="10" r="10" fill="#F0BC28" mask="url(#ma)"/>
+  <!-- Left eye (larger) -->
+  <circle cx="50" cy="50" r="34" fill="#C07838"/>
+  <circle cx="50" cy="50" r="34" fill="none" stroke="#925420" stroke-width="3" stroke-dasharray="4 3"/>
+  <circle cx="50" cy="50" r="27" fill="#141414"/>
+  <circle cx="50" cy="50" r="23" fill="#060610"/>
+  <circle cx="50" cy="50" r="16" fill="#1670C8"/>
+  <circle cx="50" cy="50" r="11" fill="#0C4A90"/>
+  <circle cx="52" cy="48" r="6.5" fill="#020210"/>
+  <circle cx="56" cy="40" r="4"   fill="#ffffff" fill-opacity="0.88"/>
+  <circle cx="42" cy="58" r="1.8" fill="#ffffff" fill-opacity="0.28"/>
+  <!-- Right eye (smaller) -->
+  <circle cx="112" cy="50" r="21" fill="#C07838"/>
+  <circle cx="112" cy="50" r="21" fill="none" stroke="#925420" stroke-width="2.5" stroke-dasharray="3 3"/>
+  <circle cx="112" cy="50" r="16" fill="#141414"/>
+  <circle cx="112" cy="50" r="13" fill="#060610"/>
+  <circle cx="112" cy="50" r="9"  fill="#1670C8"/>
+  <circle cx="112" cy="50" r="6"  fill="#0C4A90"/>
+  <circle cx="110" cy="48" r="3.5" fill="#020210"/>
+  <circle cx="107" cy="42" r="2.5" fill="#ffffff" fill-opacity="0.88"/>
+  <!-- Blue dot between eyes -->
+  <circle cx="84" cy="33" r="4"   fill="#1888F4"/>
+  <circle cx="84" cy="33" r="4"   fill="none" stroke="#50AAFF" stroke-opacity="0.4" stroke-width="2.5"/>
+  <circle cx="82" cy="31" r="1.5" fill="#ffffff" fill-opacity="0.55"/>
+  <!-- Camera bar -->
+  <rect x="18" y="80" width="112" height="12" rx="6" fill="#7A4018"/>
+  <circle cx="29" cy="86" r="3" fill="#5A2E0E"/>
+  <circle cx="118" cy="86" r="3" fill="#5A2E0E"/>
+</svg>
