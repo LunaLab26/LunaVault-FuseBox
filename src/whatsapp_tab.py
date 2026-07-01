@@ -364,14 +364,12 @@ class WhatsAppTab(QWidget):
         self._preview_label = QLabel("Select a source file to preview")
         self._preview_label.setFixedSize(426, 240)
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_label.setStyleSheet("background:#111; border-radius:6px; color:#888;")
         self._preview_label.setWordWrap(True)
         preview_pane.addWidget(self._preview_label)
 
         # Before/after caption
         self._ba_caption = QLabel()
         self._ba_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._ba_caption.setStyleSheet("color:#888; font-size:11px;")
         preview_pane.addWidget(self._ba_caption)
 
         # Timeline scrubber
@@ -387,10 +385,7 @@ class WhatsAppTab(QWidget):
         self._tl_in_lbl  = QLabel("In: —")
         self._tl_pos_lbl = QLabel("—")
         self._tl_out_lbl = QLabel("Out: —")
-        self._tl_in_lbl.setStyleSheet("color:#27ae60; font-size:10px;")
-        self._tl_pos_lbl.setStyleSheet("color:#aaa; font-size:10px;")
         self._tl_pos_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._tl_out_lbl.setStyleSheet("color:#e74c3c; font-size:10px;")
         self._tl_out_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         tl_labels.addWidget(self._tl_in_lbl)
         tl_labels.addWidget(self._tl_pos_lbl, 1)
@@ -439,7 +434,6 @@ class WhatsAppTab(QWidget):
         out_grid.addWidget(out_dir_btn, 1, 2)
 
         self._size_label = QLabel()
-        self._size_label.setStyleSheet("color:#888; font-size:11px;")
         out_grid.addWidget(self._size_label, 2, 1)
 
         root.addLayout(out_grid)
@@ -463,7 +457,6 @@ class WhatsAppTab(QWidget):
         thumb_row = QHBoxLayout()
         self._thumb_label = QLabel()
         self._thumb_label.setFixedSize(240, 135)
-        self._thumb_label.setStyleSheet("background:#111; border-radius:4px;")
         self._thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._thumb_label.setText("Rendering…")
         thumb_row.addWidget(self._thumb_label)
@@ -562,7 +555,8 @@ class WhatsAppTab(QWidget):
                 current_group = grade.group
                 group_lbl = QLabel(current_group)
                 group_lbl.setStyleSheet(
-                    "color:#888; font-size:10px; font-weight:bold; margin-top:6px;"
+                    f"color:{theme.active_palette().text_mute}; font-size:10px; "
+                    "font-weight:bold; margin-top:6px;"
                 )
                 self._grade_grid.addWidget(group_lbl)
             btn = GradeButton(grade, grade.display_name)

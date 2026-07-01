@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor, QFont
 
 import log_manager
+import theme
 
 
 # Column indices
@@ -91,7 +92,7 @@ class LogTab(QWidget):
         detail_layout = QVBoxLayout(detail_frame)
         detail_layout.setContentsMargins(0, 4, 0, 0)
         detail_lbl = QLabel("Details")
-        detail_lbl.setStyleSheet("font-weight:bold; color:#aaa;")
+        detail_lbl.setStyleSheet(f"font-weight:bold; color:{theme.active_palette().text_mute};")
         detail_layout.addWidget(detail_lbl)
         self._detail = QTextEdit()
         self._detail.setReadOnly(True)
@@ -105,7 +106,7 @@ class LogTab(QWidget):
 
         # Status bar
         self._status_lbl = QLabel()
-        self._status_lbl.setStyleSheet("color:#888; font-size:11px;")
+        self._status_lbl.setStyleSheet(f"color:{theme.active_palette().text_mute}; font-size:11px;")
         root.addWidget(self._status_lbl)
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -152,11 +153,12 @@ class LogTab(QWidget):
                 self._table.setItem(row, col, item)
 
             # Colour the status cell
+            p = theme.active_palette()
             status_item = self._table.item(row, COL_STATUS)
             if success:
-                status_item.setForeground(QColor("#2ecc71"))
+                status_item.setForeground(QColor(p.ok))
             else:
-                status_item.setForeground(QColor("#e74c3c"))
+                status_item.setForeground(QColor(p.danger))
 
         n = len(self._entries)
         ok  = sum(1 for e in self._entries if e.get("success"))

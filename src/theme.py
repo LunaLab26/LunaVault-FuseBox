@@ -45,10 +45,20 @@ class Palette:
     press_bg: str
     disabled_bg: str
     disabled_fg: str
-    # Semantic status (warm-tuned)
+    # Semantic status (warm-tuned) + the text colour that sits on each status fill
     ok: str
+    ok_fg: str
     warn: str
+    warn_fg: str
     danger: str
+    danger_fg: str
+    # One-off banner backgrounds (caution / info strips) — paired with `text` as fg
+    banner_warn: str
+    banner_info: str
+    # Dedicated colour for monospace path / order-index text (kept off the accent)
+    path: str
+    # Subtle accent-tinted wash for selected table rows
+    selected_row: str
     # Pane radial gradient stops
     pane_0: str
     pane_1: str
@@ -58,34 +68,42 @@ class Palette:
 
     def on_accent(self) -> str:
         """Readable text colour on top of an accent fill."""
-        return self.bg if not self.is_light else "#FBF6EE"
+        return "#1A1206" if not self.is_light else "#FFF6EC"
 
 
 DARK = Palette(
     name="dark",
-    bg="#0D0905", panel="#100806", surface="#160C06", surface2="#1A1008",
+    bg="#0E0A06", panel="#100806", surface="#18110A", surface2="#20170D",
     alt_row="#130A04", input_dk="#0A0703",
-    border_dk="#2A1808", border="#3A2010", border_hi="#5A3018",
-    accent="#C07838", accent_hi="#E09040", gold="#E8B838", blue="#2D7FD0",
-    text="#F5E6D0", text_mute="#A09080", text_dim="#6A4828",
+    border_dk="#26190E", border="#26190E", border_hi="#5A3018",
+    accent="#D4863C", accent_hi="#E0954A", gold="#E8B838", blue="#2D7FD0",
+    text="#F6E9D6", text_mute="#A6845C", text_dim="#C6A279",
     btn_bg="#3A2010", hover_bg="#4A2A14", press_bg="#2A1808",
     disabled_bg="#1A0E06", disabled_fg="#4A3020",
-    ok="#3FB873", warn="#D9882B", danger="#D9533F",
-    pane_0="#1C0F06", pane_1="#120A04", pane_2="#0D0905",
+    ok="#3FB765", ok_fg="#08130A",
+    warn="#E0A33A", warn_fg="#1A1206",
+    danger="#E0685A", danger_fg="#1A0A08",
+    banner_warn="#4A3013", banner_info="#1A2A3A",
+    path="#C6A279", selected_row="rgba(212,134,60,0.16)",
+    pane_0="#1C0F06", pane_1="#120A04", pane_2="#0E0A06",
     is_light=False,
 )
 
 LIGHT = Palette(
     name="light",
-    bg="#FBF6EE", panel="#F2E9DB", surface="#FFFDF9", surface2="#FFFFFF",
+    bg="#EFE7D9", panel="#E7DCCB", surface="#FBF6EC", surface2="#FFFFFF",
     alt_row="#F6EFE3", input_dk="#F0E7D8",
-    border_dk="#E6DAC8", border="#DDCDB6", border_hi="#C9B596",
-    accent="#B0682C", accent_hi="#C8823E", gold="#D9A41E", blue="#2D7FD0",
-    text="#2A1808", text_mute="#7A6A56", text_dim="#A9947B",
+    border_dk="#E4D7C2", border="#E4D7C2", border_hi="#C9B596",
+    accent="#C0742E", accent_hi="#A9611F", gold="#D9A41E", blue="#2D7FD0",
+    text="#2A1E12", text_mute="#7A6446", text_dim="#96805C",
     btn_bg="#EFE5D5", hover_bg="#E7D9C4", press_bg="#DDCDB6",
     disabled_bg="#F0E9DD", disabled_fg="#B8A98F",
-    ok="#2E9E5B", warn="#B5701C", danger="#C0432F",
-    pane_0="#FFFDF9", pane_1="#FBF6EE", pane_2="#F4ECDF",
+    ok="#2E9E57", ok_fg="#FFFFFF",
+    warn="#CE9A22", warn_fg="#241A06",
+    danger="#C6473A", danger_fg="#FFFFFF",
+    banner_warn="#F6E4B8", banner_info="#DCE7F5",
+    path="#A65E22", selected_row="rgba(192,116,46,0.12)",
+    pane_0="#FBF6EC", pane_1="#EFE7D9", pane_2="#F4ECDF",
     is_light=True,
 )
 
@@ -129,12 +147,12 @@ def build_qss(p: Palette) -> str:
         f"border:1px solid {p.border}; outline:none; }}"
         f"QTableWidget {{ background:{p.bg}; alternate-background-color:{p.alt_row}; "
         f"gridline-color:{p.border_dk}; border:1px solid {p.border_dk}; border-radius:4px; "
-        f"selection-background-color:{p.btn_bg}; selection-color:{p.text}; outline:none; }}"
+        f"selection-background-color:{p.selected_row}; selection-color:{p.text}; outline:none; }}"
         f"QHeaderView::section {{ background:{p.surface}; color:{p.text_mute}; border:none; "
         f"border-bottom:1px solid {p.border}; border-right:1px solid {p.border_dk}; "
         "padding:4px 8px; font-size:11px; font-weight:bold; letter-spacing:0.5px; }"
         "QTableWidget::item { padding:3px 6px; }"
-        f"QTableWidget::item:selected {{ background:{p.btn_bg}; color:{p.text}; }}"
+        f"QTableWidget::item:selected {{ background:{p.selected_row}; color:{p.text}; }}"
         f"QProgressBar {{ background:{p.disabled_bg}; border:1px solid {p.border}; border-radius:4px; "
         f"height:18px; text-align:center; color:{p.text}; font-size:11px; }}"
         "QProgressBar::chunk { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
