@@ -204,18 +204,18 @@ class ReviewTab(QWidget):
         preview_col.addLayout(zoom_row)
 
         transport_row = QHBoxLayout()
-        self._prev_btn = QPushButton("|◀")
-        self._step_back_btn = QPushButton("◀")
-        self._play_btn = QPushButton("▶")
-        self._step_fwd_btn = QPushButton("▶|")
-        self._next_btn = QPushButton("▶|")
+        self._prev_btn = QPushButton("|◀")          # prev chapter
+        self._step_back_btn = QPushButton("<")       # step back one frame
+        self._play_btn = QPushButton("▶")            # play / pause (text swaps to "||")
+        self._step_fwd_btn = QPushButton(">")         # step forward one frame
+        self._next_btn = QPushButton("▶|")           # next chapter
         self._jog = JogWheel()
-        self._snapshot_btn = QPushButton("📷")
+        self._snapshot_btn = QPushButton("●")         # snapshot (avoids emoji — see _restyle)
         self._tc_label = QLabel("00:00:00:00")
-        for b in (self._prev_btn, self._step_back_btn, self._step_fwd_btn,
-                 self._next_btn, self._snapshot_btn):
-            b.setFixedWidth(30)
-        self._play_btn.setFixedWidth(34)
+        self._icon_buttons = (self._prev_btn, self._step_back_btn, self._play_btn,
+                              self._step_fwd_btn, self._next_btn, self._snapshot_btn)
+        for b in self._icon_buttons:
+            b.setFixedSize(30, 26)
         transport_row.addWidget(self._prev_btn)
         transport_row.addWidget(self._step_back_btn)
         transport_row.addWidget(self._play_btn)
@@ -339,7 +339,7 @@ class ReviewTab(QWidget):
 
     def _on_engine_state_changed(self, playing: bool):
         self._session.set_playing(playing)
-        self._play_btn.setText("⏸" if playing else "▶")
+        self._play_btn.setText("||" if playing else "▶")
         self._video_view.set_playing(playing)
         if not playing:
             self._request_exact_scope()
@@ -605,3 +605,13 @@ class ReviewTab(QWidget):
         self._loaded_name_label.setStyleSheet(f"color:{p.text_mute}; font-size:12px;")
         self._tc_label.setStyleSheet(
             f"color:{p.text_dim}; font-size:12px; font-family:monospace;")
+        # The app's global QPushButton padding (14px each side) leaves no room
+        # for a compact icon button's glyph at a small fixed size — override
+        # it to 0 here, the same fix merge_tab.py's row-reorder buttons use.
+        icon_style = (
+            f"QPushButton {{ background:{p.btn_bg}; color:{p.text}; border:1px solid {p.border_hi}; "
+            "border-radius:4px; padding:0px; font-size:13px; }"
+            f"QPushButton:hover {{ background:{p.hover_bg}; border-color:{p.accent}; }}"
+            f"QPushButton:pressed {{ background:{p.press_bg}; }}")
+        for b in self._icon_buttons:
+            b.setStyleSheet(icon_style)
