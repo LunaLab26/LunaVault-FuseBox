@@ -84,6 +84,10 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
   descriptive per-track titles, so nothing — Qt, another player, or a future "Extract and
   Share" — can label a track from the file itself). Ties into "labels" more generally;
   revisit once that conversation has happened.
+- **Build history in the About tab**: a section at the bottom of the About tab listing
+  what was built, in what order, and bug fixes along the way — presumably sourced from
+  git log / commit messages or a maintained changelog. Needs design discussion (what
+  granularity, per-version vs per-change, how it's generated/kept in sync) before scoping.
 
 ## v1.4 progress notes
 
