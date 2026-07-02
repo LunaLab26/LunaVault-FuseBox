@@ -5,8 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QPoint
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QPolygon
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea,
     QLabel, QPushButton, QLineEdit, QFileDialog,
@@ -19,6 +19,7 @@ from thread_utils import settle
 from grade_manager import Grade, scan_luts, migrate_grade_key
 from probe import probe as probe_file
 from settings import Settings
+from widgets.timeline import TrimTimeline as TimelineWidget, secs_to_tc as _secs_to_tc
 import log_manager
 import theme
 
@@ -26,19 +27,6 @@ import theme
 # ── Timecode helpers ──────────────────────────────────────────────────────────
 
 _FPS_DEFAULT = 30000 / 1001   # ≈ 29.97
-
-
-def _secs_to_tc(secs: float, fps: float = _FPS_DEFAULT) -> str:
-    """Format seconds as HH:MM:SS:FF."""
-    secs = max(0.0, secs)
-    fps_i = max(1, round(fps))
-    tot_f = int(secs * fps)
-    ff = tot_f % fps_i
-    tot_s = tot_f // fps_i
-    s = tot_s % 60
-    m = (tot_s // 60) % 60
-    h = tot_s // 3600
-    return f"{h:02d}:{m:02d}:{s:02d}:{ff:02d}"
 
 
 def _tc_to_secs(tc: str, fps: float = _FPS_DEFAULT) -> float:
@@ -71,168 +59,6 @@ def _estimate_size_mb(duration_secs: float, has_grade: bool) -> float:
     """Rough estimate: H.264 CRF 26 1280×720 ≈ 1.2–1.8 MB/s."""
     rate = 1.5 if not has_grade else 1.4
     return duration_secs * rate
-
-
-# ── Timeline widget ───────────────────────────────────────────────────────────
-
-class TimelineWidget(QWidget):
-    """Horizontal timeline with draggable in/out markers and a scrubber."""
-    position_changed = Signal(float)   # scrubber moved → seconds
-    in_changed       = Signal(float)   # in marker moved → seconds
-    out_changed      = Signal(float)   # out marker moved → seconds
-
-    _PAD   = 14   # left/right padding (px)
-    _TRK_Y = 28   # y-coordinate of top of track bar
-    _TRK_H = 6    # track bar height
-    _MH    = 12   # marker triangle height
-    _MW    = 7    # marker triangle half-width
-    _SCR_R = 5    # scrubber head radius
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(48)
-        self.setMinimumWidth(200)
-        self._duration: float = 0.0
-        self._pos: float = 0.0    # scrubber position (secs)
-        self._in:  float = 0.0    # in-point (secs)
-        self._out: float = 0.0    # out-point (secs)
-        self._drag: Optional[str] = None   # "pos" | "in" | "out" | None
-
-    # ── Public setters (don't emit signals) ───────────────────────────────────
-
-    def set_duration(self, dur: float):
-        self._duration = max(0.0, dur)
-        self._pos = min(self._pos, self._duration)
-        self._in  = min(self._in,  self._duration)
-        self._out = min(self._out, self._duration)
-        self.update()
-
-    def set_position(self, secs: float):
-        self._pos = max(0.0, min(secs, self._duration))
-        self.update()
-
-    def set_in(self, secs: float):
-        self._in = max(0.0, min(secs, self._duration))
-        self.update()
-
-    def set_out(self, secs: float):
-        self._out = max(0.0, min(secs, self._duration))
-        self.update()
-
-    # ── Coordinate helpers ────────────────────────────────────────────────────
-
-    def _track_x(self) -> int:
-        return self._PAD
-
-    def _track_w(self) -> int:
-        return max(1, self.width() - 2 * self._PAD)
-
-    def _secs_to_x(self, secs: float) -> int:
-        if self._duration <= 0:
-            return self._track_x()
-        return int(self._track_x() + secs / self._duration * self._track_w())
-
-    def _x_to_secs(self, px: float) -> float:
-        tw = self._track_w()
-        if tw <= 0 or self._duration <= 0:
-            return 0.0
-        return max(0.0, min(self._duration, (px - self._track_x()) / tw * self._duration))
-
-    # ── Painting ──────────────────────────────────────────────────────────────
-
-    def paintEvent(self, event):
-        pal = theme.active_palette()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        ty = self._TRK_Y
-        th = self._TRK_H
-        tx = self._track_x()
-        tw = self._track_w()
-
-        # Track background
-        p.setBrush(QColor(pal.border))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(tx, ty, tw, th, 3, 3)
-
-        # Selected range (in → out), accent fill
-        if self._duration > 0 and self._out > self._in:
-            ix = self._secs_to_x(self._in)
-            ox = self._secs_to_x(self._out)
-            p.setBrush(QColor(pal.accent))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRect(ix, ty, ox - ix, th)
-
-        # In marker — go/green triangle; Out marker — stop/red triangle
-        self._draw_marker(p, self._secs_to_x(self._in), ty, QColor(pal.ok))
-        self._draw_marker(p, self._secs_to_x(self._out), ty, QColor(pal.danger))
-
-        # Scrubber — head + vertical line through track (uses text colour)
-        sx = self._secs_to_x(self._pos)
-        head = QColor(pal.text)
-        p.setPen(QPen(head, 1))
-        p.drawLine(sx, ty - self._SCR_R * 2 - 2, sx, ty + th)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(head)
-        p.drawEllipse(sx - self._SCR_R, ty - self._SCR_R * 2 - 2 - self._SCR_R,
-                      self._SCR_R * 2, self._SCR_R * 2)
-
-        p.end()
-
-    def _draw_marker(self, p: QPainter, x: int, tip_y: int, color: QColor):
-        """Draw a downward-pointing triangle with tip at (x, tip_y)."""
-        mh = self._MH
-        mw = self._MW
-        poly = QPolygon([
-            QPoint(x,        tip_y),
-            QPoint(x - mw,   tip_y - mh),
-            QPoint(x + mw,   tip_y - mh),
-        ])
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(color)
-        p.drawPolygon(poly)
-
-    # ── Mouse interaction ─────────────────────────────────────────────────────
-
-    def _hit_test(self, px: float) -> str:
-        tol = 14
-        sx = self._secs_to_x(self._pos)
-        ix = self._secs_to_x(self._in)
-        ox = self._secs_to_x(self._out)
-        if abs(px - sx) <= tol:
-            return "pos"
-        if abs(px - ix) <= tol:
-            return "in"
-        if abs(px - ox) <= tol:
-            return "out"
-        return "pos"   # clicking elsewhere moves scrubber
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag = self._hit_test(event.position().x())
-            self._apply_drag(event.position().x())
-
-    def mouseMoveEvent(self, event):
-        if self._drag:
-            self._apply_drag(event.position().x())
-
-    def mouseReleaseEvent(self, event):
-        self._drag = None
-
-    def _apply_drag(self, px: float):
-        secs = self._x_to_secs(px)
-        if self._drag == "pos":
-            self._pos = secs
-            self.update()
-            self.position_changed.emit(secs)
-        elif self._drag == "in":
-            self._in = min(secs, self._out)
-            self.update()
-            self.in_changed.emit(self._in)
-        elif self._drag == "out":
-            self._out = max(secs, self._in)
-            self.update()
-            self.out_changed.emit(self._out)
 
 
 # ── Grade button ──────────────────────────────────────────────────────────────
