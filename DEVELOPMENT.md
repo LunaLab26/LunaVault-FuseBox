@@ -10,7 +10,8 @@ A **PySide6 (Qt Widgets) desktop app** wrapping a bundled `ffmpeg`. Two workflow
 - **WhatsApp clip** — trim a clip, optionally apply a `.cube` colour-grade LUT,
   export a 720p H.264 MP4.
 
-Version 1.3. Brand: warm amber/gold/blue banner theme; light/dark/system toggle.
+Version 1.4 in progress (this checkout). Brand: warm amber/gold/blue banner theme;
+light/dark/system toggle.
 
 ## Architecture
 UI-agnostic logic lives in **`src/core/`** (pure Python, no Qt, unit-tested);
@@ -65,9 +66,41 @@ Qt worker threads and widgets sit on top.
 2. **Linux build + testing** on the Steam Deck (`run_linux.sh` / `build_linux.sh`); Flatpak later.
 3. **macOS build** — planned approach: unsigned `.app` built by a free GitHub Actions macOS
    runner + "Open Anyway" instructions (no paid signing yet). Still needs a Mac to test.
-4. **New "Assess" tab** — load a master `.mov` and show a video thumbnail strip, each audio
-   track as a waveform, and controls to play the video and audition each audio track. Reuses
-   `probe.py`, the WhatsApp-tab timeline widget, and QtMultimedia. Agree the design first.
+4. **"Review" tab** (v1.4, in progress) — load a master `.mov`, play it with frame-step/jog
+   scrubbing, per-track audio audition with tick-to-mix, waveform/spectral views, colour
+   scopes, and a full-res snapshot button. Progress notes below.
 
 Support: Buy Me a Coffee is the primary donation option (buymeacoffee.com/LunaVault);
 crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
+
+## v1.4 progress notes
+
+- **Stability pass (done)**: fixed the rare "app closed itself" bug — `_on_finished()` in
+  `merge_tab.py`/`whatsapp_tab.py` dropped the last reference to a possibly-still-running
+  QThread before showing the completion dialog; destroying a live QThread hard-aborts the
+  process. All QThread sites now `settle()` (wait) before the ref is dropped, and every tab
+  gets a `shutdown()` called from `MainWindow.closeEvent`. Added `src/crash_log.py`
+  (faulthandler + excepthooks + Qt message handler → `crash.log` beside `settings.json`,
+  tagging any "QThread" message `[THREAD-LIFETIME]`) so a recurrence would leave evidence.
+- **Theme discipline pass (done)**: `warn` no longer equals `accent` (a caution used to read
+  as the brand colour); muted-text contrast raised; every hardcoded hex literal outside
+  `theme.py`/`about_tab.py` (brand colours) now routes through `theme.active_palette()`.
+  `tests/test_theme.py` guards both regressions.
+- **Playback spike (done)** — `tools/spike_playback.py <master.mov>` tests whether
+  QMediaPlayer + QVideoSink (the render path the Review tab uses, not QVideoWidget) can
+  open a real 4K 10-bit HEVC master, switch audio tracks, and play a slow-motion segment.
+  Run against a real ~46-minute master (HEVC Main10 yuv420p10le, 3 audio tracks: AAC/ALAC/AAC):
+  **PASS — clean playback on every track, including the slow-motion chapters, zero
+  errors.** The user's report of a local media player stalling on a static frame during
+  slow-mo did not reproduce in QtMultimedia — that appears specific to the external player,
+  not the file. **Decision: `QtPlaybackEngine` only; the `HybridPlaybackEngine` fallback in
+  the plan is not needed for this codec/track combination** (kept as a documented contingency
+  if a different backend/OS proves less capable — re-run the spike before assuming it still
+  holds on Linux/Steam Deck).
+  Two things confirmed by the spike that shape the Review tab design:
+  - `QVideoFrame.pixelFormat()` is genuinely 10-bit (`Format_P010`), but
+    `frame.toImage()` silently converts to 8-bit `Format_RGB32`. Playback-time scopes are
+    therefore approximate; exact 10-bit scopes and all snapshots must go through ffmpeg
+    frame extraction (`rgb48le` / 16-bit PNG), never `QVideoFrame.toImage()`.
+  - Qt exposes no useful per-track metadata (title/language all empty) — track labels
+    ("Camera mic", "WAV backup", "Mix") must come from `probe.py`, not from Qt.

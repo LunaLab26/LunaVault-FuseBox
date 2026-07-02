@@ -24,6 +24,10 @@ env/
 # ── App runtime state ────────────────────────────────────────────
 export_log.json
 settings.json
+crash.log
+
+# ── Diagnostic spike output (contains local file paths) ──────────
+/tools/spike_results.txt
 
 # ── OS cruft ─────────────────────────────────────────────────────
 .DS_Store
