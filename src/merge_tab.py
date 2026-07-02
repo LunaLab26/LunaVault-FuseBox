@@ -1,4 +1,4 @@
-"""merge_tab.py — Merge clips tab UI and logic (v1.3)."""
+"""merge_tab.py — Merge clips tab UI and logic (v1.4)."""
 
 from pathlib import Path
 from typing import Optional

@@ -1,4 +1,4 @@
-"""main.py — LunaVault FuseBox entry point (v1.3)."""
+"""main.py — LunaVault FuseBox entry point (v1.4)."""
 
 import sys
 from pathlib import Path
@@ -27,7 +27,7 @@ from about_tab import AboutTab
 import theme
 
 APP_NAME    = "LunaVault FuseBox"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 
 class _UpdateCheckThread(QThread):

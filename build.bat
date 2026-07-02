@@ -1,11 +1,11 @@
 @echo off
-title LunaVault FuseBox v1.3 — Windows Build
+title LunaVault FuseBox v1.4 — Windows Build
 color 0A
 setlocal
 
 echo.
 echo  ╔══════════════════════════════════════════════╗
-echo  ║   LunaVault FuseBox v1.3 — Windows Build     ║
+echo  ║   LunaVault FuseBox v1.4 — Windows Build     ║
 echo  ╚══════════════════════════════════════════════╝
 echo.
 

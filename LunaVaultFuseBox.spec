@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# LunaVault FuseBox v1.3 — PyInstaller spec (onedir, for LGPL relinking)
+# LunaVault FuseBox v1.4 — PyInstaller spec (onedir, for LGPL relinking)
 
 a = Analysis(
     ['src\\main.py'],

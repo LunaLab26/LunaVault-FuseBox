@@ -10,8 +10,7 @@ A **PySide6 (Qt Widgets) desktop app** wrapping a bundled `ffmpeg`. Two workflow
 - **WhatsApp clip** — trim a clip, optionally apply a `.cube` colour-grade LUT,
   export a 720p H.264 MP4.
 
-Version 1.4 in progress (this checkout). Brand: warm amber/gold/blue banner theme;
-light/dark/system toggle.
+Version 1.4. Brand: warm amber/gold/blue banner theme; light/dark/system toggle.
 
 ## Architecture
 UI-agnostic logic lives in **`src/core/`** (pure Python, no Qt, unit-tested);
@@ -22,17 +21,31 @@ Qt worker threads and widgets sit on top.
 - `src/merge_tab.py` — Merge tab: sectioned, **scrollable** UI (SOURCE/CLIPS/AUDIO/OUTPUT),
   clip table, collapsible audio options, pre-flight, live progress.
 - `src/whatsapp_tab.py`, `src/log_tab.py`, `src/about_tab.py` — the other tabs.
+- `src/review_tab.py` — Review tab: `ReviewSession` (position authority) + `ReviewTab`
+  (owns the playback engine, workers, and the widgets below).
+- `src/review_playback.py` — `PlaybackEngine` interface + `QtPlaybackEngine`
+  (QMediaPlayer/QVideoSink/QAudioOutput) for the Review tab.
+- `src/review_workers.py` — Review tab's background QThread workers: `TrackScanWorker`,
+  `PeakScanWorker`, `SpectrogramWorker`, `MixRenderWorker`, `FrameFetchWorker`.
+- `src/widgets/` — shared/Review-tab-specific widgets: `timeline.py` (`TimelineBase` +
+  `TrimTimeline`, shared with the WhatsApp tab's timeline), `trackbar.py`
+  (`OverviewTrackbar`), `video_view.py` (`ZoomableVideoView`), `jog_wheel.py`,
+  `scopes_panel.py`, `audio_lanes.py`.
 - `src/ffmpeg_runner.py` — QThread workers (`MergeWorker`, `WhatsAppWorker`, …) over core.
 - `src/clip_model.py`, `src/probe.py`, `src/grade_manager.py`, `src/settings.py`,
   `src/log_manager.py` — data model, ffprobe wrapper, LUT registry, settings, JSON log.
+- `src/crash_log.py`, `src/thread_utils.py` — faulthandler/excepthook crash logging and
+  the `settle()` QThread-lifetime helper (see "v1.4 progress notes" below).
 - Dialogs: `audio_sync_dialog.py` (Advanced/Batch sync), `audio_track_dialogs.py`
   (Custom audio / Advanced output), `preflight_dialog.py`, `audio_sample_player.py`.
 - **`src/core/`**: `binaries.py`, `progress.py`, `sync.py` (legacy), `sync_advanced.py`
   (GCC-PHAT + drift), `ffmpeg_cmd.py` (all command builders, `OutputPlan`, `MixSpec`,
   `build_mux_cmd_plan`), `track_info.py`, `plan_report.py` (pre-flight + log reasoning),
   `encoders.py` (HW-encoder detection), `updates.py` (check-for-updates, disabled until
-  `UPDATE_REPO` is set).
-- `tests/` — 59 tests. Each file runs standalone (`python tests/test_ffmpeg_cmd.py`) or via pytest.
+  `UPDATE_REPO` is set), `audio_peaks.py` (peak pyramids), `scopes.py` (histogram/
+  waveform arrays), `spectrogram.py` (STFT + magma colour LUT), `review_media.py`
+  (ffmpeg command builders for frame extraction/snapshots/mix render).
+- `tests/` — 13 files, 110 tests. Each file runs standalone (`python tests/test_ffmpeg_cmd.py`) or via pytest.
 - `docs/index.html` — landing page (GitHub Pages: main → /docs).
 - `luts/` — 28 `.cube` LUTs. `bin/` — ffmpeg/ffprobe (gitignored; see below).
 
@@ -66,7 +79,7 @@ Qt worker threads and widgets sit on top.
 2. **Linux build + testing** on the Steam Deck (`run_linux.sh` / `build_linux.sh`); Flatpak later.
 3. **macOS build** — planned approach: unsigned `.app` built by a free GitHub Actions macOS
    runner + "Open Anyway" instructions (no paid signing yet). Still needs a Mac to test.
-4. **"Review" tab** (v1.4, in progress) — load a master `.mov`, play it with frame-step/jog
+4. **"Review" tab** (v1.4, shipped) — load a master `.mov`, play it with frame-step/jog
    scrubbing, per-track audio audition with tick-to-mix, waveform/spectral views, colour
    scopes, and a full-res snapshot button. Progress notes below.
 
@@ -157,3 +170,13 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
   mix…" throughout and the render is fully cancelable, so this is a UX/architecture note
   for later (e.g. a windowed/incremental mix instead of always rendering the whole file)
   rather than something fixed in v1.4.
+- **Integration + housekeeping (done)** — the Review tab is wired into `main.py` (inserted
+  after "WhatsApp clip"); the merge-complete dialog's new "Review" button loads the fresh
+  master and switches to it; a "Load master…" browse button and `.mov`/`.mp4` drag-and-drop
+  cover the rest. Version bumped to 1.4.0 everywhere it's hardcoded (`main.py`,
+  `merge_tab.py`, `about_tab.py`, `build.bat`, `build_linux.sh`, the `.spec` header).
+  Built via `pyinstaller LunaVaultFuseBox.spec` + the same runtime-data copy `build.bat`
+  does: succeeded, `Qt6Multimedia.dll` and — critically — the `ffmpegmediaplugin.dll`
+  backend plugin are both present in `dist/LunaVaultFuseBox/_internal/PySide6/`, the frozen
+  exe launches cleanly (version 1.4.0 in the title bar), `crash.log` shows a clean session
+  start with no errors, and it shuts down without incident.

@@ -29,6 +29,10 @@ FuseBox pairs them, aligns them, and merges everything into one lossless `.mov`.
   LUTs, and export a share-ready MP4 (the "WhatsApp clip" tab).
 - **Pre-flight** — see exactly what the merge will do (tracks, sizes, time)
   before you commit, with live MB/s + ETA during the render.
+- **Review tab** — play back a finished master with frame-step/jog scrubbing, audition
+  and mix individual audio tracks, view colour-depth/dynamic-range scopes (histogram
+  and RGB waveform), an audio waveform/spectral view per track, and take full-resolution
+  snapshots.
 - **Light / dark / system theme** and a clean, grouped UI.
 
 ## Platforms

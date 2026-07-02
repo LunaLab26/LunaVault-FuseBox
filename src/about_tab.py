@@ -1,4 +1,4 @@
-"""about_tab.py — About tab for LunaVault FuseBox v1.3.
+"""about_tab.py — About tab for LunaVault FuseBox v1.4.
 
 Carries the approved Story / How-it-works copy, an inline-expanding "Support the
 project" section (donations folded in from the old tab), credits, and an
@@ -128,8 +128,8 @@ class AboutTab(QWidget):
         left_col.addStretch()
         self._tagline = QLabel("Preserve every moment. Losslessly.")
         left_col.addWidget(self._tagline)
-        ver = QApplication.instance().applicationVersion() if QApplication.instance() else "1.3.0"
-        self._version_pill = QLabel(f"Version {ver or '1.3.0'}")
+        ver = QApplication.instance().applicationVersion() if QApplication.instance() else "1.4.0"
+        self._version_pill = QLabel(f"Version {ver or '1.4.0'}")
         self._version_pill.setFixedWidth(110)
         left_col.addWidget(self._version_pill)
         left_col.addStretch()

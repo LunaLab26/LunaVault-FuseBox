@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# LunaVault FuseBox v1.3 — Linux / Steam Deck build script
+# LunaVault FuseBox v1.4 — Linux / Steam Deck build script
 set -e
 
 echo ""
 echo "  ╔════════════════════════════════════════════════╗"
-echo "  ║  LunaVault FuseBox v1.3 — Linux / Steam Deck    ║"
+echo "  ║  LunaVault FuseBox v1.4 — Linux / Steam Deck    ║"
 echo "  ╚════════════════════════════════════════════════╝"
 echo ""
 
