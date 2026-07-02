@@ -17,13 +17,46 @@ import numpy as np
 
 BIT_DEPTH_MAX = {8: 255, 10: 1023, 12: 4095, 16: 65535}
 
+# A histogram or waveform looks visually identical whether it's built from
+# every pixel of a 4K frame or a fraction of them — capping the pixel count
+# here keeps every function in this module cheap regardless of source
+# resolution. (A full 3840x2160 frame processed at full precision several
+# times a second during playback was enough to exhaust memory on modest
+# hardware — see DEVELOPMENT.md's v1.4 progress notes.)
+_MAX_SCOPE_PIXELS = 250_000
+
+
+def _downsample_for_scope(arr: np.ndarray, max_pixels: int = _MAX_SCOPE_PIXELS) -> np.ndarray:
+    """Stride-sample rows/columns so scope computation never processes more
+    than ~max_pixels. Plain step-slicing returns a view, not a copy, so this
+    is free until something downstream actually touches the data.
+
+    A no-op for anything that isn't a 2D+ (H, W, ...) image — rescale_to_bit_depth
+    also serves as a plain elementwise rescaler for non-image data, which has
+    no "rows/columns" to downsample and is small enough not to need it anyway.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim < 2:
+        return arr
+    h, w = arr.shape[0], arr.shape[1]
+    total = h * w
+    if total <= max_pixels:
+        return arr
+    factor = max(1, int(np.ceil((total / max_pixels) ** 0.5)))
+    return arr[::factor, ::factor]
+
 
 def rescale_to_bit_depth(arr, bit_depth: int, src_max: int = 65535) -> np.ndarray:
-    """Rescale a wide-range array (e.g. 16-bit rgb48le) onto 0..(2**bit_depth-1)."""
+    """Rescale a wide-range array (e.g. 16-bit rgb48le) onto 0..(2**bit_depth-1).
+
+    Downsamples first — this is typically called on a full-resolution frame
+    for the scopes panel, which doesn't need per-pixel precision to produce
+    a representative histogram/waveform.
+    """
+    arr = _downsample_for_scope(np.asarray(arr))
     target_max = BIT_DEPTH_MAX.get(bit_depth, 255)
-    arr = np.asarray(arr, dtype=np.float64)
-    scaled = arr / float(src_max) * target_max
-    return np.clip(np.round(scaled), 0, target_max).astype(np.int32)
+    scaled = arr.astype(np.float32) / float(src_max) * target_max
+    return np.clip(np.round(scaled), 0, target_max).astype(np.uint16)
 
 
 def axis_ticks(bit_depth: int, n: int = 5) -> list:
@@ -39,13 +72,16 @@ def histogram_rgb(arr, bit_depth: int = 8) -> dict:
 
     `arr` is (H, W, 3) on the native `bit_depth` scale.
     """
-    arr = np.asarray(arr)
+    arr = _downsample_for_scope(np.asarray(arr))
     top = BIT_DEPTH_MAX.get(bit_depth, 255)
     nbins = top + 1
-    r = arr[..., 0].astype(np.int64).ravel()
-    g = arr[..., 1].astype(np.int64).ravel()
-    b = arr[..., 2].astype(np.int64).ravel()
-    luma = np.clip(np.round(0.2126 * r + 0.7152 * g + 0.0722 * b).astype(np.int64), 0, top)
+    # Stay in the array's own (small) dtype — r/g/b never need to be wider
+    # than the source; only the weighted luma sum needs float math, and
+    # numpy promotes automatically for that regardless of r/g/b's dtype.
+    r = arr[..., 0].ravel()
+    g = arr[..., 1].ravel()
+    b = arr[..., 2].ravel()
+    luma = np.clip(np.round(0.2126 * r + 0.7152 * g + 0.0722 * b).astype(np.int32), 0, top)
 
     def _count(x):
         return np.bincount(np.clip(x, 0, top), minlength=nbins).astype(np.int64)
@@ -83,7 +119,7 @@ def waveform_channel(channel_2d, out_h: int, bit_depth: int = 8) -> np.ndarray:
 def waveform_parade(arr, out_h: int = 256, bit_depth: int = 8) -> dict:
     """Per-channel column-wise intensity histograms — the data for a Resolve-
     style RGB parade (three scopes side by side), one per channel."""
-    arr = np.asarray(arr)
+    arr = _downsample_for_scope(np.asarray(arr))
     return {
         "r": waveform_channel(arr[..., 0], out_h, bit_depth),
         "g": waveform_channel(arr[..., 1], out_h, bit_depth),

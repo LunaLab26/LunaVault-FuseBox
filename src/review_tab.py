@@ -45,6 +45,7 @@ from widgets.timeline import secs_to_tc
 _MIX_DEBOUNCE_MS = 300
 _SPEC_DEBOUNCE_MS = 250
 _APPROX_SCOPE_THROTTLE_S = 0.2
+_APPROX_SCOPE_MAX_DIM = 640   # shrink via Qt before touching numpy at all — see _update_approx_scope
 _SPEC_TILE_CACHE_MAX = 16
 
 
@@ -352,6 +353,16 @@ class ReviewTab(QWidget):
                 self._update_approx_scope(image)
 
     def _update_approx_scope(self, image: QImage):
+        # Shrink via Qt (cheap, native) BEFORE copying anything into numpy —
+        # a live histogram doesn't need a 4K source, and converting/copying
+        # a full 3840x2160 buffer up to five times a second was heavy enough
+        # to exhaust memory on modest hardware (see DEVELOPMENT.md's v1.4
+        # progress notes for the crash this fixed). core.scopes also caps
+        # the pixel count it'll process, as a second line of defence.
+        if max(image.width(), image.height()) > _APPROX_SCOPE_MAX_DIM:
+            image = image.scaled(_APPROX_SCOPE_MAX_DIM, _APPROX_SCOPE_MAX_DIM,
+                                 Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.FastTransformation)
         img8 = image.convertToFormat(QImage.Format.Format_RGB888)
         w, h = img8.width(), img8.height()
         if w <= 0 or h <= 0:

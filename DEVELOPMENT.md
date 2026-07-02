@@ -180,3 +180,34 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
   backend plugin are both present in `dist/LunaVaultFuseBox/_internal/PySide6/`, the frozen
   exe launches cleanly (version 1.4.0 in the title bar), `crash.log` shows a clean session
   start with no errors, and it shuts down without incident.
+- **Field crash after shipping v1.4 (fixed)** — pressing play in the Review tab crashed with
+  `numpy._core._exceptions._ArrayMemoryError: Unable to allocate 63.3 MiB for an array with
+  shape (8294400,)`. Root cause: the playback-time "approximate scope" path
+  (`ReviewTab._update_approx_scope` → `core.scopes.histogram_rgb`) processed the *entire*
+  3840×2160 frame at full precision roughly five times a second — each update briefly
+  allocating several ~66 MB `int64` arrays (r/g/b/luma) from data that only ever needed
+  8-bit precision, on top of the QImage→numpy conversion's own ~50 MB of copying. Fixed at
+  both ends:
+  - `core/scopes.py` gained `_downsample_for_scope()` — stride-slicing (a free view, not a
+    copy) caps every scope function (`histogram_rgb`, `waveform_parade`, and transitively
+    `waveform_rgb`) at ~250k pixels regardless of source resolution, and dropped the
+    needless `int64` upcasts (`histogram_rgb`'s r/g/b now stay at the array's own dtype;
+    `rescale_to_bit_depth` now returns `uint16`, not `int32`, and downsamples before its
+    float conversion rather than after).
+  - `review_tab.py`'s `_update_approx_scope` now shrinks the frame via `QImage.scaled()`
+    (cheap, native, GPU/SIMD-backed) to a max 640px dimension *before* touching numpy at
+    all, so the playback-time path never even constructs a full-resolution array.
+  - New tests in `tests/test_scopes.py` exercise a real 3840×2160-sized array through every
+    affected function to guard against this regressing.
+  **A second, separate, more fundamental issue surfaced while verifying the fix**: an
+  isolated test with *zero* application code in the frame-delivery path (bare
+  `QMediaPlayer` open + play, no scopes, no histogram) reproduced a ~45-second full-process
+  stall during sustained playback of the same 4K 10-bit HEVC master, with the same
+  `hardware accelerator failed to decode picture` / `Failed to add bitstream or slice
+  control buffer` messages seen in the field crash log. This points to the GPU's D3D11VA
+  hardware video decoder itself struggling to sustain 4K 10-bit HEVC decode on that
+  machine — independent of anything in this codebase. Not yet resolved; needs a clean-boot
+  retest to tell whether it's a persistent hardware ceiling (in which case the
+  `HybridPlaybackEngine` fallback designed in Phase 3 but never built — software decode
+  instead of GPU hardware decode — becomes a real follow-up) or accumulated GPU resource
+  state from a long test session (in which case the memory fix above is fully sufficient).
