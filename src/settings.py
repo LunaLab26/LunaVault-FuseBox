@@ -22,6 +22,9 @@ DEFAULTS = {
     "last_wa_start": "00:00:00",
     "last_wa_duration": "00:01:00",
     "window_geometry": None,
+    "theme_mode": "system",
+    "last_review_source": "",
+    "review_software_decode": False,
 }
 
 
@@ -36,9 +39,10 @@ class Settings:
             if self._path.exists():
                 with open(self._path, encoding="utf-8") as f:
                     saved = json.load(f)
-                for k, v in saved.items():
-                    if k in self._data:
-                        self._data[k] = v
+                # Merge everything on disk, not just keys already in DEFAULTS —
+                # a saved key that predates a DEFAULTS entry (or was added by a
+                # newer app version) must not be silently discarded on load.
+                self._data.update(saved)
         except Exception:
             pass
 
