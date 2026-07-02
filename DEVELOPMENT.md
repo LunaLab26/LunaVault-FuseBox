@@ -73,6 +73,18 @@ Qt worker threads and widgets sit on top.
 Support: Buy Me a Coffee is the primary donation option (buymeacoffee.com/LunaVault);
 crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
 
+## Future ideas (not yet scoped — for discussion before any work starts)
+
+- **"WhatsApp clip" → "Extract and Share"**: rename + extend the tab to also extract
+  individual chapters back out of a master into standalone MP4 clips + WAV files — the
+  merge process in reverse. Keeps the existing 720p colour-graded share-clip export.
+- **Metadata preservation**: a dedicated conversation is wanted on what metadata the app
+  should read/write/preserve and why it matters (e.g. audio-track title tags — see the
+  "SoundHandler" finding in the Review-tab playback work below: masters currently carry no
+  descriptive per-track titles, so nothing — Qt, another player, or a future "Extract and
+  Share" — can label a track from the file itself). Ties into "labels" more generally;
+  revisit once that conversation has happened.
+
 ## v1.4 progress notes
 
 - **Stability pass (done)**: fixed the rare "app closed itself" bug — `_on_finished()` in
