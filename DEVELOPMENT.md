@@ -206,8 +206,44 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
   `hardware accelerator failed to decode picture` / `Failed to add bitstream or slice
   control buffer` messages seen in the field crash log. This points to the GPU's D3D11VA
   hardware video decoder itself struggling to sustain 4K 10-bit HEVC decode on that
-  machine — independent of anything in this codebase. Not yet resolved; needs a clean-boot
-  retest to tell whether it's a persistent hardware ceiling (in which case the
-  `HybridPlaybackEngine` fallback designed in Phase 3 but never built — software decode
-  instead of GPU hardware decode — becomes a real follow-up) or accumulated GPU resource
-  state from a long test session (in which case the memory fix above is fully sufficient).
+  machine — independent of anything in this codebase.
+
+  **Confirmed persistent after a clean reboot** — same failure, same `crash.log` signature,
+  now with the actual smoking gun: `Failed to create 2D texture: COM error 0x887a0005: The
+  GPU device instance has been suspended.` `0x887A0005` is DXGI's device-removed error —
+  Windows' TDR (Timeout Detection and Recovery) forcibly resetting the GPU driver because it
+  stopped responding. A genuine hardware/driver ceiling on that machine for 4K 10-bit HEVC
+  hardware decode, not session-accumulated state and not fixable in this codebase's existing
+  playback path. Also explains the "white/blank window" the user saw: once the GPU device
+  resets, every surface the app was rendering through goes invalid until the app recovers or
+  Windows shows it as unresponsive.
+
+  **Fixed** by building the `HybridPlaybackEngine` fallback designed in Phase 3 but not
+  built at the time (the spike passed on the development machine). It never touches the GPU
+  for video decode at all: video comes from periodic low-resolution ffmpeg frame extraction
+  (reusing `ffmpeg_runner.FramePreviewWorker`, the same worker the WhatsApp tab's before/
+  after preview already uses) polled roughly every 300ms — a slideshow rather than smooth
+  30fps, the deliberate trade for a path that can't crash a GPU driver it never calls into.
+  Audio is unaffected by the GPU issue (never hardware-accelerated) and stays real-time
+  throughout, playing a rendered file through an audio-only `QMediaPlayer` — this is now the
+  *only* way this engine plays audio, even for a single ticked track (`set_audio_single`
+  always returns `False`, since there's no "master" player to natively switch a track on;
+  `ReviewTab._apply_tick_set()` was fixed to actually check that return value instead of
+  ignoring it, falling through to a render for either engine when a native switch isn't
+  available). Exact per-frame precision (paused scopes, snapshots) doesn't go through either
+  engine — `ReviewTab` already gets those from `FrameFetchWorker` directly.
+
+  Selected via a new "Software decode" checkbox in the Review tab's header (persisted to
+  settings as `review_software_decode`, read once at `ReviewTab.__init__` — takes effect
+  after an app restart, not a live hot-swap, since a GPU device reset likely leaves that
+  session's rendering pipeline unrecoverable regardless).
+
+  Verified against the real master: correct duration/frame delivery/audio playback, and a
+  real position-sync bug the verification caught — `QMediaPlayer.setPosition()` isn't
+  guaranteed to have taken effect before the source finishes loading, so a stale near-zero
+  position from the audio player's own `positionChanged` signal could silently overwrite a
+  correct just-seeked position right as playback started. Fixed by making the engine's own
+  wall-clock timing authoritative (matching how `QtPlaybackEngine`'s mix-player sync already
+  worked) and treating the audio player's position reports as a drift-correction signal
+  rather than ground truth, plus re-asserting the position immediately before `play()` as a
+  second line of defence against the same race.

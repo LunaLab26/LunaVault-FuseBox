@@ -23,6 +23,7 @@ from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QFrame, QFileDialog,
+    QCheckBox,
 )
 
 import theme
@@ -135,7 +136,8 @@ class ReviewTab(QWidget):
         super().__init__(parent)
         self._settings = settings
         self._session = ReviewSession(self)
-        self._engine = make_engine(self)
+        use_software = bool(settings.get("review_software_decode", False)) if settings else False
+        self._engine = make_engine(self, use_software=use_software)
         self._path: str = ""
         self._video_info: Optional[StreamInfo] = None
         self._chapters: list = []
@@ -181,6 +183,18 @@ class ReviewTab(QWidget):
         header_row.addWidget(self._browse_btn)
         header_row.addWidget(self._loaded_name_label)
         header_row.addStretch()
+        self._software_decode_check = QCheckBox("Software decode")
+        self._software_decode_check.setToolTip(
+            "Play video without GPU hardware acceleration. Turn this on if the app has\n"
+            "crashed or the screen has gone blank while playing footage in this tab —\n"
+            "some GPUs can't reliably hardware-decode 4K 10-bit video and this avoids\n"
+            "that path entirely, at the cost of smoother playback. Takes effect after\n"
+            "you restart the app.")
+        if self._settings is not None:
+            self._software_decode_check.setChecked(
+                bool(self._settings.get("review_software_decode", False)))
+        self._software_decode_check.toggled.connect(self._on_software_decode_toggled)
+        header_row.addWidget(self._software_decode_check)
         root.addLayout(header_row)
 
         top_row = QHBoxLayout()
@@ -262,6 +276,14 @@ class ReviewTab(QWidget):
             "Video files (*.mov *.mp4);;All files (*)")
         if path:
             self.load_master(path)
+
+    def _on_software_decode_toggled(self, checked: bool):
+        if self._settings is not None:
+            self._settings.set("review_software_decode", checked)
+            self._settings.save()
+        self._status_label.setText(
+            "Software decode " + ("enabled" if checked else "disabled")
+            + " — restart the app for this to take effect.")
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and any(
@@ -505,20 +527,23 @@ class ReviewTab(QWidget):
         if not ticked:
             self._lanes.set_readout("No tracks ticked — silent")
             return
-        if len(ticked) == 1:
-            self._engine.set_audio_single(ticked[0])
+        # HybridPlaybackEngine has no single "master" player whose active
+        # track can be flipped, so it always declines a native switch —
+        # fall through to rendering a one-track file the same way a real
+        # multi-track mix is handled, rather than assuming this succeeds.
+        if len(ticked) == 1 and self._engine.set_audio_single(ticked[0]):
             label = self._track_labels.get(ticked[0], (f"track {ticked[0]}",))[0]
             self._lanes.set_readout(f"Playing: {label}")
             return
 
-        self._lanes.set_readout("Rendering mix…")
+        self._lanes.set_readout("Rendering mix…" if len(ticked) > 1 else "Rendering…")
         key = mix_cache_key(ticked)
         out_path = get_app_dir() / "_temp" / f"review_mix_{key}.m4a"
         out_path.parent.mkdir(exist_ok=True)
         ff, fp = get_ffmpeg()
         w = MixRenderWorker(ff, self._path, ticked, str(out_path), cache_key=key)
         w.mix_ready.connect(self._on_mix_ready)
-        w.error.connect(lambda k, msg: self._lanes.set_readout(f"Mix render failed: {msg}"))
+        w.error.connect(lambda k, msg: self._lanes.set_readout(f"Render failed: {msg}"))
         w.finished.connect(lambda w=w: self._on_mix_worker_finished(w))
         self._current_mix_worker = w
         self._track(w)
@@ -533,7 +558,10 @@ class ReviewTab(QWidget):
             return   # tick-set changed again while this was rendering — stale result
         self._engine.set_audio_mix_file(out_path)
         names = [self._track_labels.get(i, (f"track {i}",))[0] for i in sorted(self._session.ticked)]
-        self._lanes.set_readout("Playing mix: " + " + ".join(names))
+        if len(names) == 1:
+            self._lanes.set_readout(f"Playing: {names[0]}")
+        else:
+            self._lanes.set_readout("Playing mix: " + " + ".join(names))
 
     # ── Spectral view ─────────────────────────────────────────────────────────
 
