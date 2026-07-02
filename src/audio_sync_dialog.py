@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from ffmpeg_runner import get_ffmpeg
 from probe import probe_duration
 from core.sync_advanced import analyze_sync
+from thread_utils import settle
 import theme
 
 
@@ -119,6 +120,14 @@ class BatchSyncDialog(QDialog):
             self._thread.wait(2000)
         self.accept()
 
+    def done(self, r):
+        # Covers every close path (Cancel, X button, Esc): the thread must be
+        # settled before the dialog — and its reference — can be destroyed.
+        if self._thread.isRunning():
+            self._thread.cancel()
+        settle(self._thread)
+        super().done(r)
+
 
 class AdvancedSyncDialog(QDialog):
     def __init__(self, clip, parent=None):
@@ -203,6 +212,12 @@ class AdvancedSyncDialog(QDialog):
                         "dissimilar to mix cleanly. Prefer keeping them on separate tracks.</span>")
         self._body.setText("<br>".join(rows))
         self._apply.setEnabled(True)
+
+    def done(self, r):
+        # _AnalyzeThread has no cancel — analysis is bounded (a few seconds);
+        # settle it before the dialog reference can be destroyed.
+        settle(self._thread, 10000)
+        super().done(r)
 
     def _on_apply(self):
         res = self._res

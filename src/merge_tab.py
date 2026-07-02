@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from clip_model import ClipInfo, scan_folder, unpaired_wavs, check_dst_warning
 from ffmpeg_runner import MergeWorker, get_ffmpeg
+from thread_utils import settle
 from probe import probe, probe_duration
 from settings import Settings
 from core.ffmpeg_cmd import OutputPlan, OutputTrack
@@ -95,9 +96,15 @@ class ProbeThread(QThread):
         super().__init__()
         self._clips   = clips
         self._ffprobe = ffprobe_bin
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
 
     def run(self):
         for i, clip in enumerate(self._clips):
+            if self._stopped:
+                return
             info = probe(self._ffprobe, str(clip.path))
             clip.stream = info
             if clip.has_wav() and clip.wav_duration <= 0:
@@ -856,6 +863,7 @@ class MergeTab(QWidget):
     def _start_probe(self):
         if self._probe_thread and self._probe_thread.isRunning():
             return
+        settle(self._probe_thread)
         _, fp = get_ffmpeg()
         self._probe_thread = ProbeThread(self._clips, fp)
         self._probe_thread.clip_probed.connect(self._on_clip_probed)
@@ -1185,6 +1193,11 @@ class MergeTab(QWidget):
     def _on_finished(self, success: bool, message: str):
         self._cancel_btn.hide()
         self._start_btn.show()
+        # The worker emits `finished` from inside run(), so the OS thread may
+        # not have exited yet — wait it out BEFORE dropping the last reference,
+        # or the GC can destroy a live QThread and abort the whole process.
+        worker, self._worker = self._worker, None
+        settle(worker)
         out = Path(self._out_dir.text()) / self._out_name.text()
         try:
             plan = self._effective_plan()
@@ -1206,7 +1219,6 @@ class MergeTab(QWidget):
             )
         except Exception:
             pass
-        self._worker = None
         if success:
             self._pbar.setValue(100)
             for lbl in self._stage_labels:
@@ -1216,6 +1228,17 @@ class MergeTab(QWidget):
             QMessageBox.information(self, "Done", f"Merge complete!\n\n{message}\n{out}")
         else:
             QMessageBox.warning(self, "Failed", f"Merge failed:\n{message}")
+
+    def shutdown(self):
+        """Wait out all worker threads (called from MainWindow.closeEvent)."""
+        if self._worker:
+            self._worker.cancel()
+        if self._probe_thread:
+            self._probe_thread.stop()
+        settle(self._worker, 10000)
+        settle(self._probe_thread)
+        self._worker = None
+        self._probe_thread = None
 
     def set_output_path_hint(self, path: str):
         p = Path(path)

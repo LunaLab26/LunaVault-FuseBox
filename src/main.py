@@ -14,9 +14,11 @@ from PySide6.QtWidgets import (
 
 from core.updates import check_for_update
 
+import crash_log
+from thread_utils import settle
 from logo_widget import make_logo_widget, make_icon_widget
 from theme_toggle import ThemeToggle
-from settings import Settings
+from settings import Settings, _settings_path
 from merge_tab import MergeTab
 from whatsapp_tab import WhatsAppTab
 from log_tab import LogTab
@@ -115,12 +117,17 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f"ffmpeg: {ff}")
 
     def closeEvent(self, event):
+        self._merge_tab.shutdown()
+        self._whatsapp_tab.shutdown()
+        settle(self._update_thread, 2000)
         self._settings.set("window_geometry", bytes(self.saveGeometry()).hex())
         self._settings.save()
         super().closeEvent(event)
 
 
 def main():
+    crash_log.install(_settings_path().parent / "crash.log")
+
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)
     if hasattr(Qt, "AA_UseHighDpiPixmaps"):

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from ffmpeg_runner import WhatsAppWorker, FramePreviewWorker, get_ffmpeg, get_app_dir
+from thread_utils import settle
 from grade_manager import Grade, scan_luts, migrate_grade_key
 from probe import probe as probe_file
 from settings import Settings
@@ -274,6 +275,7 @@ class WhatsAppTab(QWidget):
         self._worker: Optional[WhatsAppWorker] = None
         self._preview_worker: Optional[FramePreviewWorker] = None
         self._before_worker: Optional[FramePreviewWorker] = None   # kept alive — prevents GC crash
+        self._retired_workers: list[FramePreviewWorker] = []       # superseded but still running
         self._before_path: str = ""
         self._after_path:  str = ""
         self._showing_after = True
@@ -612,6 +614,20 @@ class WhatsAppTab(QWidget):
             self._export_btn.setEnabled(True)
             self._probe_source(path)
 
+    def shutdown(self):
+        """Wait out all worker threads (called from MainWindow.closeEvent)."""
+        if self._worker:
+            self._worker.cancel()
+        settle(self._worker, 10000)
+        settle(self._preview_worker)
+        settle(self._before_worker)
+        for w in self._retired_workers:
+            settle(w)
+        self._worker = None
+        self._preview_worker = None
+        self._before_worker = None
+        self._retired_workers.clear()
+
     def set_source(self, path: str):
         """Called from main window when a merge job completes."""
         if path and Path(path).exists():
@@ -771,10 +787,10 @@ class WhatsAppTab(QWidget):
                 _tc_to_secs(self._start_edit.text(), self._source_fps)
         tc = _secs_to_ffmpeg(pos_s)
 
-        if self._preview_worker and self._preview_worker.isRunning():
-            self._preview_worker.done.disconnect()
-            self._preview_worker.error.disconnect()
-            self._preview_worker = None
+        self._retire(self._preview_worker, ("done", "error"))
+        self._preview_worker = None
+        self._retire(self._before_worker, ("done",))
+        self._before_worker = None
 
         self._preview_label.setText("Loading preview…")
 
@@ -805,6 +821,22 @@ class WhatsAppTab(QWidget):
         )
         self._before_worker.done.connect(lambda p: setattr(self, '_before_path', p))
         self._before_worker.start()
+
+    def _retire(self, worker, signals: tuple = ()):
+        """Park a superseded worker so its QThread isn't GC'd while running."""
+        if worker is None:
+            return
+        for name in signals:
+            try:
+                getattr(worker, name).disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        if worker.isRunning():
+            self._retired_workers.append(worker)
+            worker.finished.connect(self._prune_retired)
+
+    def _prune_retired(self):
+        self._retired_workers = [w for w in self._retired_workers if w.isRunning()]
 
     def _on_after_preview(self, path: str):
         self._after_path = path
@@ -907,6 +939,10 @@ class WhatsAppTab(QWidget):
     def _on_finished(self, success: bool, message: str):
         self._cancel_btn.hide()
         self._export_btn.show()
+        # Wait the worker thread out BEFORE dropping the last reference —
+        # destroying a live QThread aborts the whole process.
+        worker, self._worker = self._worker, None
+        settle(worker)
         out_path = Path(self._out_dir.text()) / (self._out_name.text() or "whatsapp_clip.mp4")
         # Log the result
         try:
@@ -921,7 +957,6 @@ class WhatsAppTab(QWidget):
             )
         except Exception:
             pass
-        self._worker = None
 
         if success:
             self._pbar.setValue(100)

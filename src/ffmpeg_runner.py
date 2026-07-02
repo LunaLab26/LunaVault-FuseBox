@@ -90,6 +90,15 @@ class ThumbnailThread(QThread):
             pass
 
 
+def _stop_thumb(thumb: Optional[ThumbnailThread]):
+    """Stop and settle a thumbnail thread; its local ref is about to go away,
+    and destroying a live QThread aborts the process. 10 s outlasts a stuck
+    _extract() (subprocess timeout is 8 s)."""
+    if thumb:
+        thumb.stop()
+        thumb.wait(10000)
+
+
 # ── Merge worker ──────────────────────────────────────────────────────────────
 
 class MergeWorker(QThread):
@@ -246,7 +255,7 @@ class MergeWorker(QThread):
             while proc.poll() is None:
                 if self._cancelled:
                     proc.terminate(); ef.close()
-                    if thumb: thumb.stop()
+                    _stop_thumb(thumb)
                     self._cleanup(temp_dir)
                     self.finished.emit(False, "Cancelled")
                     return
@@ -259,7 +268,7 @@ class MergeWorker(QThread):
                 })
                 time.sleep(0.4)
 
-            if thumb: thumb.stop()
+            _stop_thumb(thumb)
             proc.wait(); ef.close()
             if proc.returncode != 0:
                 tail = _tail_text(err_path)
@@ -317,7 +326,7 @@ class MergeWorker(QThread):
         while proc.poll() is None:
             if self._cancelled:
                 proc.terminate(); ef.close()
-                if thumb: thumb.stop()
+                _stop_thumb(thumb)
                 self._cleanup(temp_dir); self.finished.emit(False, "Cancelled"); return
             parsed = parse_progress(read_progress(progress_file), cumulative_duration)
             self.progress.emit({
@@ -328,7 +337,7 @@ class MergeWorker(QThread):
             })
             time.sleep(0.4)
 
-        if thumb: thumb.stop()
+        _stop_thumb(thumb)
         proc.wait(); ef.close()
 
         if proc.returncode != 0:
@@ -411,13 +420,13 @@ class WhatsAppWorker(QThread):
         while proc.poll() is None:
             if self._cancelled:
                 proc.terminate()
-                if thumb: thumb.stop()
+                _stop_thumb(thumb)
                 self._cleanup(temp_dir); self.finished.emit(False, "Cancelled"); return
             parsed = parse_progress(read_progress(progress_file), dur_secs)
             self.progress.emit({"pct": parsed["pct"], "size": parsed["size"]})
             time.sleep(0.4)
 
-        if thumb: thumb.stop()
+        _stop_thumb(thumb)
         proc.wait()
         self._cleanup(temp_dir)
 

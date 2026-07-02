@@ -16,6 +16,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from ffmpeg_runner import get_ffmpeg, get_app_dir
 from core.binaries import no_window
 from core.ffmpeg_cmd import MixSpec, build_mix_sample_cmd
+from thread_utils import settle
 
 _active: Optional["SamplePlayerDialog"] = None   # keep a reference alive
 
@@ -90,10 +91,13 @@ class SamplePlayerDialog(QDialog):
             self._player.stop()
         except Exception:
             pass
+        settle(self._render, 10000)
         super().closeEvent(event)
 
 
 def play_mix_sample(clip, kind: str, match_levels: bool, parent=None):
     global _active
+    if _active is not None:
+        _active.close()   # settles the old render thread before we drop the ref
     _active = SamplePlayerDialog(clip, kind, match_levels, parent)
     _active.show()
