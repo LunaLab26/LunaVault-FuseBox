@@ -69,6 +69,11 @@ MAGMA_LUT = _build_magma_lut()
 
 
 def to_rgb(spec_norm, lut: np.ndarray = MAGMA_LUT) -> np.ndarray:
-    """Map a [0,1]-normalized spectrogram to an (n_frames, n_bins, 3) uint8 image."""
+    """Map a [0,1]-normalized (n_frames, n_bins) spectrogram to a ready-to-paint
+    (n_bins, n_frames, 3) uint8 image: rows are frequency (row 0 = highest,
+    last row = 0 Hz/DC), columns are time (earliest on the left) — the
+    conventional top-to-bottom, left-to-right spectrogram orientation."""
     idx = np.clip(np.round(np.asarray(spec_norm) * 255.0), 0, 255).astype(np.int32)
-    return lut[idx]
+    img_time_by_freq = lut[idx]                          # (n_frames, n_bins, 3)
+    img = np.transpose(img_time_by_freq, (1, 0, 2))       # -> (n_bins, n_frames, 3)
+    return img[::-1, :, :]                                # low freq (bin 0) to the bottom

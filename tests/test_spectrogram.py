@@ -59,13 +59,15 @@ def test_magma_lut_shape_and_dtype():
 
 
 def test_to_rgb_maps_normalized_spectrogram_to_image():
+    # 5 time frames, 10 frequency bins (bin 0 = 0Hz/DC ... bin 9 = highest);
+    # the high-frequency half is bright, the low-frequency half is dark.
     spec = np.zeros((5, 10), dtype=np.float32)
     spec[:, 5:] = 1.0
     img = to_rgb(spec)
-    assert img.shape == (5, 10, 3)
+    assert img.shape == (10, 5, 3)   # (freq_bins, time_frames, 3) — display orientation
     assert img.dtype == np.uint8
-    assert tuple(img[0, 0]) == tuple(MAGMA_LUT[0])
-    assert tuple(img[0, 9]) == tuple(MAGMA_LUT[255])
+    assert tuple(img[0, 0]) == tuple(MAGMA_LUT[255])    # top row = highest freq = bright
+    assert tuple(img[-1, 0]) == tuple(MAGMA_LUT[0])     # bottom row = 0Hz/DC = dark
 
 
 if __name__ == "__main__":
