@@ -29,14 +29,57 @@ from core.binaries import no_window
 from core.audio_peaks import build_pcm_extract_cmd, pyramid_from_stream
 from core.review_media import build_frame_extract_cmd, build_snapshot_cmd, build_review_mix_cmd
 from core.spectrogram import spectrogram, to_rgb
-from probe import probe, probe_audio_tracks
+from probe import probe, probe_audio_tracks, probe_chapters
+
+
+def _run_cancelable(worker, cmd: list, timeout: float) -> tuple:
+    """Run `cmd` via Popen (stored on `worker._proc` so `worker.cancel()`
+    can terminate it early) instead of `subprocess.run(timeout=...)`, whose
+    blocking wait can't be interrupted — a worker mid-flight on slow/cloud
+    storage would otherwise force shutdown() to wait out its full timeout.
+
+    Returns (stdout_bytes, error_message, was_cancelled); stdout is None on
+    failure or cancellation.
+    """
+    if getattr(worker, "_cancelled", False):
+        # cancel() can race ahead of run() actually starting (the caller may
+        # set _cancelled the instant the worker object exists, well before
+        # its QThread gets CPU time) — honour it here rather than spawning a
+        # process nothing will be able to interrupt until it finishes on its
+        # own.
+        return None, "", True
+    try:
+        worker._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, **no_window())
+    except Exception as e:
+        return None, str(e), False
+    try:
+        stdout, stderr = worker._proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        worker._proc.kill()
+        worker._proc.communicate()
+        worker._proc = None
+        return None, "timed out", getattr(worker, "_cancelled", False)
+    returncode = worker._proc.returncode
+    worker._proc = None
+    if getattr(worker, "_cancelled", False):
+        return None, "", True
+    if returncode != 0:
+        # Some callers (snapshot mode) write to a file and expect empty
+        # stdout on success — only a non-zero returncode means failure here;
+        # "did I get the bytes I actually needed" is the caller's own check.
+        msg = stderr.decode(errors="ignore")[-200:] if stderr else "command failed"
+        return None, msg, False
+    return stdout, None, False
 
 
 # ── Track scan ──────────────────────────────────────────────────────────────
 
 class TrackScanWorker(QThread):
-    """Probe a master's video stream + every audio track it carries."""
-    tracks_ready = Signal(object, list)   # StreamInfo, list[AudioTrackInfo]
+    """Probe a master's video stream, every audio track, and its chapters
+    (masters carry per-clip chapters written at merge time — the Review
+    tab's prev/next transport jumps to these)."""
+    tracks_ready = Signal(object, list, list)   # StreamInfo, list[AudioTrackInfo], list[ChapterInfo]
 
     def __init__(self, ffprobe_bin: str, path: str, parent=None):
         super().__init__(parent)
@@ -46,7 +89,8 @@ class TrackScanWorker(QThread):
     def run(self):
         video_info = probe(self._ffprobe, self._path)
         audio_tracks = probe_audio_tracks(self._ffprobe, self._path)
-        self.tracks_ready.emit(video_info, audio_tracks)
+        chapters = probe_chapters(self._ffprobe, self._path)
+        self.tracks_ready.emit(video_info, audio_tracks, chapters)
 
 
 # ── Peak pyramids (one worker, tracks processed serially) ───────────────────
@@ -134,6 +178,16 @@ class SpectrogramWorker(QThread):
         self._track_idx = track_idx
         self._t0 = max(0.0, t0)
         self._t1 = max(self._t0 + 0.05, t1)
+        self._proc: Optional[subprocess.Popen] = None
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def run(self):
         rate = 8000
@@ -143,15 +197,13 @@ class SpectrogramWorker(QThread):
         # -i) — far cheaper than pulling the whole track for one tile.
         i_idx = cmd.index("-i")
         cmd = cmd[:i_idx] + ["-ss", f"{self._t0:.3f}", "-t", f"{dur:.3f}"] + cmd[i_idx:]
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=30, **no_window())
-        except Exception as e:
-            self.error.emit(self._track_idx, str(e))
+        stdout, stderr, cancelled = _run_cancelable(self, cmd, timeout=45)
+        if cancelled:
             return
-        if r.returncode != 0 or not r.stdout:
-            self.error.emit(self._track_idx, r.stderr.decode(errors="ignore")[-200:] if r.stderr else "no audio")
+        if stdout is None:
+            self.error.emit(self._track_idx, stderr or "extraction failed")
             return
-        pcm = np.frombuffer(r.stdout, dtype=np.float32)
+        pcm = np.frombuffer(stdout, dtype=np.float32)
         spec = spectrogram(pcm, rate)
         img = to_rgb(spec)
         self.image_ready.emit(self._track_idx, self._t0, self._t1, img)
@@ -187,6 +239,13 @@ class MixRenderWorker(QThread):
                 pass
 
     def run(self):
+        if self._cancelled:
+            # cancel() can race ahead of run() starting at all (see
+            # _run_cancelable's docstring for the same race in the other
+            # workers) — a full-file render is minutes long, so honouring
+            # this early is the difference between an instant cancel and
+            # one that silently runs to completion anyway.
+            return
         if Path(self._out_path).exists():
             self.mix_ready.emit(self._cache_key, self._out_path)
             return
@@ -235,6 +294,16 @@ class FrameFetchWorker(QThread):
         self._width = width
         self._height = height
         self._snapshot_out = snapshot_out
+        self._proc: Optional[subprocess.Popen] = None
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
 
     def run(self):
         if self._mode == "snapshot":
@@ -249,17 +318,14 @@ class FrameFetchWorker(QThread):
         cmd = build_frame_extract_cmd(self._ffmpeg, self._path, self._secs,
                                       width=self._width, height=self._height,
                                       pix_fmt="rgb48le")
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=30, **no_window())
-        except Exception as e:
-            self.error.emit(str(e))
+        stdout, err, cancelled = _run_cancelable(self, cmd, timeout=45)
+        if cancelled:
             return
         expected = self._width * self._height * 3 * 2
-        if r.returncode != 0 or len(r.stdout) != expected:
-            msg = r.stderr.decode(errors="ignore")[-200:] if r.stderr else "frame extraction failed"
-            self.error.emit(msg)
+        if stdout is None or len(stdout) != expected:
+            self.error.emit(err or "frame extraction failed")
             return
-        arr = np.frombuffer(r.stdout, dtype="<u2").reshape(self._height, self._width, 3)
+        arr = np.frombuffer(stdout, dtype="<u2").reshape(self._height, self._width, 3)
         self.exact_frame_ready.emit(arr, self._secs)
 
     def _run_snapshot(self):
@@ -267,13 +333,10 @@ class FrameFetchWorker(QThread):
             self.error.emit("snapshot needs an output path")
             return
         cmd = build_snapshot_cmd(self._ffmpeg, self._path, self._secs, self._snapshot_out)
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=30, **no_window())
-        except Exception as e:
-            self.error.emit(str(e))
+        _, err, cancelled = _run_cancelable(self, cmd, timeout=45)
+        if cancelled:
             return
-        if r.returncode != 0 or not Path(self._snapshot_out).exists():
-            msg = r.stderr.decode(errors="ignore")[-200:] if r.stderr else "snapshot failed"
-            self.error.emit(msg)
+        if err is not None or not Path(self._snapshot_out).exists():
+            self.error.emit(err or "snapshot failed")
             return
         self.snapshot_saved.emit(self._snapshot_out)

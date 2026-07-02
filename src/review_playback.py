@@ -17,6 +17,13 @@ Two things the spike confirmed shape this file:
   - Qt exposes no usable per-track audio metadata, so track identity for
     `set_audio_single`/`set_audio_mix_file` comes from the caller (built
     from `probe.probe_audio_tracks`), not from Qt.
+
+A third thing found while wiring up the Review tab: a freshly loaded
+QMediaPlayer that has never been played delivers no video frames at all
+from a bare seek() — `PlaybackState.StoppedState` appears to gate frame
+delivery regardless of position. A brief play()-then-pause() "prime" pulse
+right after load moves it into PausedState, after which seeks reliably
+deliver frames — see `_prime_first_frame()`.
 """
 
 from pathlib import Path
@@ -86,6 +93,11 @@ class QtPlaybackEngine(PlaybackEngine):
         self._fps: float = 29.97
         self._tracks: list = []
         self._path: str = ""
+        self._priming = False   # True during the post-load play/pause warm-up pulse
+        self._prime_was_muted = False
+        self._prime_timer = QTimer(self)
+        self._prime_timer.setSingleShot(True)
+        self._prime_timer.timeout.connect(self._end_prime)
 
         self._player = QMediaPlayer(self)
         self._audio_out = QAudioOutput(self)
@@ -111,6 +123,9 @@ class QtPlaybackEngine(PlaybackEngine):
     # ── Loading ───────────────────────────────────────────────────────────────
 
     def load(self, path: str, tracks: list, fps: float = 29.97):
+        if self._priming:
+            self._prime_timer.stop()
+            self._priming = False
         self._clear_mix()
         self._path = str(path)
         self._tracks = tracks
@@ -122,9 +137,13 @@ class QtPlaybackEngine(PlaybackEngine):
     # ── Transport ─────────────────────────────────────────────────────────────
 
     def play(self):
+        if self._priming:
+            self._end_prime()
         self._player.play()
 
     def pause(self):
+        if self._priming:
+            self._end_prime()
         self._player.pause()
 
     def toggle(self):
@@ -134,6 +153,8 @@ class QtPlaybackEngine(PlaybackEngine):
             self.play()
 
     def seek(self, secs: float):
+        if self._priming:
+            self._end_prime()
         secs = max(0.0, min(secs, self._duration))
         self._player.setPosition(int(secs * 1000))
         if self._mix_player is not None:
@@ -202,8 +223,38 @@ class QtPlaybackEngine(PlaybackEngine):
         self._duration = duration_ms / 1000.0
         if self._duration > 0:
             self.duration_known.emit(self._duration, self._fps)
+            self._prime_first_frame()
+
+    def _prime_first_frame(self):
+        """A freshly loaded player in StoppedState delivers no frames from a
+        bare seek() — nudge it into PausedState with a brief play/pause so
+        the caller's first seek (typically right after load) actually shows
+        something instead of a blank preview. Muted and flagged so this
+        internal pulse doesn't emit a spurious state_changed(True) or make
+        a sound.
+
+        If a real seek() arrives before the pulse's own timer would have
+        ended it, seek() ends it early instead — otherwise the delayed
+        auto-pause can fire *after* the caller's seek and cut off the frame
+        that seek was trying to show.
+        """
+        self._priming = True
+        self._prime_was_muted = self._audio_out.isMuted()
+        self._audio_out.setMuted(True)
+        self._player.play()
+        self._prime_timer.start(250)
+
+    def _end_prime(self):
+        if not self._priming:
+            return
+        self._prime_timer.stop()
+        self._player.pause()
+        self._audio_out.setMuted(self._prime_was_muted)
+        self._priming = False
 
     def _on_playback_state_changed(self, state):
+        if self._priming:
+            return   # internal warm-up pulse — not a real state change to report
         playing = (state == QMediaPlayer.PlaybackState.PlayingState)
         if playing:
             self._poll_timer.start()

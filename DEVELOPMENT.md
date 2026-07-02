@@ -120,3 +120,40 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
     frame extraction (`rgb48le` / 16-bit PNG), never `QVideoFrame.toImage()`.
   - Qt exposes no useful per-track metadata (title/language all empty) — track labels
     ("Camera mic", "WAV backup", "Mix") must come from `probe.py`, not from Qt.
+- **Review tab UI assembly (done)** — `review_tab.py` (`ReviewSession` position authority +
+  `ReviewTab`), `review_workers.py` (5 background workers), and the widgets in `widgets/`
+  (`video_view.py`, `jog_wheel.py`, `scopes_panel.py`, `audio_lanes.py`, `trackbar.py`).
+  Verified end to end against the real pool-day master, including several rounds of
+  real bugs the verification caught before they could ship:
+  - `core.spectrogram.to_rgb()` returned `(time, frequency, 3)` — sideways for display;
+    now `(frequency, time, 3)` with high frequency at the top, matching how a spectrogram
+    is conventionally read.
+  - `core.scopes.waveform_rgb()`/the parade tinting normalized linearly against the single
+    largest bin — a real frame's one big uniform region (sky, wall, out-of-focus background)
+    would swamp everything else, making the rest of the waveform invisible. Fixed with a
+    sqrt-compressed normalization.
+  - `review_workers._run_cancelable()` treated empty `stdout` as failure — correct for
+    frame extraction (data comes back via stdout) but wrong for the snapshot command, which
+    writes to a file and legitimately returns nothing on stdout. Every snapshot was failing.
+  - **A genuine race condition**: `ReviewTab._apply_tick_set()` assigns the tracked worker
+    reference before calling `.start()`, so `cancel()` could fire before the QThread's `run()`
+    reached its `Popen()` call. `self._cancelled` was set but never re-checked before
+    spawning the process, so a "cancelled" full-file mix render ran to completion anyway.
+    Fixed by checking `_cancelled` at the top of every cancelable worker's `run()` (and
+    inside the shared `_run_cancelable()` helper) before spawning anything.
+  - `QtPlaybackEngine`'s post-load "prime" pulse (see above) used a delayed `singleShot`
+    auto-pause; a real `seek()` arriving during that window could be immediately followed
+    by the prime's own pause, cutting off the frame the seek was trying to show. Fixed by
+    having `seek()`/`play()`/`pause()`/`load()` end an in-progress prime immediately instead
+    of leaving the timer to fire later.
+  - `ReviewTab.shutdown()` used to unconditionally clear its tracked-worker list even when
+    a worker's `settle()` call timed out — silently reintroducing the exact "drop the
+    reference to a still-running QThread" crash the Phase-1 stability pass fixed elsewhere.
+    Fixed: `thread_utils.settle()` now returns whether the thread actually finished, and
+    `shutdown()` only drops the workers that did.
+  **Known real-world characteristic, not a bug**: rendering a tick-set mix for the *entire*
+  length of a very long master (this test master is ~46 minutes) on slow/cloud-synced
+  storage can take several minutes — well past "brief". The UI already shows "Rendering
+  mix…" throughout and the render is fully cancelable, so this is a UX/architecture note
+  for later (e.g. a windowed/incremental mix instead of always rendering the whole file)
+  rather than something fixed in v1.4.

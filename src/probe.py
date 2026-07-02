@@ -84,6 +84,7 @@ def _run_ffprobe(ffprobe_bin: str, path: str) -> dict:
         "-print_format", "json",
         "-show_format",
         "-show_streams",
+        "-show_chapters",
         str(path),
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -247,3 +248,37 @@ def probe_audio_tracks(ffprobe_bin: str, path: str) -> list:
     except Exception:
         return []
     return parse_audio_tracks(raw)
+
+
+# ── Chapters (Review tab prev/next transport) ──────────────────────────────────
+# Masters carry per-clip chapters written at merge time (ffmpeg_runner.py's
+# FFMETADATA chapters file) — the Review tab's prev/next buttons jump to these
+# instead of arbitrary time skips.
+
+@dataclass
+class ChapterInfo:
+    start: float = 0.0
+    end: float = 0.0
+    title: str = ""
+
+
+def parse_chapters(raw: dict) -> list:
+    """Pure: turn an ffprobe -show_chapters JSON dict into a ChapterInfo list."""
+    out = []
+    for c in raw.get("chapters", []):
+        try:
+            start = float(c.get("start_time", 0) or 0)
+            end = float(c.get("end_time", 0) or 0)
+        except (TypeError, ValueError):
+            start, end = 0.0, 0.0
+        title = (c.get("tags", {}) or {}).get("title", "") or ""
+        out.append(ChapterInfo(start=start, end=end, title=title))
+    return out
+
+
+def probe_chapters(ffprobe_bin: str, path: str) -> list:
+    try:
+        raw = _run_ffprobe(ffprobe_bin, path)
+    except Exception:
+        return []
+    return parse_chapters(raw)

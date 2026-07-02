@@ -1,10 +1,14 @@
 """Theme discipline regression tests.
 
 Guards two things the v1.4 theme pass fixed:
-  - no module outside theme.py/about_tab.py hardcodes a colour instead of
-    reading it from the active Palette (about_tab.py is exempt — its
-    literals are third-party brand colours: Bitcoin, Ethereum, Buy Me a
-    Coffee — not theme tokens);
+  - no module outside theme.py/about_tab.py/scopes_panel.py hardcodes a
+    colour instead of reading it from the active Palette. about_tab.py is
+    exempt because its literals are third-party brand colours (Bitcoin,
+    Ethereum, Buy Me a Coffee), not theme tokens. scopes_panel.py is exempt
+    for the same reason in spirit: its red/green/blue channel colours in
+    the histogram and waveform-parade scopes must stay TRUE red/green/blue
+    to be readable as an RGB scope — recolouring them to the app's amber
+    accent would defeat the point of the display;
   - `warn` is visually distinct from `accent` in both palettes, so a
     caution ("Will transcode") no longer reads as the brand colour.
 """
@@ -19,7 +23,7 @@ sys.path.insert(0, str(SRC))
 from theme import DARK, LIGHT
 
 HEX_RE = re.compile(r"#[0-9A-Fa-f]{3,4}\b|#[0-9A-Fa-f]{6}\b|#[0-9A-Fa-f]{8}\b")
-EXEMPT = {"theme.py", "about_tab.py"}
+EXEMPT = {"theme.py", "about_tab.py", "scopes_panel.py"}
 
 
 def _offenders() -> list[str]:

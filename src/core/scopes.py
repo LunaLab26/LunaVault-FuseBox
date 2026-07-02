@@ -92,18 +92,24 @@ def waveform_parade(arr, out_h: int = 256, bit_depth: int = 8) -> dict:
     }
 
 
+def _compress_normalize(counts: np.ndarray) -> np.ndarray:
+    """sqrt-compressed 0..1 normalization: a real frame often has one large
+    uniform region (sky, wall, out-of-focus background) whose bin count
+    would otherwise dwarf everything else under a linear scale, making the
+    rest of the waveform invisible. sqrt keeps the dominant bin brightest
+    while still showing the rest of the spread."""
+    compressed = np.sqrt(counts)
+    peak = compressed.max()
+    return (compressed / peak) if peak > 0 else compressed
+
+
 def waveform_rgb(arr, out_h: int = 256, bit_depth: int = 8) -> np.ndarray:
     """Single (out_h, W, 3) uint8 image: the three channel waveforms overlaid
     additively, so channel agreement reads white/grey and disagreement reads
     as colour — the combined-RGB waveform mode."""
     ch = waveform_parade(arr, out_h, bit_depth)
-
-    def _norm(x):
-        m = x.max()
-        return (x / m) if m > 0 else x
-
     out = np.zeros((out_h, ch["r"].shape[1], 3), dtype=np.float64)
-    out[..., 0] = _norm(ch["r"])
-    out[..., 1] = _norm(ch["g"])
-    out[..., 2] = _norm(ch["b"])
+    out[..., 0] = _compress_normalize(ch["r"])
+    out[..., 1] = _compress_normalize(ch["g"])
+    out[..., 2] = _compress_normalize(ch["b"])
     return np.clip(out * 255.0, 0, 255).astype(np.uint8)
