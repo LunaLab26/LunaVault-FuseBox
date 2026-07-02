@@ -37,6 +37,22 @@ PIX_FMT_LABELS = {
     "p010le":    "10-bit P010",
 }
 
+# (bit_depth, subsampling label) for pix_fmts the Review tab's scopes panel
+# badges know how to describe precisely; anything else falls back to sniffing
+# a bit-depth digit off the format name.
+_PIX_FMT_INFO = {
+    "yuv420p":     (8, "4:2:0"),
+    "yuvj420p":    (8, "4:2:0"),
+    "yuv422p":     (8, "4:2:2"),
+    "yuv444p":     (8, "4:4:4"),
+    "yuv420p10le": (10, "4:2:0"),
+    "yuv422p10le": (10, "4:2:2"),
+    "yuv444p10le": (10, "4:4:4"),
+    "yuv420p12le": (12, "4:2:0"),
+    "p010le":      (10, "4:2:0"),
+    "nv12":        (8, "4:2:0"),
+}
+
 
 @dataclass
 class StreamInfo:
@@ -167,3 +183,67 @@ def probe_duration(ffprobe_bin: str, path: str) -> float:
         return float(raw.get("format", {}).get("duration", 0) or 0)
     except Exception:
         return 0.0
+
+
+def pix_fmt_info(pix_fmt: str) -> tuple:
+    """(bit_depth, subsampling_label) for a pix_fmt, for the Review tab's
+    colour/dynamic-range badges. Falls back to sniffing a bit-depth digit off
+    the format name for anything not in the known-format table."""
+    if pix_fmt in _PIX_FMT_INFO:
+        return _PIX_FMT_INFO[pix_fmt]
+    import re
+    m = re.search(r"(\d+)(le|be)?$", pix_fmt or "")
+    depth = int(m.group(1)) if m and int(m.group(1)) in (8, 9, 10, 12, 14, 16) else 8
+    return depth, (pix_fmt or "?")
+
+
+# ── Multi-track audio (Review tab) ─────────────────────────────────────────────
+# `probe()` above keeps only the first audio stream (merge/WhatsApp tabs only
+# ever act on one at a time); the Review tab needs every audio track a master
+# carries. The v1.4 playback spike found Qt exposes no usable per-track
+# metadata (title/language all empty), so these labels come from ffprobe.
+
+@dataclass
+class AudioTrackInfo:
+    """One audio stream's identity. `audio_index` is 0-based among AUDIO
+    streams only (matches ffmpeg's `-map 0:a:N`)."""
+    audio_index: int
+    codec: str = ""
+    channels: int = 0
+    sample_rate: int = 0
+    bit_depth: int = 0
+    title: str = ""
+    language: str = ""
+
+
+def parse_audio_tracks(raw: dict) -> list:
+    """Pure: turn an ffprobe -show_streams JSON dict into an AudioTrackInfo list."""
+    out = []
+    audio_i = 0
+    for s in raw.get("streams", []):
+        if s.get("codec_type") != "audio":
+            continue
+        tags = s.get("tags", {}) or {}
+        try:
+            bit_depth = int(s.get("bits_per_raw_sample") or 0)
+        except (TypeError, ValueError):
+            bit_depth = 0
+        out.append(AudioTrackInfo(
+            audio_index=audio_i,
+            codec=s.get("codec_name", "") or "",
+            channels=int(s.get("channels", 0) or 0),
+            sample_rate=int(s.get("sample_rate", 0) or 0),
+            bit_depth=bit_depth,
+            title=tags.get("title", "") or tags.get("handler_name", "") or "",
+            language=tags.get("language", "") or "",
+        ))
+        audio_i += 1
+    return out
+
+
+def probe_audio_tracks(ffprobe_bin: str, path: str) -> list:
+    try:
+        raw = _run_ffprobe(ffprobe_bin, path)
+    except Exception:
+        return []
+    return parse_audio_tracks(raw)
