@@ -114,6 +114,7 @@ class ProbeThread(QThread):
 
 class MergeTab(QWidget):
     merge_complete = Signal(str)
+    open_in_review = Signal(str)   # user clicked "Review" on the completion dialog
 
     def __init__(self, settings: Settings):
         super().__init__()
@@ -1227,7 +1228,16 @@ class MergeTab(QWidget):
                 lbl.setStyleSheet(f"background:{p.ok}; color:white; border-radius:4px; "
                                   "padding:3px 7px; font-size:11px;")
             self.merge_complete.emit(str(out))
-            QMessageBox.information(self, "Done", f"Merge complete!\n\n{message}\n{out}")
+            box = QMessageBox(self)
+            box.setWindowTitle("Done")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(f"Merge complete!\n\n{message}\n{out}")
+            ok_btn = box.addButton(QMessageBox.StandardButton.Ok)
+            review_btn = box.addButton("Review", QMessageBox.ButtonRole.ActionRole)
+            box.setDefaultButton(ok_btn)
+            box.exec()
+            if box.clickedButton() is review_btn:
+                self.open_in_review.emit(str(out))
         else:
             QMessageBox.warning(self, "Failed", f"Merge failed:\n{message}")
 

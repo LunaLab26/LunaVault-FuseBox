@@ -21,6 +21,7 @@ from theme_toggle import ThemeToggle
 from settings import Settings, _settings_path
 from merge_tab import MergeTab
 from whatsapp_tab import WhatsAppTab
+from review_tab import ReviewTab
 from log_tab import LogTab
 from about_tab import AboutTab
 import theme
@@ -75,16 +76,19 @@ class MainWindow(QMainWindow):
 
         self._merge_tab     = MergeTab(settings)
         self._whatsapp_tab  = WhatsAppTab(settings)
+        self._review_tab    = ReviewTab(settings)
         self._log_tab       = LogTab()
         self._about_tab     = AboutTab()
 
         self._tabs.addTab(self._merge_tab,     "Merge clips")
         self._tabs.addTab(self._whatsapp_tab,  "WhatsApp clip")
+        self._tabs.addTab(self._review_tab,    "Review")
         self._tabs.addTab(self._log_tab,       "Log")
         self._tabs.addTab(self._about_tab,     "About")
         layout.addWidget(self._tabs)
 
         self._merge_tab.merge_complete.connect(self._whatsapp_tab.set_source)
+        self._merge_tab.open_in_review.connect(self._open_in_review)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
         self._status = QStatusBar()
@@ -106,6 +110,10 @@ class MainWindow(QMainWindow):
         if self._tabs.widget(idx) is self._log_tab:
             self._log_tab.refresh()
 
+    def _open_in_review(self, path: str):
+        self._review_tab.load_master(path)
+        self._tabs.setCurrentWidget(self._review_tab)
+
     def _check_ffmpeg(self):
         from ffmpeg_runner import get_ffmpeg
         ff, _ = get_ffmpeg()
@@ -119,6 +127,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._merge_tab.shutdown()
         self._whatsapp_tab.shutdown()
+        self._review_tab.shutdown()
         settle(self._update_thread, 2000)
         self._settings.set("window_geometry", bytes(self.saveGeometry()).hex())
         self._settings.save()

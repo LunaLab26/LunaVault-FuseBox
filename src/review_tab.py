@@ -8,9 +8,10 @@ container (no engine reference) — ReviewTab is the single place that reads
 engine/worker signals, updates the session, and issues commands back out,
 so there's one funnel for every seek regardless of which control asked for it.
 
-Loading is exposed as a plain `load_master(path)` method; wiring a "Load
-master…" button, drag-and-drop, and the merge-complete "Review" button is
-Phase 4f's job, not this file's.
+Loading happens via `load_master(path)` — called directly, from the "Load
+master…" browse button, from a dropped `.mov`/`.mp4` file, or from the
+merge tab's "Review" button (wired in main.py). The last-loaded path is
+persisted in settings so re-opening the app can offer it again.
 """
 
 import time
@@ -21,7 +22,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QFrame, QFileDialog,
 )
 
 import theme
@@ -166,9 +167,20 @@ class ReviewTab(QWidget):
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _setup_ui(self):
+        self.setAcceptDrops(True)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
+
+        header_row = QHBoxLayout()
+        self._browse_btn = QPushButton("Load master…")
+        self._browse_btn.clicked.connect(self._browse_for_master)
+        self._loaded_name_label = QLabel("No master loaded")
+        header_row.addWidget(self._browse_btn)
+        header_row.addWidget(self._loaded_name_label)
+        header_row.addStretch()
+        root.addLayout(header_row)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(12)
@@ -242,10 +254,35 @@ class ReviewTab(QWidget):
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
+    def _browse_for_master(self):
+        start_dir = self._settings.get("last_review_source", "") if self._settings else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load master to review", str(Path(start_dir).parent) if start_dir else "",
+            "Video files (*.mov *.mp4);;All files (*)")
+        if path:
+            self.load_master(path)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(
+            u.toLocalFile().lower().endswith((".mov", ".mp4")) for u in event.mimeData().urls()
+        ):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith((".mov", ".mp4")):
+                self.load_master(path)
+                break
+
     def load_master(self, path: str):
         self._path = str(path)
         self._set_loaded_visible(True)
+        self._loaded_name_label.setText(Path(path).name)
         self._status_label.setText(f"Loading {Path(path).name}…")
+        if self._settings is not None:
+            self._settings.set("last_review_source", str(path))
+            self._settings.save()
 
         ff, fp = get_ffmpeg()
         w = TrackScanWorker(fp, self._path)
@@ -554,5 +591,6 @@ class ReviewTab(QWidget):
         p = theme.active_palette()
         self._empty_label.setStyleSheet(f"color:{p.text_mute}; font-size:14px;")
         self._status_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+        self._loaded_name_label.setStyleSheet(f"color:{p.text_mute}; font-size:12px;")
         self._tc_label.setStyleSheet(
             f"color:{p.text_dim}; font-size:12px; font-family:monospace;")
