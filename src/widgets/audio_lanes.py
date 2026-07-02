@@ -158,11 +158,12 @@ class AudioLaneStack(QWidget):
         self._mode_wave.setChecked(True)
         self._mode_wave.toggled.connect(self._on_mode_toggled)
 
-        self._title = QLabel("Audio tracks")
+        # No "Audio tracks" title here — the enclosing section frame in
+        # review_tab supplies it. The readout ("what am I hearing right now")
+        # is the important feedback, so it's given real weight, not muted.
         self._readout = QLabel("")
 
         header = QHBoxLayout()
-        header.addWidget(self._title)
         header.addWidget(self._mode_wave)
         header.addWidget(self._mode_spec)
         header.addStretch()
@@ -236,5 +237,4 @@ class AudioLaneStack(QWidget):
 
     def _restyle(self):
         p = theme.active_palette()
-        self._title.setStyleSheet(f"color:{p.text_mute}; font-size:11px; letter-spacing:0.5px;")
-        self._readout.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+        self._readout.setStyleSheet(f"color:{p.text}; font-size:12px;")

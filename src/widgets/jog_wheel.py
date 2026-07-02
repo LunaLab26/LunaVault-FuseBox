@@ -24,6 +24,8 @@ class JogWheel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(34, 34)
+        self.setToolTip("Drag around the wheel to shuttle frame-by-frame — "
+                        "slow for single frames, fast to skip several")
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self._dragging = False
         self._last_angle: Optional[float] = None

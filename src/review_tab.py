@@ -20,10 +20,10 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QFrame, QFileDialog,
-    QCheckBox,
+    QCheckBox, QStyle,
 )
 
 import theme
@@ -147,11 +147,14 @@ class ReviewTab(QWidget):
         self._spec_cache: dict = {}       # (track_idx, t0, t1) -> QImage, capped LRU
         self._spec_cache_order: list = []
         self._last_approx_scope_t = 0.0
+        self._sections: list = []         # section frames — restyled + shown/hidden together
+        self._section_titles: list = []
 
         self._setup_ui()
         self._wire_engine()
         self._wire_session()
         self._wire_widgets()
+        self._setup_shortcuts()
         self._restyle()
         ctrl = theme.controller()
         if ctrl is not None:
@@ -169,8 +172,33 @@ class ReviewTab(QWidget):
 
     # ── UI construction ───────────────────────────────────────────────────────
 
+    def _section(self, title: str, right: Optional[QWidget] = None):
+        """A titled, bordered group card — mirrors merge_tab._section so the
+        Review tab reads as the same app. Returns (frame, body_layout); add
+        content to body_layout. Tracked for restyle + show/hide together."""
+        frame = QFrame()
+        frame.setObjectName("review_section")
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(12, 9, 12, 11)
+        v.setSpacing(8)
+        hdr = QHBoxLayout()
+        lbl = QLabel(title)
+        lbl.setObjectName("review_section_title")
+        hdr.addWidget(lbl)
+        if right is not None:
+            hdr.addStretch()
+            hdr.addWidget(right)
+        v.addLayout(hdr)
+        body = QVBoxLayout()
+        body.setSpacing(7)
+        v.addLayout(body)
+        self._sections.append(frame)
+        self._section_titles.append(lbl)
+        return frame, body
+
     def _setup_ui(self):
         self.setAcceptDrops(True)
+        st = self.style()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -188,8 +216,7 @@ class ReviewTab(QWidget):
             "Play video without GPU hardware acceleration. Turn this on if the app has\n"
             "crashed or the screen has gone blank while playing footage in this tab —\n"
             "some GPUs can't reliably hardware-decode 4K 10-bit video and this avoids\n"
-            "that path entirely, at the cost of smoother playback. Takes effect after\n"
-            "you restart the app.")
+            "that path entirely, at the cost of smoother playback. Applies immediately.")
         if self._settings is not None:
             self._software_decode_check.setChecked(
                 bool(self._settings.get("review_software_decode", False)))
@@ -197,35 +224,59 @@ class ReviewTab(QWidget):
         header_row.addWidget(self._software_decode_check)
         root.addLayout(header_row)
 
+        # ── Preview + scopes row ──────────────────────────────────────────────
         top_row = QHBoxLayout()
         top_row.setSpacing(12)
 
-        preview_col = QVBoxLayout()
-        self._video_view = ZoomableVideoView()
-        preview_col.addWidget(self._video_view, 1)
-
-        zoom_row = QHBoxLayout()
+        # Zoom controls live in the Preview section header (right slot).
+        self._zoom_label = QLabel("Zoom")
         self._zoom_fit_btn = QPushButton("Fit")
+        self._zoom_fit_btn.setToolTip("Scale the frame to fit the preview")
         self._zoom_1to1_btn = QPushButton("1:1")
+        self._zoom_1to1_btn.setToolTip("Show the frame at 100% — one screen pixel per video pixel")
         self._zoom_spin = QSpinBox()
         self._zoom_spin.setRange(10, 800)
         self._zoom_spin.setValue(100)
         self._zoom_spin.setSuffix("%")
+        self._zoom_spin.setToolTip("Zoom to an exact percentage")
+        zoom_widget = QWidget()
+        zoom_row = QHBoxLayout(zoom_widget)
+        zoom_row.setContentsMargins(0, 0, 0, 0)
+        zoom_row.setSpacing(6)
+        zoom_row.addWidget(self._zoom_label)
         zoom_row.addWidget(self._zoom_fit_btn)
         zoom_row.addWidget(self._zoom_1to1_btn)
         zoom_row.addWidget(self._zoom_spin)
-        zoom_row.addStretch()
-        preview_col.addLayout(zoom_row)
+
+        preview_frame, preview_col = self._section("Preview", right=zoom_widget)
+        self._preview_frame = preview_frame
+        self._video_view = ZoomableVideoView()
+        preview_col.addWidget(self._video_view, 1)
 
         transport_row = QHBoxLayout()
-        self._prev_btn = QPushButton("|◀")          # prev chapter
-        self._step_back_btn = QPushButton("<")       # step back one frame
-        self._play_btn = QPushButton("▶")            # play / pause (text swaps to "||")
-        self._step_fwd_btn = QPushButton(">")         # step forward one frame
-        self._next_btn = QPushButton("▶|")           # next chapter
+        # Native Qt media icons — guaranteed to render, unlike the exotic glyphs
+        # that went invisible earlier this session (see commit 117bf62).
+        self._prev_btn = QPushButton()
+        self._prev_btn.setIcon(st.standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward))
+        self._prev_btn.setToolTip("Jump to previous clip (PgUp)")
+        self._step_back_btn = QPushButton()
+        self._step_back_btn.setIcon(st.standardIcon(QStyle.StandardPixmap.SP_MediaSeekBackward))
+        self._step_back_btn.setToolTip("Step one frame back (←)")
+        self._play_btn = QPushButton()
+        self._play_btn.setIcon(st.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self._play_btn.setToolTip("Play / pause (Space)")
+        self._step_fwd_btn = QPushButton()
+        self._step_fwd_btn.setIcon(st.standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward))
+        self._step_fwd_btn.setToolTip("Step one frame forward (→)")
+        self._next_btn = QPushButton()
+        self._next_btn.setIcon(st.standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
+        self._next_btn.setToolTip("Jump to next clip (PgDn)")
         self._jog = JogWheel()
-        self._snapshot_btn = QPushButton("●")         # snapshot (avoids emoji — see _restyle)
+        self._snapshot_btn = QPushButton()
+        self._snapshot_btn.setIcon(st.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        self._snapshot_btn.setToolTip("Save a full-resolution PNG next to the master (S)")
         self._tc_label = QLabel("00:00:00:00")
+        self._dur_label = QLabel("/ 00:00:00:00")
         self._icon_buttons = (self._prev_btn, self._step_back_btn, self._play_btn,
                               self._step_fwd_btn, self._next_btn, self._snapshot_btn)
         for b in self._icon_buttons:
@@ -239,32 +290,46 @@ class ReviewTab(QWidget):
         transport_row.addWidget(self._snapshot_btn)
         transport_row.addStretch()
         transport_row.addWidget(self._tc_label)
+        transport_row.addWidget(self._dur_label)
         preview_col.addLayout(transport_row)
 
         self._status_label = QLabel("")
         preview_col.addWidget(self._status_label)
 
-        top_row.addLayout(preview_col, 3)
+        top_row.addWidget(preview_frame, 3)
 
         self._scopes = ScopesPanel()
-        top_row.addWidget(self._scopes, 2)
+        scopes_frame, scopes_body = self._section("Colour scopes")
+        self._scopes_frame = scopes_frame
+        scopes_body.addWidget(self._scopes)
+        top_row.addWidget(scopes_frame, 2)
 
         root.addLayout(top_row, 3)
 
+        # ── Audio section ─────────────────────────────────────────────────────
         self._lanes = AudioLaneStack()
-        root.addWidget(self._lanes, 2)
+        audio_frame, audio_body = self._section("Audio tracks")
+        self._audio_frame = audio_frame
+        audio_body.addWidget(self._lanes)
+        root.addWidget(audio_frame, 2)
 
+        # ── Overview section ──────────────────────────────────────────────────
+        self._overview_hint = QLabel("Drag the box edges to zoom · drag inside to scroll")
         self._trackbar = OverviewTrackbar()
-        root.addWidget(self._trackbar)
+        overview_frame, overview_body = self._section("Overview", right=self._overview_hint)
+        self._overview_frame = overview_frame
+        overview_body.addWidget(self._trackbar)
+        root.addWidget(overview_frame)
 
-        self._empty_label = QLabel("Load a master to review it here.")
+        self._empty_label = QLabel("Drop a .mov here, or click Load master… to review it.")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._empty_label)
         self._set_loaded_visible(False)
 
     def _set_loaded_visible(self, loaded: bool):
-        for w in (self._video_view, self._scopes, self._lanes, self._trackbar):
-            w.setVisible(loaded)
+        for f in (self._preview_frame, self._scopes_frame, self._audio_frame,
+                  self._overview_frame):
+            f.setVisible(loaded)
         self._empty_label.setVisible(not loaded)
 
     # ── Loading ───────────────────────────────────────────────────────────────
@@ -281,9 +346,32 @@ class ReviewTab(QWidget):
         if self._settings is not None:
             self._settings.set("review_software_decode", checked)
             self._settings.save()
+        # Apply live — the whole point of this switch is recovering from a GPU
+        # decode crash, so making the user restart to escape it would be cruel.
+        # Tear the old engine down fully before dropping the reference (same
+        # QThread-lifetime discipline as shutdown()), build the requested one,
+        # re-wire it, and reload the current master at the same position.
+        pos = self._session.position
+        was_playing = self._session.playing
+        self._engine.shutdown()
+        self._engine = make_engine(self, use_software=checked)
+        self._wire_engine()
         self._status_label.setText(
-            "Software decode " + ("enabled" if checked else "disabled")
-            + " — restart the app for this to take effect.")
+            "Software decode " + ("on" if checked else "off")
+            + " — using " + ("CPU" if checked else "GPU") + " video decoding.")
+        if self._path and self._video_info is not None:
+            self._engine.load(self._path, self._session.tracks,
+                              fps=self._video_info.fps_float or 29.97)
+            self._reapply_audio_after_swap()
+            self._engine.seek(pos)
+            if was_playing:
+                self._engine.play()
+
+    def _reapply_audio_after_swap(self):
+        """After a live engine swap the new engine has no audio set — re-issue
+        the current tick-set through the normal debounced path so single-track
+        native switches and multi-track renders both come back."""
+        self._mix_timer.start()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and any(
@@ -361,7 +449,8 @@ class ReviewTab(QWidget):
 
     def _on_engine_state_changed(self, playing: bool):
         self._session.set_playing(playing)
-        self._play_btn.setText("||" if playing else "▶")
+        icon = QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay
+        self._play_btn.setIcon(self.style().standardIcon(icon))
         self._video_view.set_playing(playing)
         if not playing:
             self._request_exact_scope()
@@ -412,10 +501,14 @@ class ReviewTab(QWidget):
     # ── Session wiring ────────────────────────────────────────────────────────
 
     def _wire_session(self):
-        self._session.duration_changed.connect(lambda secs, fps: self._trackbar.set_duration(secs))
+        self._session.duration_changed.connect(self._on_session_duration)
         self._session.position_changed.connect(self._on_session_position)
         self._session.viewport_changed.connect(self._on_viewport_changed)
         self._session.tracks_changed.connect(lambda tracks: None)
+
+    def _on_session_duration(self, secs: float, fps: float):
+        self._trackbar.set_duration(secs)
+        self._dur_label.setText(f"/ {secs_to_tc(secs, fps)}")
 
     def _on_session_position(self, secs: float):
         self._trackbar.set_position(secs)
@@ -439,7 +532,10 @@ class ReviewTab(QWidget):
             lambda v: self._video_view.set_zoom_percent(float(v)))
         self._video_view.zoom_changed.connect(self._on_zoom_changed)
 
-        self._play_btn.clicked.connect(self._engine.toggle)
+        # Wrapped in a lambda (not bound to self._engine directly) so a live
+        # software-decode swap that replaces self._engine keeps working — see
+        # _on_software_decode_toggled.
+        self._play_btn.clicked.connect(lambda: self._engine.toggle())
         self._step_back_btn.clicked.connect(lambda: self._step(-1))
         self._step_fwd_btn.clicked.connect(lambda: self._step(1))
         self._prev_btn.clicked.connect(self._prev_chapter)
@@ -452,6 +548,23 @@ class ReviewTab(QWidget):
 
         self._lanes.track_toggled.connect(self._on_track_toggled)
         self._lanes.mode_changed.connect(self._on_lane_mode_changed)
+
+    def _setup_shortcuts(self):
+        """Thin keyboard wrappers over controls that already exist — a review
+        tool lives or dies on Space/arrow scrubbing. All bound to this widget,
+        so they only fire when the Review tab has focus."""
+        def sc(seq, slot):
+            s = QShortcut(QKeySequence(seq), self)
+            s.activated.connect(slot)
+            return s
+        sc(Qt.Key.Key_Space, lambda: self._engine.toggle())
+        sc(Qt.Key.Key_Left, lambda: self._step(-1))
+        sc(Qt.Key.Key_Right, lambda: self._step(1))
+        sc(Qt.Key.Key_PageUp, self._prev_chapter)
+        sc(Qt.Key.Key_PageDown, self._next_chapter)
+        sc(Qt.Key.Key_Home, lambda: self._seek(0.0))
+        sc(Qt.Key.Key_End, lambda: self._seek(self._session.duration))
+        sc(Qt.Key.Key_S, self._take_snapshot)
 
     def _on_zoom_1to1_clicked(self):
         self._video_view.set_zoom_1to1()
@@ -628,11 +741,21 @@ class ReviewTab(QWidget):
 
     def _restyle(self):
         p = theme.active_palette()
+        for f in self._sections:
+            f.setStyleSheet(
+                f"QFrame#review_section {{ background:{p.surface}; border:1px solid {p.border_dk}; "
+                "border-radius:8px; }")
+        for t in self._section_titles:
+            t.setStyleSheet(f"color:{p.accent}; font-size:10px; font-weight:bold; letter-spacing:1px;")
         self._empty_label.setStyleSheet(f"color:{p.text_mute}; font-size:14px;")
         self._status_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
         self._loaded_name_label.setStyleSheet(f"color:{p.text_mute}; font-size:12px;")
+        self._zoom_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+        self._overview_hint.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
         self._tc_label.setStyleSheet(
             f"color:{p.text_dim}; font-size:12px; font-family:monospace;")
+        self._dur_label.setStyleSheet(
+            f"color:{p.text_mute}; font-size:12px; font-family:monospace;")
         # The app's global QPushButton padding (14px each side) leaves no room
         # for a compact icon button's glyph at a small fixed size — override
         # it to 0 here, the same fix merge_tab.py's row-reorder buttons use.

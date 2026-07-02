@@ -9,7 +9,7 @@ scrubber already works.
 
 from typing import Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPainter, QColor, QPen
 
 from widgets.timeline import TimelineBase
@@ -27,6 +27,7 @@ class OverviewTrackbar(TimelineBase):
         self._view_t0 = 0.0
         self._view_t1 = 0.0
         self._drag_offset = 0.0     # body-drag: click_secs - view_t0, captured at press time
+        self.setMouseTracking(True)   # so hover sets the cursor even with no button down
 
     def set_duration(self, dur: float):
         super().set_duration(dur)
@@ -86,6 +87,15 @@ class OverviewTrackbar(TimelineBase):
         p.setPen(QPen(QColor(pal.accent), 2))
         p.drawRect(x0, top, max(1, x1 - x0), bot - top)
 
+        # Solid grab-handles on each edge — without them the drag-to-zoom
+        # affordance is invisible (the whole point of this being discoverable).
+        mid_y = (top + bot) / 2
+        hh = 8   # half-height of a handle
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(pal.accent))
+        for x in (x0, x1):
+            p.drawRoundedRect(int(x) - 2, int(mid_y - hh), 4, hh * 2, 2, 2)
+
     # ── Hit-test / drag ───────────────────────────────────────────────────────
 
     def _hit_test(self, px: float) -> str:
@@ -99,6 +109,26 @@ class OverviewTrackbar(TimelineBase):
             self._drag_offset = self._x_to_secs(px) - self._view_t0
             return "viewport-body"
         return "pos"
+
+    def mouseMoveEvent(self, event):
+        # While dragging, TimelineBase does the work. While merely hovering,
+        # reflect what a press would grab so the interaction is discoverable:
+        # resize arrows on the edges, a hand over the body.
+        if self._drag is None and self._duration > 0:
+            tag = self._hit_test(event.position().x())
+            if tag in ("viewport-left", "viewport-right"):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif tag == "viewport-body":
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+        elif self._drag == "viewport-body":
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def _apply_drag_other(self, tag: str, secs: float):
         span = self._view_t1 - self._view_t0
