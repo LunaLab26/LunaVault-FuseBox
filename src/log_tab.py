@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor, QFont
 
 import log_manager
+import theme
 
 
 # Column indices
@@ -40,7 +41,19 @@ class LogTab(QWidget):
         super().__init__()
         self._entries: list = []
         self._setup_ui()
+        self._restyle()
         self.refresh()
+        ctrl = theme.controller()
+        if ctrl is not None:
+            ctrl.changed.connect(self._restyle)
+
+    def _restyle(self):
+        p = theme.active_palette()
+        self._detail_lbl.setStyleSheet(f"font-weight:bold; color:{p.text_mute};")
+        self._status_lbl.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+        # Status-cell colours are set when the table is populated — refresh them.
+        if self._entries:
+            self._populate_table()
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
@@ -91,7 +104,7 @@ class LogTab(QWidget):
         detail_layout = QVBoxLayout(detail_frame)
         detail_layout.setContentsMargins(0, 4, 0, 0)
         detail_lbl = QLabel("Details")
-        detail_lbl.setStyleSheet("font-weight:bold; color:#aaa;")
+        self._detail_lbl = detail_lbl
         detail_layout.addWidget(detail_lbl)
         self._detail = QTextEdit()
         self._detail.setReadOnly(True)
@@ -105,7 +118,6 @@ class LogTab(QWidget):
 
         # Status bar
         self._status_lbl = QLabel()
-        self._status_lbl.setStyleSheet("color:#888; font-size:11px;")
         root.addWidget(self._status_lbl)
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -152,11 +164,9 @@ class LogTab(QWidget):
                 self._table.setItem(row, col, item)
 
             # Colour the status cell
+            p = theme.active_palette()
             status_item = self._table.item(row, COL_STATUS)
-            if success:
-                status_item.setForeground(QColor("#2ecc71"))
-            else:
-                status_item.setForeground(QColor("#e74c3c"))
+            status_item.setForeground(QColor(p.ok if success else p.danger))
 
         n = len(self._entries)
         ok  = sum(1 for e in self._entries if e.get("success"))

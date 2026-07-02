@@ -45,7 +45,7 @@ class Palette:
     press_bg: str
     disabled_bg: str
     disabled_fg: str
-    # Semantic status (warm-tuned)
+    # Semantic status (warm-tuned; warn must NEVER equal accent)
     ok: str
     warn: str
     danger: str
@@ -53,39 +53,48 @@ class Palette:
     pane_0: str
     pane_1: str
     pane_2: str
-    # Is this a light palette? (affects on-accent text choices)
+    # One-off banner surfaces
+    banner_warn_bg: str = "#7A4018"
+    banner_info_bg: str = "#1A2A3A"
+    # Text on top of accent (and other saturated) fills
+    on_accent_col: str = "#1A1206"
+    # Is this a light palette?
     is_light: bool = False
 
     def on_accent(self) -> str:
         """Readable text colour on top of an accent fill."""
-        return self.bg if not self.is_light else "#FBF6EE"
+        return self.on_accent_col
 
 
 DARK = Palette(
     name="dark",
-    bg="#0D0905", panel="#100806", surface="#160C06", surface2="#1A1008",
+    bg="#0E0A06", panel="#100806", surface="#18110A", surface2="#1A1008",
     alt_row="#130A04", input_dk="#0A0703",
-    border_dk="#2A1808", border="#3A2010", border_hi="#5A3018",
-    accent="#C07838", accent_hi="#E09040", gold="#E8B838", blue="#2D7FD0",
-    text="#F5E6D0", text_mute="#A09080", text_dim="#6A4828",
+    border_dk="#1E1309", border="#26190E", border_hi="#5A3018",
+    accent="#D4863C", accent_hi="#E0954A", gold="#E8B838", blue="#2D7FD0",
+    text="#F6E9D6", text_mute="#A6845C", text_dim="#C6A279",
     btn_bg="#3A2010", hover_bg="#4A2A14", press_bg="#2A1808",
-    disabled_bg="#1A0E06", disabled_fg="#4A3020",
-    ok="#3FB873", warn="#D9882B", danger="#D9533F",
-    pane_0="#1C0F06", pane_1="#120A04", pane_2="#0D0905",
+    disabled_bg="#1A0E06", disabled_fg="#6A5030",
+    ok="#3FB765", warn="#E0A33A", danger="#E0685A",
+    pane_0="#1D1207", pane_1="#140D06", pane_2="#0E0A06",
+    banner_warn_bg="#7A4018", banner_info_bg="#1A2A3A",
+    on_accent_col="#1A1206",
     is_light=False,
 )
 
 LIGHT = Palette(
     name="light",
-    bg="#FBF6EE", panel="#F2E9DB", surface="#FFFDF9", surface2="#FFFFFF",
-    alt_row="#F6EFE3", input_dk="#F0E7D8",
-    border_dk="#E6DAC8", border="#DDCDB6", border_hi="#C9B596",
-    accent="#B0682C", accent_hi="#C8823E", gold="#D9A41E", blue="#2D7FD0",
-    text="#2A1808", text_mute="#7A6A56", text_dim="#A9947B",
-    btn_bg="#EFE5D5", hover_bg="#E7D9C4", press_bg="#DDCDB6",
-    disabled_bg="#F0E9DD", disabled_fg="#B8A98F",
-    ok="#2E9E5B", warn="#B5701C", danger="#C0432F",
-    pane_0="#FFFDF9", pane_1="#FBF6EE", pane_2="#F4ECDF",
+    bg="#EFE7D9", panel="#E7DCCB", surface="#FBF6EC", surface2="#FFFFFF",
+    alt_row="#E9DFCC", input_dk="#EADFCB",
+    border_dk="#EBE0CE", border="#E4D7C2", border_hi="#C9B596",
+    accent="#C0742E", accent_hi="#A9611F", gold="#D9A41E", blue="#2D7FD0",
+    text="#2A1E12", text_mute="#7A6446", text_dim="#96805C",
+    btn_bg="#E7DCC8", hover_bg="#DFD2BA", press_bg="#D6C7AC",
+    disabled_bg="#EBE2D2", disabled_fg="#B8A98F",
+    ok="#2E9E57", warn="#CE9A22", danger="#C6473A",
+    pane_0="#FBF6EC", pane_1="#EFE7D9", pane_2="#E8DEC9",
+    banner_warn_bg="#EEDDBE", banner_info_bg="#DCE8F4",
+    on_accent_col="#FFF6EC",
     is_light=True,
 )
 

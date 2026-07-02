@@ -175,17 +175,11 @@ class MergeTab(QWidget):
             "⚠  Daylight saving detected — consecutive clips are ~1 hour apart by filename. "
             "Verify the clip order below is correct."
         )
-        self._dst_banner.setStyleSheet(
-            "background:#7A4018; color:#F5E6D0; border-radius:4px; padding:6px 10px;"
-        )
         self._dst_banner.setWordWrap(True)
         self._dst_banner.hide()
         c.addWidget(self._dst_banner)
 
         self._unmatched_banner = QLabel()
-        self._unmatched_banner.setStyleSheet(
-            "background:#1A2A3A; color:#F5E6D0; border-radius:4px; padding:6px 10px;"
-        )
         self._unmatched_banner.setWordWrap(True)
         self._unmatched_banner.hide()
         c.addWidget(self._unmatched_banner)
@@ -197,7 +191,6 @@ class MergeTab(QWidget):
         res_layout.setContentsMargins(10, 8, 10, 8)
         res_layout.setSpacing(6)
         self._res_label = QLabel()
-        self._res_label.setStyleSheet("color:#F5E6D0; font-size:12px;")
         self._res_label.setWordWrap(True)
         res_layout.addWidget(self._res_label)
         res_btn_row = QHBoxLayout()
@@ -211,20 +204,12 @@ class MergeTab(QWidget):
         ]:
             btn = QPushButton(label)
             btn.setProperty("res_key", key)
-            btn.setStyleSheet(
-                "QPushButton { font-size:11px; padding:4px 10px; border-radius:4px; "
-                "border:1px solid #3A2010; color:#6A4828; background:#0A0703; }"
-                "QPushButton:checked { border-color:#C07838; color:#C07838; background:#1A1008; }"
-            )
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, b=btn: self._on_res_btn(b))
             self._res_buttons.append(btn)
             res_btn_row.addWidget(btn)
         res_btn_row.addStretch()
         res_layout.addLayout(res_btn_row)
-        self._res_banner.setStyleSheet(
-            "background:#1A1008; border:1px solid #3A2010; border-radius:8px;"
-        )
         c.addWidget(self._res_banner)
 
         # ── CLIPS ───────────────────────────────────────────────────────────────
@@ -299,7 +284,6 @@ class MergeTab(QWidget):
 
         # ── Transcode estimate label ──────────────────────────────────────────
         self._estimate_label = QLabel()
-        self._estimate_label.setStyleSheet("color:#6A4828; font-size:11px;")
         self._estimate_label.hide()
         c.addWidget(self._estimate_label)
 
@@ -326,7 +310,6 @@ class MergeTab(QWidget):
         thumb_row = QHBoxLayout()
         self._thumb_label = QLabel("Rendering…")
         self._thumb_label.setFixedSize(240, 135)
-        self._thumb_label.setStyleSheet("background:#111; border-radius:4px; color:#888;")
         self._thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         thumb_row.addWidget(self._thumb_label)
         thumb_row.addStretch()
@@ -685,7 +668,23 @@ class MergeTab(QWidget):
                 f"QPushButton {{ background:{p.accent}; color:{p.on_accent()}; border-radius:6px; "
                 "font-weight:bold; padding:0 22px; }"
                 f"QPushButton:hover {{ background:{p.accent_hi}; }}")
-        # Status badges are cell widgets — rebuild the table to recolour them.
+        # Banners
+        self._dst_banner.setStyleSheet(
+            f"background:{p.banner_warn_bg}; color:{p.text}; border-radius:4px; padding:6px 10px;")
+        self._unmatched_banner.setStyleSheet(
+            f"background:{p.banner_info_bg}; color:{p.text}; border-radius:4px; padding:6px 10px;")
+        self._res_label.setStyleSheet(f"color:{p.text}; font-size:12px;")
+        for btn in getattr(self, "_res_buttons", []):
+            btn.setStyleSheet(
+                "QPushButton { font-size:11px; padding:4px 10px; border-radius:4px; "
+                f"border:1px solid {p.border}; color:{p.text_dim}; background:{p.input_dk}; }}"
+                f"QPushButton:checked {{ border-color:{p.accent}; color:{p.accent}; background:{p.surface2}; }}")
+        self._res_banner.setStyleSheet(
+            f"background:{p.surface2}; border:1px solid {p.border}; border-radius:8px;")
+        self._estimate_label.setStyleSheet(f"color:{p.text_dim}; font-size:11px;")
+        self._thumb_label.setStyleSheet(
+            f"background:{p.input_dk}; border-radius:4px; color:{p.text_mute};")
+        # Status badges + row colours are cell widgets — rebuild the table to recolour them.
         if self._clips:
             self._populate_table()
 
@@ -921,10 +920,11 @@ class MergeTab(QWidget):
     def _add_row(self, clip: ClipInfo, row: int):
         self._table.insertRow(row)
 
+        p = theme.active_palette()
         order_item = QTableWidgetItem(str(clip.order_idx + 1))
         order_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if clip.manually_moved:
-            order_item.setForeground(QColor("#C07838"))
+            order_item.setForeground(QColor(p.accent))
             order_item.setFont(QFont("", -1, QFont.Weight.Bold))
         self._table.setItem(row, COL_ORDER, order_item)
 
@@ -942,7 +942,7 @@ class MergeTab(QWidget):
         wav_item = QTableWidgetItem("✓" if clip.has_wav() else "—")
         wav_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if not clip.has_wav():
-            wav_item.setForeground(QColor("#6A4828"))
+            wav_item.setForeground(QColor(p.text_dim))
         self._table.setItem(row, COL_WAV, wav_item)
 
         off_item = QTableWidgetItem(_fmt_offset(clip))
@@ -955,7 +955,6 @@ class MergeTab(QWidget):
 
         self._update_status_cell(row, clip)
 
-        p = theme.active_palette()
         icon_style = (
             f"QPushButton {{ background:{p.btn_bg}; color:{p.text}; border:1px solid {p.border}; "
             "border-radius:4px; padding:0px; font-size:14px; }"
@@ -1115,16 +1114,17 @@ class MergeTab(QWidget):
                 w.deleteLater()
         self._stage_labels.clear()
 
+        p = theme.active_palette()
+        pill_idle = (f"background:{p.btn_bg}; color:{p.text}; border-radius:4px; "
+                     "padding:3px 7px; font-size:11px;")
         for clip in sorted(self._clips, key=lambda c: c.order_idx):
             lbl = QLabel(clip.stem[:20])
-            lbl.setStyleSheet("background:#3A2010; color:#F5E6D0; border-radius:4px; "
-                              "padding:3px 7px; font-size:11px;")
+            lbl.setStyleSheet(pill_idle)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._stage_labels.append(lbl)
             self._stage_row.addWidget(lbl)
         merge_lbl = QLabel("Merge")
-        merge_lbl.setStyleSheet("background:#3A2010; color:#F5E6D0; border-radius:4px; "
-                                "padding:3px 7px; font-size:11px;")
+        merge_lbl.setStyleSheet(pill_idle)
         merge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._stage_labels.append(merge_lbl)
         self._stage_row.addWidget(merge_lbl)
@@ -1157,14 +1157,15 @@ class MergeTab(QWidget):
         pct  = data.get("pct", 0)
         size = data.get("size", 0)
         self._pbar.setValue(int(pct))
+        p = theme.active_palette()
         for i, lbl in enumerate(self._stage_labels):
             if i < idx:
-                col = "#2ecc71"
+                col = p.ok
             elif i == idx:
-                col = "#C07838"
+                col = p.accent
             else:
-                col = "#3A2010"
-            lbl.setStyleSheet(f"background:{col}; color:#F5E6D0; border-radius:4px; "
+                col = p.btn_bg
+            lbl.setStyleSheet(f"background:{col}; color:{p.text}; border-radius:4px; "
                               f"padding:3px 7px; font-size:11px;")
         rate    = data.get("rate_bps", 0) or 0
         eta     = data.get("eta_secs", 0) or 0
@@ -1221,8 +1222,9 @@ class MergeTab(QWidget):
             pass
         if success:
             self._pbar.setValue(100)
+            p = theme.active_palette()
             for lbl in self._stage_labels:
-                lbl.setStyleSheet("background:#2ecc71; color:white; border-radius:4px; "
+                lbl.setStyleSheet(f"background:{p.ok}; color:white; border-radius:4px; "
                                   "padding:3px 7px; font-size:11px;")
             self.merge_complete.emit(str(out))
             QMessageBox.information(self, "Done", f"Merge complete!\n\n{message}\n{out}")
