@@ -142,10 +142,14 @@ def test_concat_cmd_appends_extra_out_args_before_output():
     assert cmd.index("use_metadata_tags") < cmd.index("out.mov")
 
 
-def test_archival_concat_is_stream_copy_all_streams():
+def test_archival_concat_maps_only_video_and_audio():
+    # NOT a blanket "-map 0" — real camera files can carry extra data streams
+    # (e.g. a Pixel phone's "mett" motion-photo/telemetry track) that a blanket
+    # map would pull in and the MOV muxer can't stream-copy.
     cmd = build_archival_concat_cmd("ffmpeg", Path("grp.txt"), Path("arch.mov"))
-    s = " ".join(cmd)
-    assert "-f concat" in s and "-map 0" in s and "-c copy" in s
+    assert "-f" in cmd and "concat" in cmd and "-c" in cmd and "copy" in cmd
+    map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert map_targets == ["0:v:0", "0:a:0?"]
     assert cmd[-1] == "arch.mov"
 
 

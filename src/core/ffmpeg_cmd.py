@@ -537,13 +537,20 @@ def build_concat_cmd(ff: str, concat_file: Path, chapters_file: Path,
 # those intermediates into the final master. Proven in tools/spike_archival_p2.py.
 
 def build_archival_concat_cmd(ff: str, concat_file: Path, output: Path) -> list:
-    """Concat one spec-group's original clips (stream copy, ALL streams) into a
-    single archival intermediate track-file. No chapters, no re-encode — the
-    originals must share a spec (that's what the spec-group guarantees) so the
-    concat demuxer stays valid."""
+    """Concat one spec-group's original clips (stream copy, video + optional
+    audio) into a single archival intermediate track-file. No chapters, no
+    re-encode — the originals must share a spec (that's what the spec-group
+    guarantees) so the concat demuxer stays valid.
+
+    Maps only `v:0`/`a:0` rather than a blanket `-map 0`: real camera files can
+    carry extra streams `-map 0` would blindly pull in — e.g. Google Pixel
+    phones embed a `mett` (motion-photo/telemetry) data track as stream #0:2,
+    which the MOV muxer refuses to stream-copy ("Cannot map stream #0:2 -
+    unsupported type"). We only want the archived video/audio anyway.
+    """
     return [ff, "-y", "-v", "error",
             "-f", "concat", "-safe", "0", "-i", str(concat_file),
-            "-map", "0", "-c", "copy", str(output)]
+            "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", str(output)]
 
 
 def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,

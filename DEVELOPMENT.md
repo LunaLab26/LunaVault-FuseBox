@@ -124,6 +124,25 @@ acted on yet.
    suggests DST offset" / "reordered manually"). This makes the Phase-1 creation-time
    ordering fix (which can silently reorder clips relative to filename expectations)
    visible and explainable in the UI, not just correct under the hood.
+4. **Merge tab: a hardware (GPU) transcode button/toggle.** The conform transcode currently
+   always uses libx265/libx264 (CPU/software encode, per `core.ffmpeg_cmd._video_encoder_args`
+   — see the Phase 2 dynamic-baseline work above). Wanted: an option to use GPU-accelerated
+   encoding (e.g. NVENC/QSV/AMF, whichever ffmpeg build supports) for much faster merges.
+   Needs research on what the bundled ffmpeg build actually supports and a graceful fallback
+   to software encode when no compatible GPU/encoder is available.
+5. **Merge table: sortable column headers.** Clicking a column header sorts the clip list by
+   that column, ascending/descending (click again to reverse) — e.g. Duration (shortest→
+   longest), Timestamp (first→last), Camera (alphabetical grouping). Needs a design decision
+   once picked up: this table is now the Phase-3b grouped-by-camera tree (`_CameraGroupTree`),
+   so sorting interacts with grouping — e.g. does sorting by Duration/Timestamp sort *within*
+   each camera group (grouping stays primary), or does it flatten the view when sorting by a
+   non-camera column? Sorting by Camera presumably just reorders the groups themselves.
+6. **Log tab: export/save the merge log report, plus auto-save on failure.** An explicit
+   "Export"/"Save" button for the current log report; a **failed** merge auto-saves a
+   timestamped `.txt` log report (independent of the button); a **checkbox in the Log tab**
+   to toggle that auto-save behaviour on/off. Prompted by needing to hand a failure report
+   (see the "Cannot map stream #0:2" bug below) to get it diagnosed — this would make that
+   handoff automatic rather than needing a manual screenshot/copy-paste.
 
 ## Review-tab design refinement backlog (for a later action-plan discussion)
 
@@ -367,6 +386,29 @@ priming samples from the camera original) rather than adding one track per clip.
 frame-exact; the residual is AAC audio priming at boundaries, which is inherent and
 documented. The manifest records, per clip, its archival track + in-track start/duration
 and the master stream indices so Extract can cut there.
+
+### Field bug (found + fixed): archival concat choked on a Pixel phone's data stream
+
+A real archival merge on the 4-cam test folder failed on the very first archival group:
+`Archiving originals (1/5) failed` — ffmpeg: `Cannot map stream #0:2 - unsupported type` /
+`Error opening output file …\archive_0.mov`. Root cause: `build_archival_concat_cmd` used a
+blanket `-map 0` (all streams) to concat a spec-group's originals. Google Pixel phones embed
+a third stream per clip — `#0:2, codec_type=data, codec=mett` (Motion Photo / telemetry
+metadata) — confirmed via `ffprobe -show_entries stream=index,codec_type,codec_name` on the
+user's actual `PXL_*.mp4` files. `-map 0 -c copy` pulls that stream in too, and the MOV
+muxer refuses to stream-copy an unknown data codec type.
+
+**Fix:** `build_archival_concat_cmd` now maps `0:v:0` and `0:a:0?` explicitly (the `?`
+makes audio optional, so video-only groups still work) instead of a blanket `-map 0` —
+matching the pattern every other command in this pipeline already used; this one command
+was the outlier. **Verified by exact reproduction**: the old `-map 0` command run directly
+against the user's real failing clips reproduces the identical error and exit code; the
+fixed command succeeds cleanly (176 MB output, no errors). Also reconfirmed the already-
+documented near-exact-recovery behaviour above is unaffected by this fix (a duration-based
+re-cut of the first clip in that same group: audio matched exactly at t=0, video did not —
+expected concat-boundary drift, not a regression). All test suites green;
+`test_archival_concat_maps_only_video_and_audio` replaces the old test that asserted the
+blanket `-map 0`.
 
 ### Review-tab integration (Phase 2)
 
