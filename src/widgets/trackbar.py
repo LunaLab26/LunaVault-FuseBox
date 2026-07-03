@@ -9,13 +9,30 @@ scrubber already works.
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QPainter, QColor, QPen
 
 from widgets.timeline import TimelineBase
 
 _EDGE_TOL = 10     # px tolerance for grabbing a viewport edge
 _MIN_SPAN = 0.5    # seconds — viewport can't collapse smaller than this
+_HEIGHT = 72       # taller than the base timeline to fit a ruler strip below the track
+
+# "Nice" ruler intervals (seconds) — pick the smallest that isn't too dense.
+_RULER_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800]
+
+
+def _nice_step(raw: float) -> float:
+    for s in _RULER_STEPS:
+        if s >= raw:
+            return float(s)
+    return float(_RULER_STEPS[-1])
+
+
+def _fmt_ruler(secs: float) -> str:
+    s = int(round(secs))
+    h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
 class OverviewTrackbar(TimelineBase):
@@ -28,6 +45,7 @@ class OverviewTrackbar(TimelineBase):
         self._view_t1 = 0.0
         self._drag_offset = 0.0     # body-drag: click_secs - view_t0, captured at press time
         self.setMouseTracking(True)   # so hover sets the cursor even with no button down
+        self.setFixedHeight(_HEIGHT)  # room for the timestamp ruler under the track
 
     def set_duration(self, dur: float):
         super().set_duration(dur)
@@ -56,7 +74,30 @@ class OverviewTrackbar(TimelineBase):
 
     def _paint_extra(self, p: QPainter, pal):
         self._paint_envelope(p, pal)
+        self._paint_ruler(p, pal)
         self._paint_viewport(p, pal)
+
+    def _paint_ruler(self, p: QPainter, pal):
+        """Time ticks + HH:MM:SS / M:SS labels across the full duration, in a
+        strip below the track — the timeline's sense of *where* you are."""
+        if self._duration <= 0:
+            return
+        tw = self._track_w()
+        y = self._TRK_Y + self._TRK_H + 16   # clear of the centred envelope
+        target = max(3, min(8, tw // 90))
+        step = _nice_step(self._duration / target)
+        f = p.font()
+        f.setPixelSize(9)
+        p.setFont(f)
+        t = 0.0
+        while t <= self._duration + 1e-6:
+            x = self._secs_to_x(t)
+            p.setPen(QPen(QColor(pal.border_hi), 1))
+            p.drawLine(x, y, x, y + 4)
+            p.setPen(QColor(pal.text_mute))
+            p.drawText(QRectF(x - 34, y + 5, 68, 12),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, _fmt_ruler(t))
+            t += step
 
     def _paint_envelope(self, p: QPainter, pal):
         env = self._envelope

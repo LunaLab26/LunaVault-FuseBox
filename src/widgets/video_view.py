@@ -14,7 +14,7 @@ the view's zoom (see review_workers.FrameFetchWorker) — this widget's
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QVariantAnimation, Signal
+from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, QVariantAnimation, Signal
 from PySide6.QtGui import QPainter, QColor, QImage, QPixmap
 from PySide6.QtWidgets import QWidget
 
@@ -195,3 +195,45 @@ class ZoomableVideoView(QWidget):
 
     def mouseReleaseEvent(self, event):
         self._dragging = False
+
+    # ── Zoom: scroll wheel + touchpad pinch (zoom around the cursor) ───────────
+
+    def _zoom_around(self, pos: QPointF, factor: float):
+        """Scale by `factor`, keeping the image point under `pos` fixed — the
+        web-browser zoom feel. Switches to explicit percent mode."""
+        if self._image is None or self._image.isNull() or factor <= 0:
+            return
+        old_zoom = self.effective_zoom()
+        new_pct = max(_MIN_ZOOM_PCT, min(_MAX_ZOOM_PCT, old_zoom * 100.0 * factor))
+        new_zoom = new_pct / 100.0
+        if abs(new_zoom - old_zoom) < 1e-6:
+            return
+        iw, ih = self._image.width(), self._image.height()
+        cx = (self.width() - iw * old_zoom) / 2 + self._pan.x()
+        cy = (self.height() - ih * old_zoom) / 2 + self._pan.y()
+        img_x = (pos.x() - cx) / old_zoom
+        img_y = (pos.y() - cy) / old_zoom
+        self._zoom_mode = "percent"
+        self._zoom_pct = new_pct
+        self._pan = QPointF(pos.x() - img_x * new_zoom - (self.width() - iw * new_zoom) / 2,
+                            pos.y() - img_y * new_zoom - (self.height() - ih * new_zoom) / 2)
+        self._cached_pixmap = None
+        self.update()
+        self.zoom_changed.emit(new_zoom)
+
+    def wheelEvent(self, event):
+        if self._image is None or self._image.isNull():
+            return
+        dy = event.angleDelta().y()
+        if dy == 0:
+            return
+        self._zoom_around(event.position(), 1.0015 ** dy)   # one notch (±120) ≈ ±20%
+        event.accept()
+
+    def event(self, e):
+        # Touchpad pinch arrives as a native gesture, not a wheel event.
+        if (e.type() == QEvent.Type.NativeGesture
+                and e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture):
+            self._zoom_around(e.position(), 1.0 + e.value())
+            return True
+        return super().event(e)

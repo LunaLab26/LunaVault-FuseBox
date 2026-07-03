@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QObject, QTimer, Signal
-from PySide6.QtGui import QImage, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QObject, QTimer, QRectF, QPointF, QSize, Signal
+from PySide6.QtGui import QImage, QShortcut, QKeySequence, QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QFrame, QFileDialog,
     QCheckBox, QStyle,
@@ -48,6 +48,26 @@ _SPEC_DEBOUNCE_MS = 250
 _APPROX_SCOPE_THROTTLE_S = 0.2
 _APPROX_SCOPE_MAX_DIM = 640   # shrink via Qt before touching numpy at all — see _update_approx_scope
 _SPEC_TILE_CACHE_MAX = 16
+
+
+def _camera_icon(color: str, size: int = 20) -> QIcon:
+    """A flat outline camera glyph in `color` — the snapshot button's icon,
+    drawn (rather than a Qt standard pixmap) so it matches the theme accent.
+    Re-generated on theme change from _restyle so it re-tints."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color), max(1.4, size * 0.08))
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    s = size
+    p.drawRoundedRect(QRectF(s * 0.12, s * 0.32, s * 0.76, s * 0.50), s * 0.08, s * 0.08)  # body
+    p.drawRoundedRect(QRectF(s * 0.34, s * 0.20, s * 0.22, s * 0.13), s * 0.04, s * 0.04)  # viewfinder bump
+    p.drawEllipse(QPointF(s * 0.50, s * 0.58), s * 0.15, s * 0.15)                          # lens
+    p.end()
+    return QIcon(pm)
 
 
 def _label_tracks(tracks: list) -> dict:
@@ -146,6 +166,7 @@ class ReviewTab(QWidget):
         self._current_mix_worker = None   # at most one full-file mix render in flight
         self._spec_cache: dict = {}       # (track_idx, t0, t1) -> QImage, capped LRU
         self._spec_cache_order: list = []
+        self._pyramids: dict = {}         # track_idx -> PeakPyramid, kept so lanes can re-crop to the viewport
         self._last_approx_scope_t = 0.0
         self._sections: list = []         # section frames — restyled + shown/hidden together
         self._section_titles: list = []
@@ -273,7 +294,7 @@ class ReviewTab(QWidget):
         self._next_btn.setToolTip("Jump to next clip (PgDn)")
         self._jog = JogWheel()
         self._snapshot_btn = QPushButton()
-        self._snapshot_btn.setIcon(st.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        self._snapshot_btn.setIconSize(QSize(18, 18))   # icon itself is set (theme-tinted) in _restyle
         self._snapshot_btn.setToolTip("Save a full-resolution PNG next to the master (S)")
         self._tc_label = QLabel("00:00:00:00")
         self._dur_label = QLabel("/ 00:00:00:00")
@@ -429,12 +450,28 @@ class ReviewTab(QWidget):
         peak_w.start()
 
     def _on_pyramid_ready(self, track_idx: int, pyramid):
-        peaks = pyramid.peaks_for_view(0.0, pyramid.duration, 600)
-        self._lanes.set_peaks(track_idx, peaks)
+        # Keep the pyramid so the lane can be re-cropped whenever the viewport
+        # changes (zoom in on the overview → lanes show only that window).
+        self._pyramids[track_idx] = pyramid
+        self._refresh_lane_peaks(track_idx)
+        # The overview envelope stays FULL-duration — it's the navigator.
         if pyramid.levels:
             coarsest = pyramid.levels[-1]
             envelope = np.maximum(np.abs(coarsest[:, 0]), np.abs(coarsest[:, 1]))
             self._trackbar.set_envelope(envelope)
+
+    def _refresh_lane_peaks(self, only_track: Optional[int] = None):
+        """Re-render each audio lane's waveform for the current viewport window,
+        so zooming the overview crops the lanes to the selection. Cheap
+        (peaks_for_view just min/max-reduces the pyramid), so no debounce."""
+        t0, t1 = self._session.view_t0, self._session.view_t1
+        if t1 <= t0:
+            t0, t1 = 0.0, self._session.duration
+        items = ([(only_track, self._pyramids[only_track])]
+                 if only_track is not None and only_track in self._pyramids
+                 else list(self._pyramids.items()))
+        for idx, pyr in items:
+            self._lanes.set_peaks(idx, pyr.peaks_for_view(t0, t1, 600))
 
     # ── Engine wiring ─────────────────────────────────────────────────────────
 
@@ -522,6 +559,8 @@ class ReviewTab(QWidget):
         self._trackbar.set_viewport(t0, t1)
         if self._lanes.current_mode() == "spec":
             self._spec_timer.start()
+        else:
+            self._refresh_lane_peaks()   # crop the waveform lanes to the new window
 
     # ── Widget wiring ─────────────────────────────────────────────────────────
 
@@ -756,6 +795,7 @@ class ReviewTab(QWidget):
             f"color:{p.text_dim}; font-size:12px; font-family:monospace;")
         self._dur_label.setStyleSheet(
             f"color:{p.text_mute}; font-size:12px; font-family:monospace;")
+        self._snapshot_btn.setIcon(_camera_icon(p.accent))
         # The app's global QPushButton padding (14px each side) leaves no room
         # for a compact icon button's glyph at a small fixed size — override
         # it to 0 here, the same fix merge_tab.py's row-reorder buttons use.
