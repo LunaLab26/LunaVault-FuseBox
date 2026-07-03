@@ -51,6 +51,24 @@ def test_pair_wav_insta360_and_luna():
     assert _pair_wav("PXL_20260703_115902653", wavs) is None    # phone: no separate WAV
 
 
+def test_assign_and_group_by_camera():
+    from clip_model import ClipInfo, assign_cameras, group_clips_by_camera
+    from probe import StreamInfo
+
+    def mk(name, device):
+        c = ClipInfo(path=Path(name))
+        c.stream = StreamInfo(device=device)
+        return c
+
+    clips = [mk("PXL_1.mp4", "Google Pixel 9 Pro"), mk("PXL_2.mp4", "Google Pixel 9 Pro"),
+             mk("VID_130055_00_004.mp4", "Ambarella"), mk("VID_130115_011.mp4", "")]
+    assign_cameras(clips)
+    assert clips[0].camera_label == "Google Pixel 9 Pro" and clips[0].camera_id == clips[1].camera_id
+    groups = group_clips_by_camera(clips)
+    assert len(groups) == 3   # Pixel, Ambarella, generic-VID (Luna)
+    assert len(groups[clips[0].camera_id]) == 2
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

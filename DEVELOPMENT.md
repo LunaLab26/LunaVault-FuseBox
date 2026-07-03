@@ -102,6 +102,29 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
   git log / commit messages or a maintained changelog. Needs design discussion (what
   granularity, per-version vs per-change, how it's generated/kept in sync) before scoping.
 
+## App-wide + merge-tab refinement backlog (for a later action-plan discussion)
+
+Observations from the user while using the app on their desktop — captured for later, not
+acted on yet.
+
+1. **Window doesn't rescale smartly — parts become inaccessible.** At smaller window sizes,
+   content is cut off left/right with no way to reach it (vertical scroll exists, horizontal
+   doesn't / layout doesn't reflow). Wanted: smart rescaling so the UI adapts to window size
+   and every area stays reachable regardless of size — likely a mix of responsive layout
+   (wrapping/collapsing panels) and ensuring scroll areas cover both axes where content can't
+   shrink further, rather than adding horizontal scrollbars everywhere as a band-aid. Needs a
+   proper pass across the app's tabs (Merge, Review, Extract/WhatsApp), not just one screen.
+2. **Merge table: add a selection checkbox column.** Only ticked clips are included in the
+   merge; unticked clips fade (reduced opacity/muted) as a visual cue they're excluded rather
+   than being removed from the list. Useful for excluding a bad take without deleting/moving
+   the file out of the source folder.
+3. **Merge table: add a Timestamp column** between Clip name and Camera, showing the clip's
+   position in the linear (chronological) order. **Highlight when it differs from the
+   filename's own timestamp**, with a reason shown (e.g. "creation_time used — filename
+   suggests DST offset" / "reordered manually"). This makes the Phase-1 creation-time
+   ordering fix (which can silently reorder clips relative to filename expectations)
+   visible and explainable in the UI, not just correct under the hood.
+
 ## Review-tab design refinement backlog (for a later action-plan discussion)
 
 The Review tab's UX pass + polish are shipped; these are *next-level* design-language
@@ -179,8 +202,16 @@ records + log.
     Headless-verified on the real folder: 4 spec groups, recommends Luna 4K-10bit (2 clips
     stream-copy, 7 transcode), and choosing the H.264 baseline flips the 4 Insta360 clips to
     stream-copy — the full dynamic path from UI selection to conformance. All suites green.
-  - **Phase 2 complete.** Next: Phase 3 (camera-grouped merge UI — CameraGroup data model,
-    grouped view, drag-drop folder, drag-between-groups, dynamic audio-match assignment).
+  - **Phase 2 complete.**
+- **Phase 3 — camera-grouped merge UI (in progress)**:
+  - **3a (done)**: `ClipInfo` gains `camera_id`/`camera_label`; `clip_model.assign_cameras`
+    (runs `camera_id.identify_camera` after probe, preserving user overrides) +
+    `group_clips_by_camera`. The merge table's **Camera column now shows the detected
+    camera** (spec moved to the cell tooltip). **Drag-and-drop a folder** onto the merge tab
+    loads it. Verified on the real folder: column shows Pixel 9 Pro / Ambarella / Camera(Luna)
+    / INS(X4); grouping → 4 cameras; drag-drop enabled. `test_camera_id.py` extended.
+  - **Remaining: 3b** grouped view under editable camera headers + drag clips between groups
+    to reassign; **3c** click-to-assign for unmatched WAVs. (Both are heavy merge_tab UI work.)
 
 ## Archival master / "Extract and Share" — Phase 1 progress
 

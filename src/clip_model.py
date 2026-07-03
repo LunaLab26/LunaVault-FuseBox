@@ -19,6 +19,9 @@ class ClipInfo:
     order_idx: int = 0
     manually_moved: bool = False
     filename_ts: Optional[int] = None
+    # ── Camera identity (multicam overhaul) — from camera_id.identify_camera ──
+    camera_id: str = ""            # stable key: clips sharing it are one camera
+    camera_label: str = ""         # human label, user-overridable
     # ── Sync analysis (Phase 2) — populated by core.sync_advanced.analyze_sync ──
     sync_done: bool = False
     sync_drift_ratio: float = 1.0          # WAV resample factor → MIX track only
@@ -135,6 +138,28 @@ def _iso_epoch(ct: str):
         return datetime.fromisoformat(ct.replace("Z", "+00:00")).timestamp()
     except (ValueError, TypeError):
         return None
+
+
+def assign_cameras(clips: list) -> list:
+    """Set each clip's camera_id/camera_label from its probed device metadata +
+    filename (call after probing). Preserves any label the user has already
+    overridden (non-empty camera_label with the same camera_id)."""
+    from camera_id import identify_camera
+    for c in clips:
+        device = c.stream.device if c.stream else ""
+        key, label = identify_camera(device, c.name)
+        if c.camera_id == key and c.camera_label:
+            continue   # keep a user override for this camera
+        c.camera_id, c.camera_label = key, label
+    return clips
+
+
+def group_clips_by_camera(clips: list) -> dict:
+    """{camera_id: [clips…]} preserving first-seen order of both cameras and clips."""
+    groups: dict = {}
+    for c in clips:
+        groups.setdefault(c.camera_id or "unknown", []).append(c)
+    return groups
 
 
 def order_clips_by_time(clips: list) -> list:

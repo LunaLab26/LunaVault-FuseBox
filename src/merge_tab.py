@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
     QComboBox, QMessageBox, QCheckBox, QScrollArea,
 )
 
-from clip_model import ClipInfo, scan_folder, unpaired_wavs, check_dst_warning, order_clips_by_time
+from clip_model import (ClipInfo, scan_folder, unpaired_wavs, check_dst_warning,
+                        order_clips_by_time, assign_cameras)
 from ffmpeg_runner import MergeWorker, get_ffmpeg
 from thread_utils import settle
 from probe import probe, probe_duration, pix_fmt_info, BaselineSpec, apply_conformance
@@ -138,6 +139,7 @@ class MergeTab(QWidget):
 
     def __init__(self, settings: Settings):
         super().__init__()
+        self.setAcceptDrops(True)   # drag a folder onto the tab to load it
         self._settings      = settings
         self._clips: list[ClipInfo] = []
         self._worker: Optional[MergeWorker] = None
@@ -898,6 +900,31 @@ class MergeTab(QWidget):
         self._folder_edit.setText(folder)
         self._load_folder(Path(folder))
 
+    # ── Drag-and-drop a folder onto the tab ───────────────────────────────────
+
+    def _dropped_folder(self, event) -> Optional[Path]:
+        if not event.mimeData().hasUrls():
+            return None
+        for u in event.mimeData().urls():
+            p = Path(u.toLocalFile())
+            if p.is_dir():
+                return p
+            if p.is_file():           # a file was dropped — use its containing folder
+                return p.parent
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dropped_folder(event) is not None:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        folder = self._dropped_folder(event)
+        if folder is not None:
+            self._settings.set("last_merge_source", str(folder))
+            self._folder_edit.setText(str(folder))
+            self._load_folder(folder)
+            event.acceptProposedAction()
+
     def _load_folder(self, folder: Path):
         self._clips = scan_folder(folder)
         if not self._clips:
@@ -956,6 +983,7 @@ class MergeTab(QWidget):
         )
         self._square_label.setVisible(has_square)
         self._square_combo.setVisible(has_square)
+        assign_cameras(self._clips)           # camera_id/label from device metadata + filename
         order_clips_by_time(self._clips)      # chronological order now that creation_time is known
         self._build_baseline_chooser()        # (also reclassifies + repopulates the table)
         self._refresh_sync_cells()   # slow-mo offset/drift hints now that WAV durs are known
@@ -1001,8 +1029,11 @@ class MergeTab(QWidget):
         name_item.setData(Qt.ItemDataRole.UserRole, self._clips.index(clip))
         self._table.setItem(row, COL_NAME, name_item)
 
-        cam = f"{clip.stream.width}×{clip.stream.height} · {clip.stream.codec}" if clip.stream else ""
-        self._table.setItem(row, COL_CAM, QTableWidgetItem(cam))
+        cam_item = QTableWidgetItem(clip.camera_label or "—")
+        if clip.stream:
+            cam_item.setToolTip(f"{clip.stream.width}×{clip.stream.height} · "
+                                f"{clip.stream.codec} · {clip.stream.pix_fmt}")
+        self._table.setItem(row, COL_CAM, cam_item)
 
         dur_item = QTableWidgetItem(_fmt_dur(clip.duration))
         dur_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1038,8 +1069,9 @@ class MergeTab(QWidget):
 
     def _update_row(self, row: int, clip: ClipInfo):
         if clip.stream:
-            cam = f"{clip.stream.width}×{clip.stream.height} · {clip.stream.codec}"
-            self._table.item(row, COL_CAM).setText(cam)
+            self._table.item(row, COL_CAM).setText(clip.camera_label or "—")
+            self._table.item(row, COL_CAM).setToolTip(
+                f"{clip.stream.width}×{clip.stream.height} · {clip.stream.codec} · {clip.stream.pix_fmt}")
             dur = self._table.item(row, COL_DUR)
             if dur:
                 dur.setText(_fmt_dur(clip.duration))
