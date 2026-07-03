@@ -210,8 +210,27 @@ records + log.
     camera** (spec moved to the cell tooltip). **Drag-and-drop a folder** onto the merge tab
     loads it. Verified on the real folder: column shows Pixel 9 Pro / Ambarella / Camera(Luna)
     / INS(X4); grouping → 4 cameras; drag-drop enabled. `test_camera_id.py` extended.
-  - **Remaining: 3b** grouped view under editable camera headers + drag clips between groups
-    to reassign; **3c** click-to-assign for unmatched WAVs. (Both are heavy merge_tab UI work.)
+  - **3b (done)**: the flat `QTableWidget` clip list is now a `_CameraGroupTree(QTreeWidget)`
+    — one top-level item per detected camera (ordered by that camera's earliest clip),
+    clips nested underneath in chronological order. **Double-click a camera header to
+    rename it** (propagates to every clip in the group). **Drag a clip onto a different
+    camera group to reassign it** — overrides `dropEvent` to emit `clip_reassign_requested`
+    rather than let Qt reparent directly, so `MergeTab`'s data model stays authoritative and
+    a full rebuild keeps the tree consistent; expand/collapse state is preserved across
+    rebuilds. Up/↓ reorder still operates on the single GLOBAL chronological order (not
+    visual tree position) — grouping is a presentation layer only, the merge timeline stays
+    one sequential cross-camera order per the "sequential archive" decision. `_reset_order`
+    now uses the Phase-1 `order_clips_by_time` instead of filename-only sort.
+    Verified on the real folder: 4 groups shown with correct interleaved chronological `#`s;
+    renaming a group relabels all its clips; dragging the lone X4 clip into the Go3s group
+    merges them (4→3 groups); up/down reorder still swaps GLOBAL order_idx across camera
+    boundaries; selection resolves correctly; empty-clips edge case doesn't raise. All
+    suites green.
+  - **Remaining: 3c** — click-to-assign for unmatched WAVs.
+- **App-wide + merge-tab refinement backlog logged** (window rescaling/reachability, a
+  selection-checkbox column with fade-when-excluded, a Timestamp column highlighting
+  creation-time vs filename-time differences) — see the dedicated backlog section below;
+  not acted on yet.
 
 ## Archival master / "Extract and Share" — Phase 1 progress
 

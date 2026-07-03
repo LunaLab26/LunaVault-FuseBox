@@ -9,12 +9,13 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
+    QTreeWidget, QTreeWidgetItem,
     QAbstractItemView, QProgressBar, QFrame,
     QComboBox, QMessageBox, QCheckBox, QScrollArea,
 )
 
 from clip_model import (ClipInfo, scan_folder, unpaired_wavs, check_dst_warning,
-                        order_clips_by_time, assign_cameras)
+                        order_clips_by_time, assign_cameras, group_clips_by_camera)
 from ffmpeg_runner import MergeWorker, get_ffmpeg
 from thread_utils import settle
 from probe import probe, probe_duration, pix_fmt_info, BaselineSpec, apply_conformance
@@ -133,6 +134,46 @@ class ProbeThread(QThread):
             self.clip_probed.emit(i, info)
 
 
+class _CameraGroupTree(QTreeWidget):
+    """The clips tree: one top-level item per detected camera, clips nested
+    underneath. Dragging a clip onto a different camera group reassigns it
+    (emits `clip_reassign_requested` instead of letting Qt reparent the item
+    directly, so MergeTab's data model stays the single source of truth and a
+    full rebuild — via `clip_reassign_requested` → `_populate_table()` —
+    keeps the tree consistent)."""
+    clip_reassign_requested = Signal(int, str)   # clip_idx (into MergeTab._clips), target camera_id
+
+    def __init__(self, columns: int, parent=None):
+        super().__init__(parent)
+        self.setColumnCount(columns)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+        self._drag_source_item: Optional[QTreeWidgetItem] = None
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self._drag_source_item = self.currentItem()
+
+    def dropEvent(self, event):
+        dragged = self._drag_source_item
+        if dragged is None or dragged.parent() is None:
+            event.ignore()   # only clip (child) items can be dragged; groups can't
+            return
+        target = self.itemAt(event.position().toPoint())
+        if target is None:
+            event.ignore()
+            return
+        group_item = target if target.parent() is None else target.parent()
+        clip_idx = dragged.data(COL_NAME, Qt.ItemDataRole.UserRole)
+        target_camera_id = group_item.data(COL_NAME, Qt.ItemDataRole.UserRole)
+        if clip_idx is not None and target_camera_id is not None:
+            self.clip_reassign_requested.emit(clip_idx, target_camera_id)
+        event.accept()   # we handle the model change ourselves — no default reparent
+
+
 class MergeTab(QWidget):
     merge_complete = Signal(str)
     open_in_review = Signal(str)   # user clicked "Review" on the completion dialog
@@ -240,21 +281,23 @@ class MergeTab(QWidget):
         clips_frame, clips_box = self._section("CLIPS", right=self._show_sync_check)
         self._clips_title = self._section_titles[-1]
 
-        self._table = QTableWidget(0, N_COLS)
-        self._table.setHorizontalHeaderLabels(
+        self._table = _CameraGroupTree(N_COLS)
+        self._table.setHeaderLabels(
             ["#", "Clip", "Camera", "Duration", "WAV", "WAV Offset", "Drift", "Status", "↑", "↓"]
         )
-        self._table.horizontalHeader().setSectionResizeMode(COL_NAME,   QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Stretch)
+        self._table.header().setSectionResizeMode(COL_NAME,   QHeaderView.ResizeMode.Stretch)
+        self._table.header().setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Stretch)
         for col in (COL_ORDER, COL_DUR, COL_WAV, COL_OFFSET, COL_DRIFT, COL_UP, COL_DOWN):
-            self._table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(COL_CAM, QHeaderView.ResizeMode.Interactive)
-        self._table.setColumnWidth(COL_CAM, 140)
-        self._table.verticalHeader().setVisible(False)
+            self._table.header().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.header().setSectionResizeMode(COL_CAM, QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(COL_CAM, 110)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
         self._table.setMinimumHeight(200)
+        self._table.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
+        self._table.itemChanged.connect(self._on_tree_item_edited)
+        self._table.clip_reassign_requested.connect(self._on_clip_reassigned)
         # Sync columns hidden by default (revealed via "Show sync details")
         self._table.setColumnHidden(COL_OFFSET, True)
         self._table.setColumnHidden(COL_DRIFT, True)
@@ -621,13 +664,10 @@ class MergeTab(QWidget):
             self._mix_kind_cap.setText("summed to mono — plays anywhere; may sound hollow")
 
     def _selected_clip(self) -> Optional[ClipInfo]:
-        row = self._table.currentRow()
-        if row < 0:
+        item = self._table.currentItem()
+        if item is None or item.parent() is None:   # nothing selected, or a camera-group header
             return None
-        item = self._table.item(row, COL_NAME)
-        if not item:
-            return None
-        idx = item.data(Qt.ItemDataRole.UserRole)
+        idx = item.data(COL_NAME, Qt.ItemDataRole.UserRole)
         if idx is None or idx >= len(self._clips):
             return None
         return self._clips[idx]
@@ -928,7 +968,7 @@ class MergeTab(QWidget):
     def _load_folder(self, folder: Path):
         self._clips = scan_folder(folder)
         if not self._clips:
-            self._table.setRowCount(0)
+            self._table.clear()
             self._start_btn.setEnabled(False)
             self._preflight_btn.setEnabled(False)
             self._set_loaded(False)
@@ -969,11 +1009,9 @@ class MergeTab(QWidget):
         if idx >= len(self._clips):
             return
         clip = self._clips[idx]
-        for row in range(self._table.rowCount()):
-            item = self._table.item(row, COL_NAME)
-            if item and item.data(Qt.ItemDataRole.UserRole) == idx:
-                self._update_row(row, clip)
-                break
+        item = self._find_clip_item(idx)
+        if item is not None:
+            self._update_clip_item(item, clip)
 
     def _on_probe_done(self):
         self._start_btn.setEnabled(bool(self._clips))
@@ -1007,53 +1045,74 @@ class MergeTab(QWidget):
         dlg.start_requested.connect(self._start_merge)
         dlg.exec()
 
-    # ── Table ─────────────────────────────────────────────────────────────────
+    # ── Table (grouped by camera) ────────────────────────────────────────────
 
     def _populate_table(self):
-        self._table.setRowCount(0)
-        for clip in sorted(self._clips, key=lambda c: c.order_idx):
-            self._add_row(clip, self._table.rowCount())
+        """Rebuild the tree: one top-level item per camera (ordered by that
+        camera's earliest clip), clips nested underneath in chronological
+        (order_idx) order. Preserves each group's expand/collapse state."""
+        expanded = {self._table.topLevelItem(i).data(COL_NAME, Qt.ItemDataRole.UserRole): self._table.topLevelItem(i).isExpanded()
+                   for i in range(self._table.topLevelItemCount())}
+        self._table.blockSignals(True)   # avoid itemChanged firing while we rebuild
+        self._table.clear()
 
-    def _add_row(self, clip: ClipInfo, row: int):
-        self._table.insertRow(row)
+        groups = group_clips_by_camera(self._clips)   # {camera_id: [clips]}, first-seen order
+        # Order groups by their earliest clip's chronological position.
+        ordered_ids = sorted(groups, key=lambda gid: min(c.order_idx for c in groups[gid]))
+        for gid in ordered_ids:
+            members = sorted(groups[gid], key=lambda c: c.order_idx)
+            label = members[0].camera_label or gid
+            group_item = self._add_camera_group(gid, label, len(members))
+            for clip in members:
+                self._add_clip_row(group_item, clip)
+            group_item.setExpanded(expanded.get(gid, True))
 
+        self._table.blockSignals(False)
+
+    def _add_camera_group(self, camera_id: str, label: str, count: int) -> QTreeWidgetItem:
         p = theme.active_palette()
-        order_item = QTableWidgetItem(str(clip.order_idx + 1))
-        order_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item = QTreeWidgetItem(self._table)
+        item.setText(COL_NAME, label)
+        item.setData(COL_NAME, Qt.ItemDataRole.UserRole, camera_id)
+        item.setText(COL_CAM, f"{count} clip{'s' if count != 1 else ''}")
+        item.setToolTip(COL_NAME, "Double-click to rename this camera")
+        item.setFlags((item.flags() | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsDropEnabled)
+                      & ~Qt.ItemFlag.ItemIsDragEnabled)
+        font = QFont("", -1, QFont.Weight.Bold)
+        for col in range(N_COLS):
+            item.setFont(col, font)
+            item.setForeground(col, QColor(p.accent))
+        return item
+
+    def _add_clip_row(self, group_item: QTreeWidgetItem, clip: ClipInfo):
+        p = theme.active_palette()
+        item = QTreeWidgetItem(group_item)
+        item.setFlags((item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
+                      & ~(Qt.ItemFlag.ItemIsDropEnabled | Qt.ItemFlag.ItemIsEditable))
+
+        item.setText(COL_ORDER, str(clip.order_idx + 1))
+        item.setTextAlignment(COL_ORDER, Qt.AlignmentFlag.AlignCenter)
         if clip.manually_moved:
-            order_item.setForeground(QColor(p.accent))
-            order_item.setFont(QFont("", -1, QFont.Weight.Bold))
-        self._table.setItem(row, COL_ORDER, order_item)
+            item.setForeground(COL_ORDER, QColor(p.accent))
+            item.setFont(COL_ORDER, QFont("", -1, QFont.Weight.Bold))
 
-        name_item = QTableWidgetItem(clip.stem)
-        name_item.setData(Qt.ItemDataRole.UserRole, self._clips.index(clip))
-        self._table.setItem(row, COL_NAME, name_item)
+        item.setText(COL_NAME, clip.stem)
+        item.setData(COL_NAME, Qt.ItemDataRole.UserRole, self._clips.index(clip))
 
-        cam_item = QTableWidgetItem(clip.camera_label or "—")
-        if clip.stream:
-            cam_item.setToolTip(f"{clip.stream.width}×{clip.stream.height} · "
-                                f"{clip.stream.codec} · {clip.stream.pix_fmt}")
-        self._table.setItem(row, COL_CAM, cam_item)
+        item.setText(COL_DUR, _fmt_dur(clip.duration))
+        item.setTextAlignment(COL_DUR, Qt.AlignmentFlag.AlignCenter)
 
-        dur_item = QTableWidgetItem(_fmt_dur(clip.duration))
-        dur_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, COL_DUR, dur_item)
-
-        wav_item = QTableWidgetItem("✓" if clip.has_wav() else "—")
-        wav_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item.setText(COL_WAV, "✓" if clip.has_wav() else "—")
+        item.setTextAlignment(COL_WAV, Qt.AlignmentFlag.AlignCenter)
         if not clip.has_wav():
-            wav_item.setForeground(QColor(p.text_dim))
-        self._table.setItem(row, COL_WAV, wav_item)
+            item.setForeground(COL_WAV, QColor(p.text_dim))
 
-        off_item = QTableWidgetItem(_fmt_offset(clip))
-        off_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, COL_OFFSET, off_item)
+        item.setText(COL_OFFSET, _fmt_offset(clip))
+        item.setTextAlignment(COL_OFFSET, Qt.AlignmentFlag.AlignCenter)
+        item.setText(COL_DRIFT, _fmt_drift(clip))
+        item.setTextAlignment(COL_DRIFT, Qt.AlignmentFlag.AlignCenter)
 
-        drift_item = QTableWidgetItem(_fmt_drift(clip))
-        drift_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, COL_DRIFT, drift_item)
-
-        self._update_status_cell(row, clip)
+        self._update_status_cell(item, clip)
 
         icon_style = (
             f"QPushButton {{ background:{p.btn_bg}; color:{p.text}; border:1px solid {p.border}; "
@@ -1064,74 +1123,100 @@ class MergeTab(QWidget):
             btn = QPushButton(sym)
             btn.setFixedSize(28, 28)
             btn.setStyleSheet(icon_style)            # padding:0 so the arrow isn't clipped
-            btn.clicked.connect(lambda _, r=row, d=delta: self._move_row(r, d))
-            self._table.setCellWidget(row, col, btn)
+            btn.clicked.connect(lambda _, c=clip, d=delta: self._move_clip(c, d))
+            self._table.setItemWidget(item, col, btn)
+        return item
 
-    def _update_row(self, row: int, clip: ClipInfo):
+    def _find_clip_item(self, clip_idx: int) -> Optional[QTreeWidgetItem]:
+        for gi in range(self._table.topLevelItemCount()):
+            group = self._table.topLevelItem(gi)
+            for ci in range(group.childCount()):
+                child = group.child(ci)
+                if child.data(COL_NAME, Qt.ItemDataRole.UserRole) == clip_idx:
+                    return child
+        return None
+
+    def _all_clip_items(self):
+        for gi in range(self._table.topLevelItemCount()):
+            group = self._table.topLevelItem(gi)
+            for ci in range(group.childCount()):
+                yield group.child(ci)
+
+    def _update_clip_item(self, item: QTreeWidgetItem, clip: ClipInfo):
         if clip.stream:
-            self._table.item(row, COL_CAM).setText(clip.camera_label or "—")
-            self._table.item(row, COL_CAM).setToolTip(
-                f"{clip.stream.width}×{clip.stream.height} · {clip.stream.codec} · {clip.stream.pix_fmt}")
-            dur = self._table.item(row, COL_DUR)
-            if dur:
-                dur.setText(_fmt_dur(clip.duration))
-        off = self._table.item(row, COL_OFFSET)
-        if off:
-            off.setText(_fmt_offset(clip))
-        drift = self._table.item(row, COL_DRIFT)
-        if drift:
-            drift.setText(_fmt_drift(clip))
-        self._update_status_cell(row, clip)
+            item.setText(COL_DUR, _fmt_dur(clip.duration))
+        item.setText(COL_OFFSET, _fmt_offset(clip))
+        item.setText(COL_DRIFT, _fmt_drift(clip))
+        self._update_status_cell(item, clip)
 
     def _refresh_sync_cells(self):
-        """Update the WAV Offset / Drift columns for all rows after analysis."""
-        for row in range(self._table.rowCount()):
-            item = self._table.item(row, COL_NAME)
-            if not item:
-                continue
-            idx = item.data(Qt.ItemDataRole.UserRole)
+        """Update the WAV Offset / Drift columns for all clip rows after analysis."""
+        for item in self._all_clip_items():
+            idx = item.data(COL_NAME, Qt.ItemDataRole.UserRole)
             if idx is None or idx >= len(self._clips):
                 continue
             clip = self._clips[idx]
-            off = self._table.item(row, COL_OFFSET)
-            if off:
-                off.setText(_fmt_offset(clip))
-            drift = self._table.item(row, COL_DRIFT)
-            if drift:
-                drift.setText(_fmt_drift(clip))
+            item.setText(COL_OFFSET, _fmt_offset(clip))
+            item.setText(COL_DRIFT, _fmt_drift(clip))
 
-    def _update_status_cell(self, row: int, clip: ClipInfo):
+    def _update_status_cell(self, item: QTreeWidgetItem, clip: ClipInfo):
         w = QWidget()
         lay = QHBoxLayout(w)
         lay.setContentsMargins(4, 2, 4, 2)
         lay.addWidget(_make_status_badge(clip.status, clip.conflicts))
-        self._table.setCellWidget(row, COL_STATUS, w)
+        self._table.setItemWidget(item, COL_STATUS, w)
 
-    def _move_row(self, row: int, delta: int):
-        new_row = row + delta
-        if new_row < 0 or new_row >= self._table.rowCount():
+    # ── Camera-group editing / reassignment ──────────────────────────────────
+
+    def _on_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int):
+        if item.parent() is None and column == COL_NAME:   # a camera-group header
+            self._table.editItem(item, COL_NAME)
+
+    def _on_tree_item_edited(self, item: QTreeWidgetItem, column: int):
+        if item.parent() is not None or column != COL_NAME:
+            return   # only camera-group header renames are handled here
+        new_label = item.text(COL_NAME).strip()
+        camera_id = item.data(COL_NAME, Qt.ItemDataRole.UserRole)
+        if not new_label or camera_id is None:
             return
-        item_a = self._table.item(row,     COL_NAME)
-        item_b = self._table.item(new_row, COL_NAME)
-        if not item_a or not item_b:
+        for clip in self._clips:
+            if clip.camera_id == camera_id:
+                clip.camera_label = new_label
+
+    def _on_clip_reassigned(self, clip_idx: int, target_camera_id: str):
+        if clip_idx < 0 or clip_idx >= len(self._clips):
             return
-        clip_a = self._clips[item_a.data(Qt.ItemDataRole.UserRole)]
-        clip_b = self._clips[item_b.data(Qt.ItemDataRole.UserRole)]
-        clip_a.order_idx, clip_b.order_idx = clip_b.order_idx, clip_a.order_idx
-        clip_a.manually_moved = True
-        clip_b.manually_moved = True
+        clip = self._clips[clip_idx]
+        if clip.camera_id == target_camera_id:
+            return
+        target_label = next((c.camera_label for c in self._clips
+                             if c.camera_id == target_camera_id), target_camera_id)
+        clip.camera_id, clip.camera_label = target_camera_id, target_label
         self._populate_table()
-        self._table.selectRow(new_row)
+
+    def _move_clip(self, clip: ClipInfo, delta: int):
+        """Swap `clip`'s position with its neighbour in the GLOBAL chronological
+        order (order_idx) — grouping is by camera, but the merge timeline is
+        always one sequential, cross-camera order."""
+        ordered = sorted(self._clips, key=lambda c: c.order_idx)
+        i = ordered.index(clip)
+        j = i + delta
+        if j < 0 or j >= len(ordered):
+            return
+        other = ordered[j]
+        clip.order_idx, other.order_idx = other.order_idx, clip.order_idx
+        clip.manually_moved = True
+        other.manually_moved = True
+        self._populate_table()
+        item = self._find_clip_item(self._clips.index(clip))
+        if item is not None:
+            self._table.setCurrentItem(item)
         self._dst_banner.setVisible(check_dst_warning(self._clips))
 
     def _reset_order(self):
         for clip in self._clips:
             clip.manually_moved = False
-        self._clips.sort(key=lambda c: (
-            c.filename_ts if c.filename_ts is not None else 99999999, c.name
-        ))
-        for i, c in enumerate(self._clips):
-            c.order_idx = i
+        order_clips_by_time(self._clips)   # creation_time when available, filename fallback
         self._populate_table()
         self._dst_banner.setVisible(check_dst_warning(self._clips))
 
