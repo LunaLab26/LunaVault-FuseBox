@@ -215,7 +215,8 @@ class MergeWorker(QThread):
                 duration=clip.duration, size_bytes=size_bytes,
                 conform_status=status,
                 spec_group=("" if status == "ok"
-                            else manifest_mod.spec_signature(codec, width, height, fps, pix)),
+                            else manifest_mod.spec_signature(codec, width, height, fps, pix,
+                                                             (st.rotation if st else 0))),
                 has_camera_audio=has_cam, original_audio_codec=acodec,
                 audio_lossless=audio_lossless, has_wav=clip.has_wav(),
                 baseline_chapter_index=idx,

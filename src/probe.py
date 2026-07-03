@@ -1,6 +1,7 @@
 """probe.py — ffprobe wrapper, stream inspection, Luna Ultra conformance checking."""
 
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -75,6 +76,11 @@ class StreamInfo:
     is_hdr: bool = False
     status: str = "unknown"    # "ok" | "transcode" | "hdr" | "error"
     error: str = ""
+    # Multicam-overhaul fields
+    creation_time: str = ""    # ISO-8601 UTC from container metadata (reliable cross-camera order)
+    rotation: int = 0          # display rotation in degrees, normalised 0..359
+    device: str = ""           # best-effort device name from metadata (make/model or handler)
+    is_vfr: bool = False       # variable frame rate (r_frame_rate != avg_frame_rate)
 
 
 def _run_ffprobe(ffprobe_bin: str, path: str) -> dict:
@@ -94,10 +100,68 @@ def _run_ffprobe(ffprobe_bin: str, path: str) -> dict:
 
 
 def _rational_to_float(s: str) -> float:
-    if "/" in s:
-        num, den = s.split("/", 1)
-        return float(num) / float(den) if float(den) else 0.0
-    return float(s)
+    try:
+        if "/" in s:
+            num, den = s.split("/", 1)
+            return float(num) / float(den) if float(den) else 0.0
+        return float(s)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+# Standard frame rates a normalised fps snaps to (so 29.997 → "30", not an ugly
+# rational, and clips at ~30 group together in spec_signature).
+_COMMON_FPS = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 120, 240]
+
+
+def _normalize_fps(f: float) -> str:
+    for c in _COMMON_FPS:
+        if abs(f - c) < 0.02:
+            return f"{c:g}"
+    return f"{round(f, 2):g}" if f > 0 else "0"
+
+
+def _extract_rotation(stream: dict) -> int:
+    """Display rotation in degrees, normalised to 0..359. Reads the modern
+    Display-Matrix side data first, then the legacy `rotate` tag."""
+    for sd in stream.get("side_data_list", []) or []:
+        if "rotation" in sd:
+            try:
+                return int(round(float(sd["rotation"]))) % 360
+            except (TypeError, ValueError):
+                pass
+    rot = (stream.get("tags", {}) or {}).get("rotate")
+    try:
+        return int(round(float(rot))) % 360 if rot is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+_GENERIC_HANDLERS = {"videohandler", "videohandle", "core media video",
+                     "gpac iso video handler", "soundhandler", "soundhandle", ""}
+
+
+def _extract_device(fmt_tags: dict, video_tags: dict) -> str:
+    """Best-effort camera/device name from container metadata: an explicit
+    make/model (phones) first, else a meaningful handler_name (e.g. Insta360's
+    'Ambarella AVC' → 'Ambarella'), else '' (generic → caller falls back)."""
+    for model_key, make_key in (("com.android.model", "com.android.manufacturer"),
+                                ("com.apple.quicktime.model", "com.apple.quicktime.make"),
+                                ("model", "make")):
+        model = fmt_tags.get(model_key)
+        if model:
+            make = fmt_tags.get(make_key) or ""
+            if make and make.lower() not in model.lower():
+                return f"{make} {model}".strip()
+            return model
+    # Handler strings can carry a leading length-byte / control char and a codec
+    # suffix — e.g. "\x10INS.AVC" (Insta360 X4) or "Ambarella AVC" (Go3s).
+    handler = "".join(ch for ch in (video_tags.get("handler_name", "") or "") if ch.isprintable()).strip()
+    if handler.lower() not in _GENERIC_HANDLERS:
+        tok = handler.split()[0]                                   # "Ambarella AVC" → "Ambarella"
+        tok = re.sub(r"\.(avc|aac|hevc|hvc1|h264|h265)$", "", tok, flags=re.I)  # "INS.AVC" → "INS"
+        return tok
+    return ""
 
 
 def probe(ffprobe_bin: str, path: str) -> StreamInfo:
@@ -117,21 +181,26 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
         info.duration = 0.0
 
     streams = raw.get("streams", [])
+    video_stream = None
     for s in streams:
         ctype = s.get("codec_type", "")
         if ctype == "video" and not info.codec:
+            video_stream = s
             info.codec         = s.get("codec_name", "")
             info.width         = s.get("width", 0)
             info.height        = s.get("height", 0)
             info.pix_fmt       = s.get("pix_fmt", "")
             info.color_space   = s.get("color_space", "")
             info.color_transfer = s.get("color_transfer", "")
-            fps_raw = s.get("r_frame_rate") or s.get("avg_frame_rate", "0/1")
-            try:
-                info.fps_float = _rational_to_float(fps_raw)
-                info.fps_str = "30000/1001" if abs(info.fps_float - TARGET_FPS_FLOAT) < 0.01 else fps_raw
-            except Exception:
-                info.fps_str = fps_raw
+            # avg_frame_rate is the true display rate; r_frame_rate is the timebase
+            # tick rate and misreads VFR (a Pixel 30fps VFR clip reports r=120). Use
+            # avg, keep r only to detect VFR and as a fallback.
+            r_float = _rational_to_float(s.get("r_frame_rate", "0/1"))
+            avg_float = _rational_to_float(s.get("avg_frame_rate", "0/1"))
+            cap_fps = _rational_to_float((s.get("tags", {}) or {}).get("com.android.capture.fps", "0"))
+            info.fps_float = cap_fps if cap_fps > 0 else (avg_float if avg_float > 0 else r_float)
+            info.is_vfr = bool(r_float > 0 and avg_float > 0 and abs(r_float - avg_float) > 0.5)
+            info.fps_str = _normalize_fps(info.fps_float)
 
         elif ctype == "audio" and not info.audio_codec:
             info.audio_codec       = s.get("codec_name", "")
@@ -141,6 +210,12 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
                 info.audio_bit_rate    = int(s.get("bit_rate", 0) or 0)
             except (ValueError, TypeError):
                 pass
+
+    fmt_tags = fmt.get("tags", {}) or {}
+    vs_tags = (video_stream or {}).get("tags", {}) or {}
+    info.creation_time = fmt_tags.get("creation_time") or vs_tags.get("creation_time") or ""
+    info.rotation = _extract_rotation(video_stream or {})
+    info.device = _extract_device(fmt_tags, vs_tags)
 
     # ── Conformance check ─────────────────────────────────────────────────────
     conflicts = []
@@ -157,13 +232,17 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
     if info.width != TARGET["width"] or info.height != TARGET["height"]:
         conflicts.append(f"{info.width}×{info.height}")
 
-    if info.fps_str != TARGET["fps"]:
-        if info.fps_float > 0:
-            # Show as clean integer if close to a whole number
-            fps_display = f"{info.fps_float:.0f}fps" if abs(info.fps_float - round(info.fps_float)) < 0.01 else f"{info.fps_float:.2f}fps"
-            conflicts.append(fps_display)
-        else:
-            conflicts.append("unknown-fps")
+    # Compare the true rate (fps_float) against the target; a VFR clip always
+    # needs conforming (CFR-normalising) even if its average happens to match,
+    # since VFR drifts A/V sync on a concatenated timeline.
+    if info.fps_float <= 0:
+        conflicts.append("unknown-fps")
+    elif abs(info.fps_float - TARGET_FPS_FLOAT) > 0.01 or info.is_vfr:
+        fps_display = (f"{info.fps_float:.0f}fps" if abs(info.fps_float - round(info.fps_float)) < 0.01
+                       else f"{info.fps_float:.2f}fps")
+        if info.is_vfr:
+            fps_display += " VFR"
+        conflicts.append(fps_display)
 
     if info.pix_fmt != TARGET["pix_fmt"]:
         # Use friendly label if known, otherwise show raw name

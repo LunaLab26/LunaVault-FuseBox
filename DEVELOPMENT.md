@@ -102,6 +102,60 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
   git log / commit messages or a maintained changelog. Needs design discussion (what
   granularity, per-version vs per-change, how it's generated/kept in sync) before scoping.
 
+## Review-tab design refinement backlog (for a later action-plan discussion)
+
+The Review tab's UX pass + polish are shipped; these are *next-level* design-language
+refinements captured from a critique, to be turned into an action plan later — none urgent.
+
+1. **Accent is doing too many jobs.** The amber accent currently marks section titles,
+   selected toggles, the primary action (camera), and the viewport box (playhead is gold).
+   A non-interactive label (section title) wearing the "active/clickable" colour dilutes the
+   accent's signal. Proposal: mute section titles to `text_mute`, reserve accent strictly
+   for interactive/active states (extends the theme-pass accent-scope discipline).
+2. **Transport row conflates three control types.** Navigation (skip/step/play/step/skip),
+   the jog *shuttle*, and the snapshot *action* sit evenly in one line. Add a divider/spacing
+   to group by function — the camera especially is an action, not transport; also reinforces
+   that chapter-skip vs frame-step are different (they're only subtly different icons).
+3. **Scopes column is the tightest spot.** Badges + two toggle groups + the approx flag +
+   a short (~96px) canvas packed into the narrow 2/5 column. Give the Parade/RGB sub-toggle
+   a clearer hierarchy (it's a *style* of Waveform, not a peer of Histogram — segmented
+   control or a "Waveform style:" label), and let the scope canvas breathe taller.
+4. **Overview is near its density ceiling.** Envelope + viewport + playhead + ruler already
+   share a short strip. When the Phase-2 thumbnail filmstrip lands, restructure this into a
+   proper multi-row timeline (ruler / thumbnails / waveform) rather than cramming a fourth
+   layer in. Design the restructure deliberately with the proxy/thumbnail work.
+5. **Status line is a shared transient slot.** Snapshot confirmations, load progress, and
+   errors all flash through one muted line. A successful snapshot save is worth a beat more
+   prominence — e.g. briefly tint it `ok` green — so the user gets clear action feedback.
+
+## Multicam merge overhaul — progress
+
+A real 4-camera test folder (Pixel 9 Pro, Insta360 Go3s + X4, Luna Ultra) drives this epic;
+full plan in the plan file. Decisions: user-chosen baseline spec (recommended = duration-
+weighted best-quality-of-majority, no upscaling); pad-to-fit (black/blurred, per project);
+archival grouped by spec **+ rotation**, concat-default with an optional per-clip (bit-exact)
+mode; per-clip audio; order by `creation_time`; fps from `avg_frame_rate`; per-clip restore
+records + log.
+
+- **Phase 1 — correctness foundation (done, verified on the real folder)**:
+  - `probe.py`: now exposes `creation_time`, `rotation` (0..359), `device` (make/model, or a
+    sanitised handler_name — strips control-byte prefixes + codec suffixes, so Insta360 X4's
+    `\x10INS.AVC` → `INS`, Go3s → `Ambarella`), and `is_vfr`. **fps now from `avg_frame_rate`**
+    (honours `com.android.capture.fps`), fixing the Pixel VFR clip that misreported as 120fps
+    (`r_frame_rate`) — it's correctly 30fps VFR. Conformance is float-tolerant + treats VFR as
+    a conform trigger.
+  - New pure `camera_id.py`: device→filename→spec cascade → stable key + editable label.
+  - `clip_model.py`: `order_clips_by_time` (creation_time, filename fallback); `_pair_wav`
+    gains a `(date,time,clip-number)` key so cross-brand names pair (Insta360
+    `LRV_…_01_NNN.lrv.WAV` ↔ `VID_…_00_NNN.mp4`).
+  - `core/manifest.py`: `spec_signature` now includes **rotation** so differently-rotated
+    clips never share an archival track (they'd lose orientation on recovery).
+  - **Verified on the real folder**: 4 cameras detected (Pixel×3, Ambarella/Go3s×3, Luna×2,
+    INS/X4×1); Pixel VFR→30fps; rotations rot270/rot180 read; creation-time order; 5/9 WAVs
+    auto-paired (the correct 5); Luna 10-bit clips classify `ok` (stream-copy), rest transcode.
+    Tests: `test_camera_id.py` (new), `test_manifest.py` (rotation split), all suites green.
+  - Next: Phase 2 (dynamic baseline spec + recommendation + pad/blur conform).
+
 ## Archival master / "Extract and Share" — Phase 1 progress
 
 The "Extract and Share" + "metadata preservation" future-ideas above are now being
@@ -179,6 +233,64 @@ explicitly rather than assuming AAC-copy is always lossless.
 
 **Caveat (same as video):** recovered `.wav`/`.mp4` are sample-for-sample identical but
 re-wrapped, so files aren't byte-identical to the camera originals — the content is.
+
+### Phase 2 progress (in flight)
+
+- **Multi-archival-track spike (done — `tools/spike_archival_p2.py`, throwaway)**: proved
+  the Phase-2-specific risks beyond Phase 1's single-track spike. Built a master with a
+  baseline 4K-HEVC track (v:0, default) **plus two archival tracks from distinct spec
+  groups** (1080p-H.264 + AAC, and 720p-H.264 + AAC), then extracted each odd-spec clip's
+  **video + camera audio by stream index** — both **content-lossless** (decoded md5 match).
+  Confirms multiple archival tracks coexist and are individually recoverable.
+  **Schema implication:** extract addresses clips by absolute stream index; in the real
+  pipeline the baseline's own audio (camera AAC, WAV ALAC, optional mix) occupies the first
+  audio slots, so archival audio starts at `a:2+`. The manifest must record each odd-spec
+  clip's computed video- and camera-audio stream indices + in-track offset (the builder
+  knows the exact final layout). Next: the pure archival command-builders, then the
+  manifest audio/location fields matching this, then wiring an opt-in "Archival master"
+  mode into the merge.
+- **Builders + manifest + merge wiring (done)**: `build_archival_concat_cmd` +
+  `build_final_archival_mux_cmd` (`core/ffmpeg_cmd.py`, unit-tested + proven end-to-end);
+  manifest extended with audio fields (`has_camera_audio`, `original_audio_codec`,
+  `audio_lossless`, `has_wav`) + stream-location fields (`archival_track`,
+  `archival_audio_stream`, in-track offsets) + `baseline_audio_tracks`, plus
+  `assign_archival_locations` (tested). `MergeWorker` gained an opt-in `archival` flag:
+  it builds the baseline as an intermediate, concats each odd-spec spec-group's originals
+  (or uses a lone original **directly** — bit-exact, avoiding concat-demuxer AAC-priming
+  perturbation), assigns manifest locations, and muxes baseline + archival tracks into the
+  final master with the complete manifest embedded. A merge-tab **"Archival master"**
+  checkbox exposes it (default off). The non-archival path is unchanged (its Popen loop was
+  extracted into `_run_stage`, reused by all stages).
+- **Verified (done)**: targeted end-to-end test of the archival path (stand-in baseline +
+  two odd-spec originals) — correct 7-stream master, manifest embedded + read back with
+  right stream indices (`baseline_audio_tracks={camera:0,wav:1}`, archival tracks at
+  v:1/a:2 and v:2/a:3), and **indexed extraction bit-exact (video + audio)** for
+  single-clip groups. All unit suites green. Still worth a real archival merge on the
+  user's footage (like Phase 1) as the final confirmation, and a normal-merge check to
+  confirm the `_run_stage` refactor didn't disturb the non-archival deliverable.
+- **Remaining for Phase 3**: the Extract UI (rename WhatsApp tab → "Extract and Share",
+  read the manifest, recover clips + WAVs). Extract should input-seek to each clip's start
+  keyframe for frame-exact video; multi-clip-group audio stays near-exact (AAC priming).
+
+### Phase 2 finding — concat re-cut is NOT bit-exact (layout decision to revisit)
+
+Testing the archival builders end-to-end revealed that extracting an individual clip
+from a **concatenated** archival track (the chosen "one track per camera/spec" layout) is
+**not sample-identical**: cutting at concat boundaries gives off-by-a-frame video and
+AAC-priming audio differences (content is present, but md5 differs). Phase 1's spike only
+md5-checked *video* on the re-cut, so this was missed. The **one-track-per-clip** layout
+extracts a whole track with no cut and IS bit-exact (video + audio) — proven in the Phase 2
+spike. This reopens the archival-layout decision (per-camera/spec concat + re-cut vs.
+one-track-per-clip); the pure builders (`build_archival_concat_cmd`,
+`build_final_archival_mux_cmd`) work for either.
+
+**Resolved (user, informed of the trade-off):** keep **per-camera/spec concat**; accept
+**content-complete, near-exact** recovery (boundary clips may differ by a frame / a few AAC
+priming samples from the camera original) rather than adding one track per clip. Extract
+(Phase 3) should minimise the drift: input-seek to each clip's start keyframe makes *video*
+frame-exact; the residual is AAC audio priming at boundaries, which is inherent and
+documented. The manifest records, per clip, its archival track + in-track start/duration
+and the master stream indices so Extract can cut there.
 
 ### Review-tab integration (Phase 2)
 

@@ -74,6 +74,13 @@ def test_spec_signature_stable_and_discriminating():
     assert a != c
 
 
+def test_spec_signature_splits_on_rotation():
+    a = spec_signature("h264", 1920, 1080, "30/1", "yuv420p", 0)
+    b = spec_signature("h264", 1920, 1080, "30/1", "yuv420p", 90)
+    c = spec_signature("h264", 1920, 1080, "30/1", "yuv420p", 270)
+    assert a != b and a != c and b != c   # differently-rotated clips never share a track
+
+
 def test_group_nonconforming_skips_baseline_clips():
     groups = group_nonconforming_by_spec(_sample_manifest().clips)
     # Only the two 1080p transcodes group; the conforming 4K clip is excluded.
@@ -185,6 +192,7 @@ if __name__ == "__main__":
     test_json_round_trip_preserves_every_field()
     test_compact_json_has_no_newlines_for_embedding()
     test_spec_signature_stable_and_discriminating()
+    test_spec_signature_splits_on_rotation()
     test_group_nonconforming_skips_baseline_clips()
     test_assign_in_track_offsets_is_cumulative()
     test_assign_archival_locations_matches_mux_stream_order()

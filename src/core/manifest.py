@@ -85,16 +85,20 @@ class Manifest:
 
 # ── Spec signature + grouping ──────────────────────────────────────────────────
 
-def spec_signature(codec: str, width: int, height: int, fps: str, pix_fmt: str) -> str:
+def spec_signature(codec: str, width: int, height: int, fps: str, pix_fmt: str,
+                   rotation: int = 0) -> str:
     """Stable grouping key: clips sharing a signature can be concat-copied onto
     one archival track. Groups by the params that must match for a stream-copy
-    concat to stay valid (codec, resolution, frame rate, pixel format) — which
-    in practice means "same camera/format"."""
+    concat to stay valid (codec, resolution, frame rate, pixel format) plus
+    ROTATION — differently-rotated clips must NOT share a track or their
+    orientation is lost on recovery. In practice this means "same camera/format,
+    same orientation"."""
     return "|".join((
         (codec or "?").lower(),
         f"{int(width)}x{int(height)}",
         fps or "?",
         (pix_fmt or "?").lower(),
+        f"rot{int(rotation) % 360}",
     ))
 
 
