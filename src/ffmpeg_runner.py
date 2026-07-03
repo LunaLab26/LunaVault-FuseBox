@@ -17,9 +17,10 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from grade_manager import Grade
-from probe import probe_duration
+from probe import probe_duration, pix_fmt_info
 
 from core.binaries import get_app_dir, get_ffmpeg, no_window
+from core import manifest as manifest_mod
 from core.progress import read_progress, parse_progress
 from core.sync_advanced import analyze_sync
 from core.ffmpeg_cmd import (
@@ -173,6 +174,42 @@ class MergeWorker(QThread):
                 continue
         return get_app_dir() / "_temp"
 
+    # Cap on the embedded-manifest metadata value, well under the Windows
+    # ~32 KB command-line limit; a shoot large enough to exceed it falls back to
+    # the sidecar (which has no size limit) rather than risk failing the concat.
+    _MANIFEST_EMBED_MAX = 24000
+
+    def _build_manifest(self, clips: list):
+        """Provenance manifest for the master — one entry per source clip, in
+        baseline (chapter) order. Additive: recording where each original came
+        from and whether it conformed. Archival-track fields stay unset until
+        Phase 2 actually embeds the odd-spec originals."""
+        m = manifest_mod.Manifest(master_filename=self._output.name)
+        for idx, clip in enumerate(clips):
+            st = clip.stream
+            codec  = st.codec if st else ""
+            width  = st.width if st else 0
+            height = st.height if st else 0
+            fps    = st.fps_str if st else ""
+            pix    = st.pix_fmt if st else ""
+            status = st.status if st else "unknown"
+            try:
+                size_bytes = clip.path.stat().st_size
+            except Exception:
+                size_bytes = 0
+            m.clips.append(manifest_mod.ClipEntry(
+                source_filename=clip.path.name,
+                container=clip.path.suffix.lstrip(".").lower(),
+                codec=codec, width=width, height=height, fps=fps, pix_fmt=pix,
+                bit_depth=(pix_fmt_info(pix)[0] if pix else 0),
+                duration=clip.duration, size_bytes=size_bytes,
+                conform_status=status,
+                spec_group=("" if status == "ok"
+                            else manifest_mod.spec_signature(codec, width, height, fps, pix)),
+                baseline_chapter_index=idx,
+            ))
+        return m
+
     def run(self):
         ff, fp = get_ffmpeg()
         # Per-clip temp files go on a fast LOCAL scratch dir; only the finished
@@ -309,8 +346,18 @@ class MergeWorker(QThread):
                 f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={cum_ms}\nEND={cum_ms+dur_ms}\ntitle={clip.stem}\n\n")
                 cum_ms += dur_ms
 
+        # Archival manifest (additive): a sidecar JSON is always written after the
+        # master lands; the same manifest is also embedded as a master metadata tag
+        # here, unless it's large enough to threaten the command-line limit.
+        manifest = self._build_manifest(clips)
+        embed = manifest_mod.metadata_embed_args(
+            manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
+        if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
+            embed = None
+
         progress_file.write_text("")
-        cmd = build_concat_cmd(ff, concat_file, chapters_file, final_tmp, progress_file)
+        cmd = build_concat_cmd(ff, concat_file, chapters_file, final_tmp, progress_file,
+                               extra_out_args=embed)
 
         if self._enable_preview:
             thumb = ThumbnailThread(ff, str(temp_clips[0]), progress_file, temp_dir)
@@ -358,6 +405,13 @@ class MergeWorker(QThread):
             self.finished.emit(False, f"Could not move output into place: {e}")
             return
         self._cleanup(temp_dir)
+
+        # Sidecar manifest beside the finished master — best-effort, never fails
+        # the merge (the master itself is already complete and valid).
+        try:
+            manifest_mod.write_sidecar(manifest, self._output)
+        except Exception:
+            pass
 
         size_gb = self._output.stat().st_size / 1024 ** 3
         self.finished.emit(True, f"Done — {size_gb:.2f} GB")

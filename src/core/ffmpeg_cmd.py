@@ -464,14 +464,23 @@ def build_mix_sample_cmd(ff: str, clip: ClipInfo, mix: MixSpec,
 
 
 def build_concat_cmd(ff: str, concat_file: Path, chapters_file: Path,
-                     output: Path, progress_file: Path) -> list:
-    """Concatenate the per-clip temp files (stream copy) + attach chapters."""
-    return [ff, "-y",
-            "-f", "concat", "-safe", "0", "-i", str(concat_file),
-            "-i", str(chapters_file),
-            "-map_metadata", "1", "-map", "0", "-c", "copy",
-            "-progress", str(progress_file), "-nostats",
-            str(output)]
+                     output: Path, progress_file: Path,
+                     extra_out_args: Optional[list] = None) -> list:
+    """Concatenate the per-clip temp files (stream copy) + attach chapters.
+
+    `extra_out_args` (e.g. the archival manifest's `metadata_embed_args`) are
+    inserted as output options just before the output filename — additive only,
+    they don't touch the copied A/V streams.
+    """
+    cmd = [ff, "-y",
+           "-f", "concat", "-safe", "0", "-i", str(concat_file),
+           "-i", str(chapters_file),
+           "-map_metadata", "1", "-map", "0", "-c", "copy",
+           "-progress", str(progress_file), "-nostats"]
+    if extra_out_args:
+        cmd += list(extra_out_args)
+    cmd += [str(output)]
+    return cmd
 
 
 def build_whatsapp_cmd(ff: str, source: str, start: str, duration: str,

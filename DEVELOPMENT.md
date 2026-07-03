@@ -102,6 +102,99 @@ crypto is secondary (behind a "Prefer crypto?" reveal in the About tab).
   git log / commit messages or a maintained changelog. Needs design discussion (what
   granularity, per-version vs per-change, how it's generated/kept in sync) before scoping.
 
+## Archival master / "Extract and Share" — Phase 1 progress
+
+The "Extract and Share" + "metadata preservation" future-ideas above are now being
+built together. Design decisions locked with the user: archival layout = **one video
+track per camera/spec** (concat a camera's same-spec originals onto one track, re-cut at
+keyframe-aligned boundaries on extract); recovery fidelity = **content-lossless**
+(pixel/sample-identical, remuxed into the original container/filename — not byte-identical
+files). Architecture: baseline conformed-4K track stays track 1 (default); only the
+**non-conforming** originals need embedding, since conforming clips are already
+stream-copied into the baseline and original AAC/WAV audio is already preserved.
+
+- **Spike (done — decision gate passed)**: `tools/spike_archival.py` (throwaway) built a
+  master carrying a baseline 4K-HEVC track (track 1, default) **plus** a parallel
+  stream-copied 1080p-H.264 original track + its audio, then extracted the original back.
+  Verified via **decoded-frame md5** (not file bytes):
+    - parallel archival-track round-trip: **content-lossless** (video + audio md5 match);
+    - per-spec concat of two same-spec originals + boundary re-cut of clip 2:
+      **content-lossless**;
+    - `ffprobe` confirms two video tracks with track 1 flagged `disposition:default` and
+      the archival track non-default.
+  Interop note: track-1-default is the correct signal for external tools (which read only
+  the default track); a real player/NLE check on the desktop is still worth doing before
+  shipping the format. Keyframe caveat: boundary re-cut is clean because each original
+  begins with a keyframe at its exact boundary, so the manifest must store exact
+  cumulative in-track offsets.
+- **Manifest groundwork (done)**: `src/core/manifest.py` (pure — `Manifest`/`ClipEntry`
+  dataclasses, JSON round-trip, `spec_signature` grouping, `assign_in_track_offsets`,
+  sidecar + embedded-metadata helpers, `read_manifest`) with `tests/test_manifest.py`
+  (incl. an embed-then-reparse integration test proving a custom key survives the MOV mux
+  via `-movflags use_metadata_tags`). `MergeWorker` now builds a per-clip provenance
+  manifest during every merge and writes it **two ways, both additive** (no change to the
+  master's A/V streams): a `<master-stem>.manifest.json` sidecar and an embedded global
+  metadata tag (skipped only if it would approach the command-line length limit — the
+  sidecar always carries the full copy). `build_concat_cmd` gained an `extra_out_args`
+  param for the embed. Verified: manifest unit tests pass; a probed two-clip set maps into
+  correct entries (codec/dims/bit-depth/conform-status/spec-group/chapter-index); the
+  concat command shape keeps chapters **and** the manifest tag in the output MOV.
+  Remaining for Phase 2: the archival-track fields (`archival_track`, `in_track_*`) are
+  defined but unset until odd-spec originals are actually embedded.
+
+### Audio model (Phase 2 spec — not yet built)
+
+Each clip has **two independent audio sources**, preserved and recovered by different
+mechanisms (grounded in the merge's existing `_slot_fill` / `build_mux_cmd_plan`):
+
+1. **In-clip camera audio** — the audio stream inside the MP4 (on-board / Bluetooth mic).
+2. **The paired WAV** — the external lossless recorder file.
+
+**Preservation:**
+- **WAV → ALAC (always lossless).** The "wav" audio slot encodes each clip's WAV to ALAC;
+  decoding it returns the exact original PCM. Recoverable content-lossless from the
+  baseline for every clip.
+- **Camera audio, conforming clips** — rides in the baseline "camera" slot; `-c:a copy`
+  (lossless passthrough) **when it's already AAC**. No archival copy needed.
+- **Camera audio, odd-spec clips** — stream-copied **together with the original video onto
+  the same archival track** (the spike did exactly this: `-map v -map a -c copy`, both
+  md5-identical on round-trip). Guarantees the exact original audio bitstream regardless of
+  codec.
+
+**Recovery (manifest-driven), per clip → an MP4 (video + camera audio) and a standalone WAV:**
+- conforming clip: video from V1 chapter + camera audio from the baseline AAC track;
+- odd-spec clip: video + camera audio both from its archival track (one stream copy);
+- WAV: decode that clip's ALAC segment back to `.wav`.
+
+**Manifest fields to add in Phase 2** (alongside the existing video-location fields):
+`has_camera_audio` (bool), `original_audio_codec`, `camera_audio_location`
+(baseline-track vs archival-track + index), `wav_present`, `wav_track`, `wav_in_track_start`,
+and an **`audio_lossless`** flag.
+
+**The `audio_lossless` decision to make in Phase 2:** a clip that *conforms on video* (so it
+gets no archival track) but whose camera audio is **not AAC** would only survive in the
+baseline as a lossy AAC re-encode. The `audio_lossless` flag drives whether such a clip
+still needs an archival **audio** stream to keep its original bitstream. Decide this
+explicitly rather than assuming AAC-copy is always lossless.
+
+**Caveat (same as video):** recovered `.wav`/`.mp4` are sample-for-sample identical but
+re-wrapped, so files aren't byte-identical to the camera originals — the content is.
+
+### Review-tab integration (Phase 2)
+
+The multi-video-track master serves **both** recovery and review. Alongside the archival
+original tracks, Phase 2 can add a small **review proxy track** (e.g. 960×540 H.264,
+**opt-in per merge** via a merge-tab checkbox — decided with the user). Because it's a tiny
+track the GPU can decode trivially, the Review tab can play it for **smooth, crash-free
+playback** (upgrading today's `HybridPlaybackEngine` slideshow), and the **thumbnail
+filmstrip** can be built cheaply from it instead of decoding the 4K master. The proxy is a
+*distinct* track from the archival originals (proxy = tiny playback stand-in; archival =
+full-quality originals for recovery), but both ride the same multi-track plumbing. The
+timeline **timestamp ruler + clip markers** come from chapters/manifest the master already
+carries. The four *standalone* Review polish items (accent-drawn snapshot camera, timestamp
+ruler, scroll/pinch preview zoom, audio-lanes crop-to-viewport) are independent of all this
+and are being done first.
+
 ## v1.4 progress notes
 
 - **Stability pass (done)**: fixed the rare "app closed itself" bug — `_on_finished()` in
