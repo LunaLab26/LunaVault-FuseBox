@@ -13,16 +13,36 @@ from PySide6.QtWidgets import (
     QComboBox, QMessageBox, QCheckBox, QScrollArea,
 )
 
-from clip_model import ClipInfo, scan_folder, unpaired_wavs, check_dst_warning
+from clip_model import ClipInfo, scan_folder, unpaired_wavs, check_dst_warning, order_clips_by_time
 from ffmpeg_runner import MergeWorker, get_ffmpeg
 from thread_utils import settle
-from probe import probe, probe_duration
+from probe import probe, probe_duration, pix_fmt_info, BaselineSpec, apply_conformance
 from settings import Settings
-from core.ffmpeg_cmd import OutputPlan, OutputTrack
+from core.ffmpeg_cmd import OutputPlan, OutputTrack, ConformSpec, DEFAULT_CONFORM
+from core.baseline import ClipSpec, enumerate_specs, recommend_baseline
 import log_manager
 import theme
 
 CUSTOM_AUDIO_LABEL = "Custom…"
+
+_NTSC_RATES = {30000 / 1001: "30000/1001", 24000 / 1001: "24000/1001",
+               60000 / 1001: "60000/1001"}
+
+
+def _fps_to_float(fps_str: str) -> float:
+    try:
+        return float(fps_str)
+    except (TypeError, ValueError):
+        return 30000 / 1001
+
+
+def _fps_to_ffmpeg(fps_str: str) -> str:
+    """An ffmpeg fps expression — snaps NTSC rates to their exact fraction."""
+    f = _fps_to_float(fps_str)
+    for rate, frac in _NTSC_RATES.items():
+        if abs(f - rate) < 0.01:
+            return frac
+    return fps_str or "30"
 
 # status → (palette attribute name, label)
 STATUS_COLORS = {
@@ -185,7 +205,7 @@ class MergeTab(QWidget):
         self._unmatched_banner.hide()
         c.addWidget(self._unmatched_banner)
 
-        # ── Resolution mismatch panel ─────────────────────────────────────────
+        # ── Baseline spec chooser ─────────────────────────────────────────────
         self._res_banner = QWidget()
         self._res_banner.hide()
         res_layout = QVBoxLayout(self._res_banner)
@@ -194,24 +214,22 @@ class MergeTab(QWidget):
         self._res_label = QLabel()
         self._res_label.setWordWrap(True)
         res_layout.addWidget(self._res_label)
-        res_btn_row = QHBoxLayout()
-        res_btn_row.setSpacing(6)
-        self._res_buttons: list[QPushButton] = []
-        for label, key in [
-            ("Downscale to baseline", "downscale"),
-            ("Upscale all to largest", "upscale"),
-            ("Separate file", "separate"),
-            ("Drop minority clips", "drop"),
-        ]:
-            btn = QPushButton(label)
-            btn.setProperty("res_key", key)
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda checked, b=btn: self._on_res_btn(b))
-            self._res_buttons.append(btn)
-            res_btn_row.addWidget(btn)
-        res_btn_row.addStretch()
-        res_layout.addLayout(res_btn_row)
+        self._res_btn_row = QHBoxLayout()   # baseline-spec buttons, rebuilt after probe
+        self._res_btn_row.setSpacing(6)
+        res_layout.addLayout(self._res_btn_row)
+        fill_row = QHBoxLayout()
+        fill_row.setSpacing(6)
+        self._fill_label = QLabel("Padding for odd-aspect / vertical clips:")
+        self._fill_combo = QComboBox()
+        self._fill_combo.addItems(["Black bars", "Blurred fill"])
+        fill_row.addWidget(self._fill_label)
+        fill_row.addWidget(self._fill_combo)
+        fill_row.addStretch()
+        res_layout.addLayout(fill_row)
         c.addWidget(self._res_banner)
+        self._baseline_buttons: list = []   # (QPushButton, SpecGroup)
+        self._spec_groups: list = []
+        self._chosen_group = None
 
         # ── CLIPS ───────────────────────────────────────────────────────────────
         self._show_sync_check = QCheckBox("Show sync details")
@@ -683,7 +701,8 @@ class MergeTab(QWidget):
         self._unmatched_banner.setStyleSheet(
             f"background:{p.banner_info_bg}; color:{p.text}; border-radius:4px; padding:6px 10px;")
         self._res_label.setStyleSheet(f"color:{p.text}; font-size:12px;")
-        for btn in getattr(self, "_res_buttons", []):
+        self._fill_label.setStyleSheet(f"color:{p.text_dim}; font-size:11px;")
+        for btn, _g in getattr(self, "_baseline_buttons", []):
             btn.setStyleSheet(
                 "QPushButton { font-size:11px; padding:4px 10px; border-radius:4px; "
                 f"border:1px solid {p.border}; color:{p.text_dim}; background:{p.input_dk}; }}"
@@ -778,34 +797,75 @@ class MergeTab(QWidget):
         self._track_combo.setItemText(0, cam_label)
         self._suppress_combo = False
 
-    # ── Resolution mismatch ───────────────────────────────────────────────────
+    # ── Baseline spec chooser ─────────────────────────────────────────────────
 
-    def _on_res_btn(self, clicked_btn: QPushButton):
-        for b in self._res_buttons:
-            b.setChecked(b is clicked_btn)
+    def _collect_clip_specs(self) -> list:
+        specs = []
+        for c in self._clips:
+            st = c.stream
+            if st and st.width and st.height:
+                specs.append(ClipSpec(st.codec, st.width, st.height, st.fps_str, st.pix_fmt,
+                                      pix_fmt_info(st.pix_fmt)[0], st.color_space, st.duration))
+        return specs
 
-    def _res_mode(self) -> str:
-        for b in self._res_buttons:
-            if b.isChecked():
-                return b.property("res_key")
-        return "downscale"
+    def _build_baseline_chooser(self):
+        """After probing, list the distinct specs as selectable baselines with the
+        recommended one pre-picked. Selecting one reclassifies every clip against
+        it (matching clips → stream copy, the rest → transcode)."""
+        while self._res_btn_row.count():
+            it = self._res_btn_row.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._baseline_buttons = []
+        self._spec_groups = enumerate_specs(self._collect_clip_specs())
 
-    def _check_resolution_mismatch(self):
-        resolutions = set()
-        for clip in self._clips:
-            if clip.stream and clip.stream.width and clip.stream.height:
-                resolutions.add((clip.stream.width, clip.stream.height))
-        if len(resolutions) > 1:
-            res_list = ", ".join(f"{w}×{h}" for w, h in sorted(resolutions, reverse=True))
-            self._res_label.setText(
-                f"Resolution mismatch detected — clips contain: {res_list}. "
-                "How would you like to handle minority-resolution clips?"
-            )
-            self._res_banner.show()
-            if not any(b.isChecked() for b in self._res_buttons):
-                self._res_buttons[0].setChecked(True)
-        else:
+        if len(self._spec_groups) <= 1:
+            # One spec (or none): baseline is simply that spec — everything
+            # stream-copies. Hide the chooser but still set the baseline.
             self._res_banner.hide()
+            if self._spec_groups:
+                self._on_baseline_chosen(self._spec_groups[0])
+            else:
+                self._chosen_group = None
+            return
+
+        rec = recommend_baseline(self._spec_groups)
+        self._res_label.setText(
+            "Baseline spec — every clip conforms to this; clips that already match are "
+            "copied losslessly and the rest are transcoded to it. Odd-spec originals are "
+            "preserved on their own archival tracks (with “Archival master” on).")
+        for g in self._spec_groups:
+            btn = QPushButton(g.label() + ("   ★ recommended" if g is rec else ""))
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, gg=g: self._on_baseline_chosen(gg))
+            self._res_btn_row.addWidget(btn)
+            self._baseline_buttons.append((btn, g))
+        self._res_btn_row.addStretch()
+        self._res_banner.show()
+        self._on_baseline_chosen(rec)
+        self._restyle()   # style the freshly-created buttons
+
+    def _on_baseline_chosen(self, group):
+        self._chosen_group = group
+        for btn, g in self._baseline_buttons:
+            btn.setChecked(g is group)
+        bspec = BaselineSpec(codec=group.codec, width=group.width, height=group.height,
+                             fps_float=_fps_to_float(group.fps),
+                             pix_fmt=group.pix_fmt, color_space=group.color_space or "bt709")
+        for c in self._clips:
+            if c.stream:
+                apply_conformance(c.stream, bspec)
+        self._populate_table()
+        self._update_estimate()
+
+    def _current_conform(self) -> ConformSpec:
+        g = self._chosen_group
+        if g is None:
+            return DEFAULT_CONFORM
+        fill = "blur" if self._fill_combo.currentIndex() == 1 else "black"
+        return ConformSpec(width=g.width, height=g.height, fps=_fps_to_ffmpeg(g.fps),
+                           codec=g.codec, pix_fmt=g.pix_fmt,
+                           color_space=g.color_space or "bt709", fill=fill)
 
     # ── Transcode estimate ────────────────────────────────────────────────────
 
@@ -896,8 +956,8 @@ class MergeTab(QWidget):
         )
         self._square_label.setVisible(has_square)
         self._square_combo.setVisible(has_square)
-        self._check_resolution_mismatch()
-        self._update_estimate()
+        order_clips_by_time(self._clips)      # chronological order now that creation_time is known
+        self._build_baseline_chooser()        # (also reclassifies + repopulates the table)
         self._refresh_sync_cells()   # slow-mo offset/drift hints now that WAV durs are known
 
     def _open_preflight(self):
@@ -1152,6 +1212,7 @@ class MergeTab(QWidget):
             title          = output.stem,
             enable_preview = self._preview_check.isChecked(),
             archival       = self._archival_check.isChecked(),
+            conform        = self._current_conform(),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.thumbnail.connect(self._on_thumbnail)

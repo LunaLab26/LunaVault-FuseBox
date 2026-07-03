@@ -170,9 +170,17 @@ records + log.
   - Verified on the real folder: rotated Insta360 clip fits to 3840×2160 (black + blur, no
     distortion); flat 4K clip does a pure codec transcode (no needless rescale); default
     classification + all suites green (38 ffmpeg_cmd tests, baseline, manifest, camera_id).
-  - **Remaining: the baseline-spec chooser UI** (merge tab) that lets the user pick a spec
-    group (recommended highlighted) + fill choice, reclassifies clips against it, and passes
-    the resulting BaselineSpec/ConformSpec to MergeWorker.
+  - **Baseline-spec chooser UI (done)**: the merge tab's old (dead — `_res_mode` was never
+    called) resolution-mismatch panel is repurposed into a baseline chooser — after probing
+    it lists the distinct spec groups as selectable buttons with the recommended one marked;
+    picking one reclassifies every clip against it (`apply_conformance`) and repopulates the
+    table, and `_start_merge` passes the resulting `ConformSpec` (+ black/blurred fill combo)
+    to `MergeWorker`. Also wired the Phase-1 creation-time ordering into the probe-done flow.
+    Headless-verified on the real folder: 4 spec groups, recommends Luna 4K-10bit (2 clips
+    stream-copy, 7 transcode), and choosing the H.264 baseline flips the 4 Insta360 clips to
+    stream-copy — the full dynamic path from UI selection to conformance. All suites green.
+  - **Phase 2 complete.** Next: Phase 3 (camera-grouped merge UI — CameraGroup data model,
+    grouped view, drag-drop folder, drag-between-groups, dynamic audio-match assignment).
 
 ## Archival master / "Extract and Share" — Phase 1 progress
 
