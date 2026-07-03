@@ -14,7 +14,9 @@ def _no_window() -> dict:
     return {}
 
 
-# ── Luna Ultra target standard ────────────────────────────────────────────────
+# ── Baseline spec (the conform target) ─────────────────────────────────────────
+# Historically hardcoded to the Luna Ultra 4K/HEVC/10-bit standard; now the
+# DEFAULT, overridable by the user's chosen baseline (see BaselineSpec below).
 TARGET = {
     "codec":       "hevc",
     "width":       3840,
@@ -24,6 +26,30 @@ TARGET = {
     "color_space": "bt709",
 }
 TARGET_FPS_FLOAT = 30000 / 1001   # ≈ 29.97
+
+
+@dataclass
+class BaselineSpec:
+    """The spec every clip conforms to (or stream-copies if it already matches).
+    Defaults to the app's original 4K/HEVC/10-bit target; the merge overrides it
+    with the user's chosen baseline and re-runs `apply_conformance`."""
+    codec: str = "hevc"
+    width: int = 3840
+    height: int = 2160
+    fps_float: float = TARGET_FPS_FLOAT
+    pix_fmt: str = "yuv420p10le"
+    color_space: str = "bt709"
+
+
+DEFAULT_BASELINE = BaselineSpec()
+
+_CODEC_ALIASES = {"hevc": {"hevc", "h265"}, "h265": {"hevc", "h265"},
+                  "h264": {"h264", "avc"}, "avc": {"h264", "avc"}}
+
+
+def _codec_matches(clip_codec: str, target_codec: str) -> bool:
+    c, t = (clip_codec or "").lower(), (target_codec or "").lower()
+    return c == t or c in _CODEC_ALIASES.get(t, {t})
 
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67", "smpte428"}   # PQ / HLG / DCI
 
@@ -217,41 +243,46 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
     info.rotation = _extract_rotation(video_stream or {})
     info.device = _extract_device(fmt_tags, vs_tags)
 
-    # ── Conformance check ─────────────────────────────────────────────────────
-    conflicts = []
-
+    # HDR is special and baseline-independent — flag it and stop here.
     if info.color_transfer and info.color_transfer.lower() in HDR_TRANSFERS:
         info.is_hdr = True
         info.status = "hdr"
         info.conflicts = [f"HDR ({info.color_transfer})"]
         return info
 
-    if info.codec.lower() not in ("hevc", "h265"):
+    apply_conformance(info, DEFAULT_BASELINE)
+    return info
+
+
+def apply_conformance(info: StreamInfo, baseline: "BaselineSpec" = DEFAULT_BASELINE) -> StreamInfo:
+    """Classify a probed clip against `baseline`, setting `info.status`
+    ("ok" = matches → stream-copy; "transcode" = needs conforming) and
+    `info.conflicts` (human labels for what differs). Skips clips already flagged
+    error/hdr. Re-runnable: the merge calls this again once the user picks a
+    baseline, so status/conflicts update without re-probing."""
+    if info.status in ("error", "hdr"):
+        return info
+    conflicts = []
+    if not _codec_matches(info.codec, baseline.codec):
         conflicts.append(info.codec or "unknown-codec")
-
-    if info.width != TARGET["width"] or info.height != TARGET["height"]:
+    if info.width != baseline.width or info.height != baseline.height:
         conflicts.append(f"{info.width}×{info.height}")
-
-    # Compare the true rate (fps_float) against the target; a VFR clip always
-    # needs conforming (CFR-normalising) even if its average happens to match,
-    # since VFR drifts A/V sync on a concatenated timeline.
+    # Compare the true rate (fps_float); a VFR clip always needs conforming
+    # (CFR-normalising) even if its average matches, since VFR drifts A/V sync
+    # on a concatenated timeline.
     if info.fps_float <= 0:
         conflicts.append("unknown-fps")
-    elif abs(info.fps_float - TARGET_FPS_FLOAT) > 0.01 or info.is_vfr:
+    elif abs(info.fps_float - baseline.fps_float) > 0.01 or info.is_vfr:
         fps_display = (f"{info.fps_float:.0f}fps" if abs(info.fps_float - round(info.fps_float)) < 0.01
                        else f"{info.fps_float:.2f}fps")
         if info.is_vfr:
             fps_display += " VFR"
         conflicts.append(fps_display)
-
-    if info.pix_fmt != TARGET["pix_fmt"]:
-        # Use friendly label if known, otherwise show raw name
-        label = PIX_FMT_LABELS.get(info.pix_fmt, info.pix_fmt or "unknown-fmt")
-        conflicts.append(label)
-
-    if info.color_space and info.color_space.lower() not in ("bt709", "unknown", ""):
+    if info.pix_fmt != baseline.pix_fmt:
+        conflicts.append(PIX_FMT_LABELS.get(info.pix_fmt, info.pix_fmt or "unknown-fmt"))
+    if (info.color_space and baseline.color_space
+            and info.color_space.lower() not in (baseline.color_space.lower(), "unknown", "")):
         conflicts.append(info.color_space)
-
     info.conflicts = conflicts
     info.status = "ok" if not conflicts else "transcode"
     return info
