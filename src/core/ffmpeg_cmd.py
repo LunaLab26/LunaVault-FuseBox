@@ -299,22 +299,70 @@ def atempo_chain(factor: float) -> str:
     return ",".join(f"atempo={x:.6f}" for x in stages)
 
 
-def transcode_vf_parts(clip: ClipInfo, square_mode: str) -> list:
-    """Video filter parts needed to conform a non-matching clip (scale/fps)."""
+@dataclass
+class ConformSpec:
+    """The baseline every non-conforming clip is transcoded to. Defaults to the
+    app's original 4K/HEVC/10-bit target, so behaviour is unchanged until the
+    merge passes a user-chosen baseline."""
+    width: int = 3840
+    height: int = 2160
+    fps: str = "30000/1001"       # ffmpeg fps expression
+    codec: str = "hevc"           # "hevc" | "h264"
+    pix_fmt: str = "yuv420p10le"
+    color_space: str = "bt709"
+    fill: str = "black"           # aspect-mismatch pad fill: "black" | "blur"
+
+
+DEFAULT_CONFORM = ConformSpec()
+
+
+def _blur_pad_graph(w: int, h: int) -> str:
+    """Filtergraph that fits the frame into w×h preserving aspect, filling the
+    bars with a blurred, frame-filling copy of the image (nicer than black bars
+    for vertical clips). Valid as a single -vf graph and inside filter_complex."""
+    return (f"split=2[bg][fg];"
+            f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={w}:{h},boxblur=20:1[bgb];"
+            f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos[fgs];"
+            f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2")
+
+
+def _video_encoder_args(conform: "ConformSpec") -> list:
+    """Encoder args targeting the baseline codec/pixel-format/colour."""
+    cs = conform.color_space or "bt709"
+    args = ["-crf", "18", "-preset", "medium", "-pix_fmt", conform.pix_fmt]
+    if (conform.codec or "hevc").lower() in ("hevc", "h265"):
+        return ["-c:v", "libx265"] + args + ["-tag:v", "hvc1",
+                "-colorspace", cs, "-color_primaries", cs, "-color_trc", cs]
+    return ["-c:v", "libx264"] + args + [
+        "-colorspace", cs, "-color_primaries", cs, "-color_trc", cs]
+
+
+def transcode_vf_parts(clip: ClipInfo, square_mode: str,
+                       conform: ConformSpec = DEFAULT_CONFORM) -> list:
+    """Video filter parts to conform a non-matching clip to `conform` (aspect-
+    preserving scale/pad + fps). Never stretches: odd aspects (incl. vertical
+    clips, whose rotation ffmpeg auto-applies) are fitted and padded; only a
+    square clip in 'crop' mode is cropped to 16:9."""
+    w, h = conform.width, conform.height
     conflicts = set(clip.conflicts)
-    need_scale = any("×" in x for x in conflicts)
-    need_fps   = any("fps" in x for x in conflicts)
+    st = clip.stream
+    rotation = getattr(st, "rotation", 0) if st else 0
+    # A 90/270 rotation swaps display dimensions on decode, so it needs fitting
+    # even when the stored resolution already matches the baseline.
+    need_scale = any("×" in x for x in conflicts) or rotation in (90, 270)
+    need_fps = any("fps" in x for x in conflicts)
     parts = []
     if need_scale:
-        if clip.stream and clip.stream.width == clip.stream.height:
-            if square_mode == "crop":
-                parts.append("crop=ih*16/9:ih:(iw-ih*16/9)/2:0,scale=3840:2160:flags=lanczos")
-            else:
-                parts.append("scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos,pad=3840:2160:(ow-iw)/2:(oh-ih)/2")
+        if st and st.width == st.height and square_mode == "crop":
+            parts.append(f"crop=ih*16/9:ih:(iw-ih*16/9)/2:0,scale={w}:{h}:flags=lanczos")
+        elif conform.fill == "blur":
+            parts.append(_blur_pad_graph(w, h))
         else:
-            parts.append("scale=3840:2160:flags=lanczos")
+            parts.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
     if need_fps:
-        parts.append("fps=30000/1001")
+        parts.append(f"fps={conform.fps}")
     return parts
 
 
@@ -362,7 +410,8 @@ def _slot_fill(kind: str, clip: ClipInfo, mix: MixSpec) -> tuple:
 
 def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
                        plan: OutputPlan, square_mode: str,
-                       mix: Optional[MixSpec] = None) -> list:
+                       mix: Optional[MixSpec] = None,
+                       conform: ConformSpec = DEFAULT_CONFORM) -> list:
     """Build one clip's ffmpeg command from a custom OutputPlan.
 
     Produces a uniform audio-track layout: every enabled plan slot is emitted for
@@ -397,7 +446,7 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         next_idx += 1
 
     # ── Filtergraph (stretch / mix, plus video scale if it must share it) ─────
-    vf_parts = [] if is_conform else transcode_vf_parts(clip, square_mode)
+    vf_parts = [] if is_conform else transcode_vf_parts(clip, square_mode, conform)
     has_fc_audio = any(f[1] in ("stretch", "mix") for f in fills)
     uses_fc_video = plan.include_video and not is_conform and vf_parts and has_fc_audio
     fc = []
@@ -433,9 +482,7 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         else:
             if not uses_fc_video and vf_parts:
                 cmd += ["-vf", ",".join(vf_parts)]
-            cmd += ["-c:v", "libx265", "-crf", "18", "-preset", "medium",
-                    "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1",
-                    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+            cmd += _video_encoder_args(conform)
     for i, (kind, fill, codec, title) in enumerate(fills):
         if fill == "copy":
             cmd += [f"-c:a:{i}", "copy"]

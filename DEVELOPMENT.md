@@ -155,6 +155,24 @@ records + log.
     auto-paired (the correct 5); Luna 10-bit clips classify `ok` (stream-copy), rest transcode.
     Tests: `test_camera_id.py` (new), `test_manifest.py` (rotation split), all suites green.
   - Next: Phase 2 (dynamic baseline spec + recommendation + pad/blur conform).
+- **Phase 2 — dynamic baseline (backend done; UI pending)**:
+  - `core/baseline.py` (new, pure): `ClipSpec`/`SpecGroup`, `enumerate_specs`,
+    `recommend_baseline` (duration-weighted best-quality-of-majority, no upscaling). On the
+    real folder it recommends the Luna spec (HEVC 4K 10-bit). `test_baseline.py`.
+  - `probe.py`: `BaselineSpec` + `DEFAULT_BASELINE` + `apply_conformance(info, baseline)`
+    (extracted from the old inline block) — conformance now measured against a chosen
+    baseline, re-runnable without re-probing; default behaviour byte-identical.
+  - `core/ffmpeg_cmd.py`: `ConformSpec` + `_video_encoder_args` + parameterised
+    `transcode_vf_parts`/`build_mux_cmd_plan` — transcode targets the chosen baseline's
+    codec/res/fps/pix_fmt; **aspect-preserving pad (never stretch)** with black-bar or
+    **blurred** fill; rotated clips fitted (90/270 forces a fit); VFR→CFR via the fps filter.
+    `MergeWorker` carries a `conform` (default = today's 4K/HEVC/10-bit).
+  - Verified on the real folder: rotated Insta360 clip fits to 3840×2160 (black + blur, no
+    distortion); flat 4K clip does a pure codec transcode (no needless rescale); default
+    classification + all suites green (38 ffmpeg_cmd tests, baseline, manifest, camera_id).
+  - **Remaining: the baseline-spec chooser UI** (merge tab) that lets the user pick a spec
+    group (recommended highlighted) + fill choice, reclassifies clips against it, and passes
+    the resulting BaselineSpec/ConformSpec to MergeWorker.
 
 ## Archival master / "Extract and Share" — Phase 1 progress
 

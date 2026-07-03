@@ -28,6 +28,7 @@ from core.ffmpeg_cmd import (
     build_mux_cmd, build_mux_cmd_plan, build_concat_cmd, build_whatsapp_cmd,
     build_preview_cmd, build_thumbnail_cmd,
     build_archival_concat_cmd, build_final_archival_mux_cmd,
+    ConformSpec, DEFAULT_CONFORM,
 )
 
 # Re-exported for existing call sites (main.py, merge_tab.py, whatsapp_tab.py).
@@ -111,7 +112,7 @@ class MergeWorker(QThread):
     def __init__(self, clips: list, output_path: Path,
                  plan: OutputPlan, square_mode: str, title: str = "",
                  enable_preview: bool = True, scratch_override: str = "",
-                 archival: bool = False):
+                 archival: bool = False, conform: ConformSpec = DEFAULT_CONFORM):
         super().__init__()
         self._clips            = clips
         self._output           = output_path
@@ -121,6 +122,7 @@ class MergeWorker(QThread):
         self._enable_preview   = enable_preview
         self._scratch_override = scratch_override
         self._archival         = archival   # embed odd-spec originals on parallel archival tracks
+        self._conform          = conform    # baseline the transcode conforms non-matching clips to
         self._final_tmp        = None
         self._cancelled        = False
 
@@ -373,7 +375,7 @@ class MergeWorker(QThread):
             out_clip = temp_dir / f"clip_{i+1:02d}.mov"
             cmd = build_mux_cmd_plan(ff, clip, out_clip, progress_file,
                                      self._plan, self._square_mode,
-                                     mix=self._mix_for(clip))
+                                     mix=self._mix_for(clip), conform=self._conform)
 
             if self._enable_preview:
                 thumb = ThumbnailThread(ff, str(clip.path), progress_file, temp_dir)

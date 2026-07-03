@@ -16,9 +16,50 @@ from core.ffmpeg_cmd import (
     build_whatsapp_cmd, build_preview_cmd, build_thumbnail_cmd,
     MixSpec, OutputPlan, OutputTrack, build_mux_cmd_plan,
     build_archival_concat_cmd, build_final_archival_mux_cmd,
+    transcode_vf_parts, ConformSpec, _video_encoder_args,
 )
 
 PF = Path("progress.txt")
+
+
+def _clip(conflicts, w=1280, h=960, rotation=0):
+    st = StreamInfo(width=w, height=h, rotation=rotation)
+    st.conflicts = conflicts
+    c = ClipInfo(path=Path("x.mp4"))
+    c.stream = st
+    return c
+
+
+def test_transcode_pads_not_stretches_odd_aspect():
+    parts = transcode_vf_parts(_clip(["1280×960"]), "pad")
+    joined = ",".join(parts)
+    assert "force_original_aspect_ratio=decrease" in joined and "pad=3840:2160" in joined
+    assert "scale=3840:2160:flags" not in joined   # never a bare stretch
+
+
+def test_transcode_fits_rotated_clip_even_at_matching_res():
+    # 4K but rotated 270° → display dims swap, so it still needs fitting.
+    parts = transcode_vf_parts(_clip(["h264"], w=3840, h=2160, rotation=270), "pad")
+    assert any("pad=3840:2160" in p for p in parts)
+
+
+def test_transcode_targets_custom_baseline():
+    parts = transcode_vf_parts(_clip(["1280×720", "30fps"], w=1280, h=720), "pad",
+                               ConformSpec(width=1920, height=1080, fps="25"))
+    joined = ",".join(parts)
+    assert "pad=1920:1080" in joined and "fps=25" in joined
+
+
+def test_blur_fill_uses_overlay_graph():
+    parts = transcode_vf_parts(_clip(["1080×1920"], w=1080, h=1920), "pad",
+                               ConformSpec(fill="blur"))
+    assert "split=2" in parts[0] and "overlay=" in parts[0]
+
+
+def test_encoder_args_switch_codec():
+    assert "libx265" in _video_encoder_args(ConformSpec(codec="hevc"))
+    h264 = _video_encoder_args(ConformSpec(codec="h264", pix_fmt="yuv420p"))
+    assert "libx264" in h264 and "hvc1" not in h264 and "yuv420p" in h264
 
 
 def _ok_clip(with_wav=False, wav_offset=0.0, square=False, cam_audio="aac"):
