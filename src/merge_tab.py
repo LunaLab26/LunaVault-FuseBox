@@ -329,6 +329,14 @@ class MergeTab(QWidget):
             lambda: self._thumb_label.setVisible(self._preview_check.isChecked())
         )
         btn_row.addWidget(self._preview_check)
+
+        self._archival_check = QCheckBox("Archival master")
+        self._archival_check.setToolTip(
+            "Also embed each odd-spec camera's ORIGINAL clips on their own lossless\n"
+            "video tracks inside the master, so \"Extract and Share\" can later recover\n"
+            "the individual originals. Adds encode time + file size for the extra tracks;\n"
+            "the master still plays normally (the baseline track stays the default).")
+        btn_row.addWidget(self._archival_check)
         btn_row.addStretch()
 
         self._preflight_btn = QPushButton("Pre-flight…")
@@ -1143,6 +1151,7 @@ class MergeTab(QWidget):
             square_mode    = square_mode,
             title          = output.stem,
             enable_preview = self._preview_check.isChecked(),
+            archival       = self._archival_check.isChecked(),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.thumbnail.connect(self._on_thumbnail)

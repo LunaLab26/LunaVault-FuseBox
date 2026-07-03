@@ -483,6 +483,50 @@ def build_concat_cmd(ff: str, concat_file: Path, chapters_file: Path,
     return cmd
 
 
+# ── Archival master (Phase 2) — parallel original tracks for lossless recovery ──
+# The baseline master (build_concat_cmd above) stays the default, playable track 1.
+# For each spec group of NON-conforming clips we concat that group's ORIGINALS
+# (stream copy, video + audio) into an intermediate, then mux the baseline plus all
+# those intermediates into the final master. Proven in tools/spike_archival_p2.py.
+
+def build_archival_concat_cmd(ff: str, concat_file: Path, output: Path) -> list:
+    """Concat one spec-group's original clips (stream copy, ALL streams) into a
+    single archival intermediate track-file. No chapters, no re-encode — the
+    originals must share a spec (that's what the spec-group guarantees) so the
+    concat demuxer stays valid."""
+    return [ff, "-y", "-v", "error",
+            "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-map", "0", "-c", "copy", str(output)]
+
+
+def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,
+                                 output: Path, progress_file: Path,
+                                 extra_out_args: Optional[list] = None) -> list:
+    """Mux the baseline (input 0) + each archival intermediate into the final
+    master, stream-copied. Baseline video stays default (track 1); archival
+    videos are non-default so external tools ignore them. Archival audio is
+    mapped optionally (`a?`) since a group's originals might be video-only.
+
+    Stream order in the output: all baseline streams first (its video, then its
+    audio tracks), then each archival track's video + audio — so archival audio
+    lands after the baseline's own audio slots (see the Phase-2 spike)."""
+    cmd = [ff, "-y", "-v", "error", "-i", str(baseline)]
+    for f in archival_files:
+        cmd += ["-i", str(f)]
+    cmd += ["-map", "0"]                      # all baseline streams
+    for i in range(1, len(archival_files) + 1):
+        cmd += ["-map", f"{i}:v", "-map", f"{i}:a?"]
+    cmd += ["-c", "copy", "-map_metadata", "0", "-map_chapters", "0",
+            "-disposition:v:0", "default"]
+    for vi in range(1, len(archival_files) + 1):
+        cmd += [f"-disposition:v:{vi}", "0"]
+    cmd += ["-progress", str(progress_file), "-nostats"]
+    if extra_out_args:
+        cmd += list(extra_out_args)
+    cmd += [str(output)]
+    return cmd
+
+
 def build_whatsapp_cmd(ff: str, source: str, start: str, duration: str,
                        output: Path, grade: Optional[Grade],
                        progress_file: Path) -> list:

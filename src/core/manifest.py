@@ -56,9 +56,17 @@ class ClipEntry:
     # archival track of its own.
     conform_status: str = ""
     spec_group: str = ""           # spec signature; "" for conforming clips
-    # ── Location (filled progressively; Phase 2 sets the archival fields) ──────
+    # ── Audio (Phase 2) ────────────────────────────────────────────────────────
+    has_camera_audio: bool = False     # did the source MP4 carry an audio stream
+    original_audio_codec: str = ""
+    audio_lossless: bool = True        # is this clip's camera audio preserved losslessly
+    has_wav: bool = False              # a paired WAV backup exists (baseline ALAC track)
+    # ── Location ───────────────────────────────────────────────────────────────
+    # Conforming clips live in the baseline (video 0:v:0 + baseline audio tracks), cut at
+    # their chapter. Odd-spec clips live on an archival track, cut at the in-track offset.
     baseline_chapter_index: Optional[int] = None   # index in the master's chapter list
-    archival_track: Optional[int] = None           # 0-based video-stream index, or None
+    archival_track: Optional[int] = None           # 0-based master VIDEO stream, or None if baseline
+    archival_audio_stream: Optional[int] = None    # 0-based master AUDIO stream for this clip's camera audio
     in_track_start: float = 0.0                    # seconds offset within the archival track
     in_track_duration: float = 0.0
 
@@ -68,6 +76,10 @@ class Manifest:
     version: int = MANIFEST_VERSION
     master_filename: str = ""
     created_utc: str = field(default_factory=now_utc_iso)
+    # role -> 0-based master AUDIO stream index for the baseline's own audio tracks,
+    # e.g. {"camera": 0, "wav": 1, "mix": 2} — how Extract finds a conforming clip's
+    # camera audio and any clip's WAV backup.
+    baseline_audio_tracks: dict = field(default_factory=dict)
     clips: list = field(default_factory=list)      # list[ClipEntry]
 
 
@@ -109,6 +121,34 @@ def assign_in_track_offsets(entries: list) -> None:
         t += c.duration
 
 
+def assign_archival_locations(groups_in_order: list, base_video_count: int = 1,
+                              base_audio_count: int = 0) -> tuple:
+    """Fill each odd-spec clip's archival stream indices + in-track offsets, given
+    the archival tracks' build order and how many video/audio streams the baseline
+    already occupies.
+
+    Mirrors `build_final_archival_mux_cmd`'s output order: baseline streams first
+    (video then audio), then each archival track's [video, optional audio]. So the
+    Nth archival group's video is `base_video_count + N` and its audio (if the group
+    carries audio) is the next free audio index after the baseline's. Returns the
+    (video, audio) stream counts consumed, for callers that need them.
+    """
+    v = base_video_count
+    a = base_audio_count
+    for entries in groups_in_order:
+        assign_in_track_offsets(entries)
+        vstream = v
+        v += 1
+        group_has_audio = any(e.has_camera_audio for e in entries)
+        astream = a if group_has_audio else None
+        if group_has_audio:
+            a += 1
+        for e in entries:
+            e.archival_track = vstream
+            e.archival_audio_stream = astream if e.has_camera_audio else None
+    return v, a
+
+
 # ── JSON (de)serialisation ─────────────────────────────────────────────────────
 
 _CLIP_FIELDS = {f.name for f in fields(ClipEntry)}
@@ -119,6 +159,7 @@ def _manifest_to_dict(m: Manifest) -> dict:
         "version": m.version,
         "master_filename": m.master_filename,
         "created_utc": m.created_utc,
+        "baseline_audio_tracks": dict(m.baseline_audio_tracks),
         "clips": [asdict(c) for c in m.clips],
     }
 
@@ -139,6 +180,7 @@ def from_json(s: str) -> Manifest:
         version=int(d.get("version", MANIFEST_VERSION)),
         master_filename=d.get("master_filename", "") or "",
         created_utc=d.get("created_utc", "") or "",
+        baseline_audio_tracks=dict(d.get("baseline_audio_tracks", {}) or {}),
         clips=clips,
     )
 

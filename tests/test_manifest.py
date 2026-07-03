@@ -17,6 +17,7 @@ sys.path.insert(0, str(SRC))
 from core.manifest import (  # noqa: E402
     ClipEntry, Manifest, MANIFEST_METADATA_KEY,
     spec_signature, group_nonconforming_by_spec, assign_in_track_offsets,
+    assign_archival_locations,
     to_json, from_json, sidecar_path, write_sidecar, metadata_embed_args,
     parse_from_format_tags, read_manifest,
 )
@@ -91,6 +92,40 @@ def test_assign_in_track_offsets_is_cumulative():
     assert entries[1].in_track_duration == 5.0
 
 
+def test_assign_archival_locations_matches_mux_stream_order():
+    # Two spec groups, both with audio; baseline holds 1 video + 2 audio (camera, wav).
+    g1 = [ClipEntry(source_filename="B1.mp4", duration=8.0, has_camera_audio=True,
+                    conform_status="transcode", spec_group="g1"),
+          ClipEntry(source_filename="B2.mp4", duration=5.0, has_camera_audio=True,
+                    conform_status="transcode", spec_group="g1")]
+    g2 = [ClipEntry(source_filename="C1.mov", duration=4.0, has_camera_audio=True,
+                    conform_status="transcode", spec_group="g2")]
+    v, a = assign_archival_locations([g1, g2], base_video_count=1, base_audio_count=2)
+    # group 1 -> video stream 1, audio stream 2 ; group 2 -> video 2, audio 3
+    assert g1[0].archival_track == 1 and g1[0].archival_audio_stream == 2
+    assert g1[1].archival_track == 1 and g1[1].archival_audio_stream == 2
+    assert g1[1].in_track_start == 8.0               # concatenated after B1
+    assert g2[0].archival_track == 2 and g2[0].archival_audio_stream == 3
+    assert (v, a) == (3, 4)
+
+
+def test_assign_archival_locations_skips_audio_index_for_silent_group():
+    g1 = [ClipEntry(source_filename="B1.mp4", duration=3.0, has_camera_audio=False,
+                    conform_status="transcode", spec_group="g1")]        # no audio
+    g2 = [ClipEntry(source_filename="C1.mov", duration=3.0, has_camera_audio=True,
+                    conform_status="transcode", spec_group="g2")]
+    assign_archival_locations([g1, g2], base_video_count=1, base_audio_count=1)
+    assert g1[0].archival_track == 1 and g1[0].archival_audio_stream is None
+    assert g2[0].archival_track == 2 and g2[0].archival_audio_stream == 1   # first free audio idx
+
+
+def test_baseline_audio_tracks_round_trips():
+    m = _sample_manifest()
+    m.baseline_audio_tracks = {"camera": 0, "wav": 1}
+    back = from_json(to_json(m))
+    assert back.baseline_audio_tracks == {"camera": 0, "wav": 1}
+
+
 def test_sidecar_path_naming():
     assert sidecar_path("/a/b/pool_day.mov").name == "pool_day.manifest.json"
 
@@ -152,6 +187,9 @@ if __name__ == "__main__":
     test_spec_signature_stable_and_discriminating()
     test_group_nonconforming_skips_baseline_clips()
     test_assign_in_track_offsets_is_cumulative()
+    test_assign_archival_locations_matches_mux_stream_order()
+    test_assign_archival_locations_skips_audio_index_for_silent_group()
+    test_baseline_audio_tracks_round_trips()
     test_sidecar_path_naming()
     test_parse_from_format_tags_variants()
     test_metadata_embed_args_shape()

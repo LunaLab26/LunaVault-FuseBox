@@ -27,6 +27,7 @@ from core.ffmpeg_cmd import (
     hms_to_seconds, MixSpec, OutputPlan, SLOWMO_RATIO,
     build_mux_cmd, build_mux_cmd_plan, build_concat_cmd, build_whatsapp_cmd,
     build_preview_cmd, build_thumbnail_cmd,
+    build_archival_concat_cmd, build_final_archival_mux_cmd,
 )
 
 # Re-exported for existing call sites (main.py, merge_tab.py, whatsapp_tab.py).
@@ -109,7 +110,8 @@ class MergeWorker(QThread):
 
     def __init__(self, clips: list, output_path: Path,
                  plan: OutputPlan, square_mode: str, title: str = "",
-                 enable_preview: bool = True, scratch_override: str = ""):
+                 enable_preview: bool = True, scratch_override: str = "",
+                 archival: bool = False):
         super().__init__()
         self._clips            = clips
         self._output           = output_path
@@ -118,6 +120,7 @@ class MergeWorker(QThread):
         self._title            = title
         self._enable_preview   = enable_preview
         self._scratch_override = scratch_override
+        self._archival         = archival   # embed odd-spec originals on parallel archival tracks
         self._final_tmp        = None
         self._cancelled        = False
 
@@ -197,6 +200,13 @@ class MergeWorker(QThread):
                 size_bytes = clip.path.stat().st_size
             except Exception:
                 size_bytes = 0
+            has_cam = clip.has_camera_audio()
+            acodec = (st.audio_codec if st else "") or ""
+            # Camera audio is preserved losslessly when it's stream-copied: odd-spec
+            # clips carry their original audio on the archival track (any codec), and
+            # conforming clips keep AAC camera audio via -c:a copy. A conforming clip
+            # with non-AAC camera audio would be a lossy re-encode in the baseline.
+            audio_lossless = has_cam and (status != "ok" or acodec.lower() == "aac")
             m.clips.append(manifest_mod.ClipEntry(
                 source_filename=clip.path.name,
                 container=clip.path.suffix.lstrip(".").lower(),
@@ -206,9 +216,95 @@ class MergeWorker(QThread):
                 conform_status=status,
                 spec_group=("" if status == "ok"
                             else manifest_mod.spec_signature(codec, width, height, fps, pix)),
+                has_camera_audio=has_cam, original_audio_codec=acodec,
+                audio_lossless=audio_lossless, has_wav=clip.has_wav(),
                 baseline_chapter_index=idx,
             ))
         return m
+
+    def _run_stage(self, cmd, temp_dir, progress_file, label, stage_idx, stage_total,
+                   total_dur, thumb=None) -> bool:
+        """Run one ffmpeg stage with progress polling + cancel handling. Returns
+        True on success; on cancel/failure it cleans up, emits finished(False,…)
+        and returns False so the caller can just `return`."""
+        progress_file.write_text("")
+        err_path = temp_dir / "ffmpeg_err.txt"
+        ef = open(err_path, "wb")
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=ef, **no_window())
+        while proc.poll() is None:
+            if self._cancelled:
+                proc.terminate(); ef.close(); _stop_thumb(thumb)
+                self._cleanup(temp_dir); self.finished.emit(False, "Cancelled")
+                return False
+            parsed = parse_progress(read_progress(progress_file), total_dur)
+            self.progress.emit({
+                "pct": parsed["pct"], "size": parsed["size"],
+                "stage": "concat", "stage_label": label,
+                "stage_idx": stage_idx, "stage_total": stage_total,
+                **self._metrics(parsed["size"], parsed["pct"], stage_idx, stage_total),
+            })
+            time.sleep(0.4)
+        _stop_thumb(thumb)
+        proc.wait(); ef.close()
+        if proc.returncode != 0:
+            tail = _tail_text(err_path); self._cleanup(temp_dir)
+            self.finished.emit(False, f"{label} failed (exit {proc.returncode})"
+                                      + (f"\n\n{tail}" if tail else ""))
+            return False
+        return True
+
+    def _build_and_mux_archival(self, ff, clips, manifest, baseline, final_tmp,
+                                temp_dir, progress_file, stage_total, total_dur) -> bool:
+        """Build per-spec-group archival intermediates from the odd-spec ORIGINALS,
+        assign the manifest's archival stream locations, then mux baseline + archival
+        tracks into the final master with the (now complete) manifest embedded."""
+        enabled = [t.kind for t in self._plan.tracks if t.enabled]
+        base_audio_count = len(enabled)
+        base_video_count = 1 if self._plan.include_video else 0
+        manifest.baseline_audio_tracks = {kind: i for i, kind in enumerate(enabled)}
+
+        # Group odd-spec clips by spec signature, preserving order — each group's
+        # ORIGINAL files become one archival track.
+        groups: dict = {}   # sig -> list[(clip, entry)]
+        for i, clip in enumerate(clips):
+            entry = manifest.clips[i]
+            if entry.conform_status == "ok":
+                continue
+            groups.setdefault(entry.spec_group, []).append((clip, entry))
+
+        archival_files = []
+        groups_entries = []
+        for gi, (sig, pairs) in enumerate(groups.items()):
+            if len(pairs) == 1:
+                # A lone clip needs no concat — use the original directly. Going
+                # through the concat demuxer perturbs AAC priming (audio wouldn't
+                # be bit-exact); a direct stream copy in the final mux IS bit-exact.
+                archival_files.append(Path(pairs[0][0].path))
+            else:
+                lst = temp_dir / f"arch_list_{gi}.txt"
+                with open(lst, "w", encoding="utf-8") as f:
+                    for clip, _ in pairs:
+                        safe = str(clip.path.resolve()).replace("\\", "/").replace("'", r"'\''")
+                        f.write(f"file '{safe}'\n")
+                interm = temp_dir / f"archive_{gi}.mov"
+                if not self._run_stage(build_archival_concat_cmd(ff, lst, interm),
+                                       temp_dir, progress_file,
+                                       f"Archiving originals ({gi + 1}/{len(groups)})",
+                                       stage_total, stage_total, total_dur):
+                    return False
+                archival_files.append(interm)
+            groups_entries.append([e for _, e in pairs])
+
+        manifest_mod.assign_archival_locations(groups_entries, base_video_count, base_audio_count)
+
+        embed = manifest_mod.metadata_embed_args(
+            manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
+        if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
+            embed = None
+        cmd = build_final_archival_mux_cmd(ff, baseline, archival_files, final_tmp,
+                                           progress_file, extra_out_args=embed)
+        return self._run_stage(cmd, temp_dir, progress_file, "Finalising archive",
+                               stage_total, stage_total, total_dur)
 
     def run(self):
         ff, fp = get_ffmpeg()
@@ -347,52 +443,39 @@ class MergeWorker(QThread):
                 cum_ms += dur_ms
 
         # Archival manifest (additive): a sidecar JSON is always written after the
-        # master lands; the same manifest is also embedded as a master metadata tag
-        # here, unless it's large enough to threaten the command-line limit.
+        # master lands; the same manifest is embedded as a master metadata tag too.
+        # In archival mode the baseline is only an intermediate — the FINAL mux (with
+        # the archival tracks) embeds the complete manifest, so skip the embed here.
         manifest = self._build_manifest(clips)
-        embed = manifest_mod.metadata_embed_args(
-            manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
-        if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
+        if self._archival:
+            baseline_target = temp_dir / "baseline.mov"
             embed = None
+        else:
+            baseline_target = final_tmp
+            embed = manifest_mod.metadata_embed_args(
+                manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
+            if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
+                embed = None
 
-        progress_file.write_text("")
-        cmd = build_concat_cmd(ff, concat_file, chapters_file, final_tmp, progress_file,
+        cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target, progress_file,
                                extra_out_args=embed)
 
+        thumb = None
         if self._enable_preview:
             thumb = ThumbnailThread(ff, str(temp_clips[0]), progress_file, temp_dir)
             thumb.frame_ready.connect(self.thumbnail)
             thumb.start()
-        else:
-            thumb = None
 
-        err_path = temp_dir / "ffmpeg_err.txt"
-        ef = open(err_path, "wb")
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=ef, **no_window())
-        while proc.poll() is None:
-            if self._cancelled:
-                proc.terminate(); ef.close()
-                _stop_thumb(thumb)
-                self._cleanup(temp_dir); self.finished.emit(False, "Cancelled"); return
-            parsed = parse_progress(read_progress(progress_file), cumulative_duration)
-            self.progress.emit({
-                "pct": parsed["pct"], "size": parsed["size"],
-                "stage": "concat", "stage_label": "Merging",
-                "stage_idx": stage_total, "stage_total": stage_total,
-                **self._metrics(parsed["size"], parsed["pct"], stage_total, stage_total),
-            })
-            time.sleep(0.4)
-
-        _stop_thumb(thumb)
-        proc.wait(); ef.close()
-
-        if proc.returncode != 0:
-            tail = _tail_text(err_path)
-            self._cleanup(temp_dir)
-            self.finished.emit(False, f"Concat failed (exit {proc.returncode})"
-                                      + (f"\n\n{tail}" if tail else ""))
+        if not self._run_stage(cmd, temp_dir, progress_file,
+                               "Building baseline" if self._archival else "Merging",
+                               stage_total, stage_total, cumulative_duration, thumb=thumb):
             return
+
+        if self._archival:
+            if not self._build_and_mux_archival(ff, clips, manifest, baseline_target, final_tmp,
+                                                temp_dir, progress_file, stage_total,
+                                                cumulative_duration):
+                return
 
         # Move the finished file into place atomically (same volume → instant,
         # so a cloud-sync client only ever sees the complete master).

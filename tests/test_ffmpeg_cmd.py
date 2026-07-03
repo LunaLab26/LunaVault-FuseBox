@@ -15,6 +15,7 @@ from core.ffmpeg_cmd import (
     hms_to_seconds, build_mux_cmd, build_concat_cmd,
     build_whatsapp_cmd, build_preview_cmd, build_thumbnail_cmd,
     MixSpec, OutputPlan, OutputTrack, build_mux_cmd_plan,
+    build_archival_concat_cmd, build_final_archival_mux_cmd,
 )
 
 PF = Path("progress.txt")
@@ -91,6 +92,38 @@ def test_concat_cmd_is_copy():
                            Path("out.mov"), PF)
     s = " ".join(cmd)
     assert "-f concat" in s and "-c copy" in s
+
+
+def test_concat_cmd_appends_extra_out_args_before_output():
+    cmd = build_concat_cmd("ffmpeg", Path("l.txt"), Path("c.txt"), Path("out.mov"), PF,
+                           extra_out_args=["-movflags", "use_metadata_tags", "-metadata", "k=v"])
+    assert cmd[-1] == "out.mov"
+    assert cmd.index("use_metadata_tags") < cmd.index("out.mov")
+
+
+def test_archival_concat_is_stream_copy_all_streams():
+    cmd = build_archival_concat_cmd("ffmpeg", Path("grp.txt"), Path("arch.mov"))
+    s = " ".join(cmd)
+    assert "-f concat" in s and "-map 0" in s and "-c copy" in s
+    assert cmd[-1] == "arch.mov"
+
+
+def test_final_archival_mux_maps_and_dispositions():
+    cmd = build_final_archival_mux_cmd(
+        "ffmpeg", Path("base.mov"), [Path("a1.mov"), Path("a2.mov")], Path("out.mov"), PF,
+        extra_out_args=["-metadata", "k=v"])
+    # baseline + 2 archival inputs
+    assert cmd.count("-i") == 3
+    # all baseline streams, then each archival's video + optional audio
+    assert "-map" in cmd and "0" in cmd
+    assert "1:v" in cmd and "1:a?" in cmd and "2:v" in cmd and "2:a?" in cmd
+    # baseline video default, archival videos not
+    assert cmd[cmd.index("-disposition:v:0") + 1] == "default"
+    assert "-disposition:v:1" in cmd and "-disposition:v:2" in cmd
+    # copy + metadata/chapters carried, extra args before output
+    assert "copy" in cmd and "-map_chapters" in cmd
+    assert cmd[-1] == "out.mov"
+    assert cmd.index("k=v") < cmd.index("out.mov")
 
 
 def test_preview_and_thumbnail_single_frame():
