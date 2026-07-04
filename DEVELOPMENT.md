@@ -162,10 +162,9 @@ refinements captured from a critique, to be turned into an action plan later —
    a short (~96px) canvas packed into the narrow 2/5 column. Give the Parade/RGB sub-toggle
    a clearer hierarchy (it's a *style* of Waveform, not a peer of Histogram — segmented
    control or a "Waveform style:" label), and let the scope canvas breathe taller.
-4. **Overview is near its density ceiling.** Envelope + viewport + playhead + ruler already
-   share a short strip. When the Phase-2 thumbnail filmstrip lands, restructure this into a
-   proper multi-row timeline (ruler / thumbnails / waveform) rather than cramming a fourth
-   layer in. Design the restructure deliberately with the proxy/thumbnail work.
+4. **Overview is near its density ceiling — RESOLVED** by the "Overview thumbnail filmstrip"
+   work below: restructured into a proper multi-row timeline (thumbnails / envelope+viewport
+   / ruler) instead of cramming a fourth layer into one strip.
 5. **Status line is a shared transient slot.** Snapshot confirmations, load progress, and
    errors all flash through one muted line. A successful snapshot save is worth a beat more
    prominence — e.g. briefly tint it `ok` green — so the user gets clear action feedback.
@@ -410,20 +409,100 @@ expected concat-boundary drift, not a regression). All test suites green;
 `test_archival_concat_maps_only_video_and_audio` replaces the old test that asserted the
 blanket `-map 0`.
 
-### Review-tab integration (Phase 2)
+### Field bug #2 (found + fixed): final archival mux choked on the baseline's chapter-text track
 
-The multi-video-track master serves **both** recovery and review. Alongside the archival
-original tracks, Phase 2 can add a small **review proxy track** (e.g. 960×540 H.264,
-**opt-in per merge** via a merge-tab checkbox — decided with the user). Because it's a tiny
-track the GPU can decode trivially, the Review tab can play it for **smooth, crash-free
-playback** (upgrading today's `HybridPlaybackEngine` slideshow), and the **thumbnail
-filmstrip** can be built cheaply from it instead of decoding the 4K master. The proxy is a
-*distinct* track from the archival originals (proxy = tiny playback stand-in; archival =
-full-quality originals for recovery), but both ride the same multi-track plumbing. The
-timeline **timestamp ruler + clip markers** come from chapters/manifest the master already
+After the `mett`-stream fix above, a full real archival merge on the actual 9-clip multicam
+folder got past the archival-concat stage (both spec-groups succeeded) but then failed at
+**Finalising archive**: `Tag text incompatible with output codec id '98314'` /
+`Could not write header (incorrect codec parameters?): Invalid data found when processing
+input`. Root cause, found by isolating each stage: `build_final_archival_mux_cmd` mapped the
+baseline with a blanket `-map 0`. The baseline is built with chapters (`build_concat_cmd`'s
+`-map_metadata 1` from an FFMETADATA file), and ffmpeg's MOV muxer represents those chapters
+internally as a hidden **QuickTime "chapter text" data stream** (`bin_data`, codec_tag
+`text`) — confirmed directly: probing the real baseline showed exactly this as its 5th
+stream, and a minimal repro (concat 2 clips with vs. without a chapters input) proved the
+stream appears if and only if chapters are attached, regardless of how the chapters input
+itself is mapped/excluded. Re-muxing that already-tagged stream via `-c copy` into the FINAL
+master — which also carries chapters and several other video tracks — hits a codec tag/id
+conflict the MOV muxer can't resolve.
+
+**Fix:** `build_final_archival_mux_cmd` now maps the baseline as `0:v` + `0:a` explicitly
+(video + all audio, no blanket `0`) instead of relying on `-map_chapters 0` alone to carry
+chapters through — which it already does independently of the data stream. The muxer then
+freshly (and safely) generates its own chapter-text stream for the new output rather than
+copying the pre-existing, now-conflicting one. **Verified against the real files**: rebuilt
+a fast-but-real baseline (actual `build_mux_cmd_plan`/`build_concat_cmd` code, only the
+video preset/resolution swapped for speed) confirming all 9 individual per-clip mux outputs
+are clean (4 streams each) and the stray stream only appears after concat-with-chapters;
+then ran the actual (fixed) `build_final_archival_mux_cmd` against the real baseline + real
+archival files end-to-end — succeeded, produced a valid 2.5 GB, 6-video-track master with
+all 9 chapters intact, and a lone-clip archival track (`PXL_*.LS.mp4`, which has its own
+3 extra `mett` streams and a non-zero-indexed audio track) recovered **bit-exact** (video
++ audio md5 match) via the manifest's absolute stream indices. All test suites green;
+`test_final_archival_mux_maps_and_dispositions` updated to assert the explicit `0:v`/`0:a`
+mapping and the absence of a blanket baseline map.
+
+**Together, these two field bugs mean a real archival merge on genuinely messy multicam
+footage (Pixel motion-photo metadata, QuickTime chapter tracks, mixed camera specs) now
+completes successfully end-to-end** — proven on the user's actual 9-clip, 4-camera folder,
+not just synthetic test clips.
+
+### Review-tab integration (Phase 2) — CANCELLED
+
+~~The multi-video-track master serves both recovery and review. Alongside the archival
+original tracks, Phase 2 can add a small review proxy track (e.g. 960×540 H.264, opt-in per
+merge) for smooth crash-free playback + cheap thumbnails.~~ **Cancelled by the user** — no
+review proxy track. Thumbnails are instead sourced by sparse on-demand JPEG extraction
+directly from the master (see "Overview thumbnail filmstrip" below); smooth crash-free
+playback stays on `HybridPlaybackEngine`'s existing software-decode fallback. The timeline
+**timestamp ruler + clip markers** still come from chapters/manifest the master already
 carries. The four *standalone* Review polish items (accent-drawn snapshot camera, timestamp
-ruler, scroll/pinch preview zoom, audio-lanes crop-to-viewport) are independent of all this
-and are being done first.
+ruler, scroll/pinch preview zoom, audio-lanes crop-to-viewport) shipped independently of
+this and are unaffected by the cancellation.
+
+### Overview thumbnail filmstrip + scrub-vs-viewport-box fix (done)
+
+Two things raised after using the Review tab: (1) a thumbnail filmstrip along the overview
+timeline (decoupled from the cancelled proxy track — sourced by sparse low-res JPEG frame
+extraction directly from the master, the same "extract a few small frames fast" pattern
+`ffmpeg_runner.ThumbnailThread` already uses for the merge tab's live preview); (2) a real
+bug — scrubbing the video timeline was unreliable because the amber viewport-selection box
+"got in the way."
+
+**Root cause (bug):** `widgets/trackbar.py`'s `_hit_test` treated *any* click between the
+viewport's x0/x1 as "drag the viewport body," regardless of whether the viewport was
+actually zoomed in. Since a freshly loaded master's viewport defaults to the FULL duration
+(x0=left edge, x1=right edge), essentially the entire trackbar was being swallowed as
+"viewport-body," and playhead scrubbing was only possible in the last ~10px at each edge —
+exactly the reported symptom.
+
+**Fix:** `_hit_test` now only engages viewport-body/edge dragging when the viewport is a
+genuine sub-range (`view_t1 - view_t0 < duration`), and always gives priority to grabbing the
+actual playhead when the click is near its current position, even inside a zoomed viewport.
+Verified with all four scenarios directly: unzoomed clicks scrub correctly everywhere
+(previously broken), a click on the playhead always wins, and genuine zoomed-in
+viewport-edge/body dragging still works exactly as before (no regression).
+
+**Thumbnail filmstrip:** new `core.review_media.build_thumbnail_strip_cmd` (single coarse
+`-ss` + small `scale=160:-2` JPEG — speed over frame-exactness, unlike the scopes/snapshot
+builders) + `review_workers.ThumbnailStripWorker` (sparse, cancelable, emits progressively so
+the strip fills in as each tile lands) + `widgets/trackbar.OverviewTrackbar` gains a
+dedicated thumbnail row (`set_thumbnail_count`/`set_thumbnail`), which is also the multi-row
+timeline restructure flagged in the Review-tab backlog's item 4 (thumbnails / envelope+
+viewport / ruler, rather than cramming a fourth layer into one strip) — `_TRK_Y` moved down
+to make room, `_paint_viewport`'s top offset now sits flush under the thumbnail row instead
+of overlapping it. `review_tab.py` kicks the worker off once `TrackScanWorker` reports
+duration, cancels any in-flight one on a new `load_master()`, and (like `_current_mix_worker`)
+relies on the existing tracked-worker `shutdown()` for lifecycle safety.
+
+**Verified end-to-end, twice:** (1) a standalone widget test — real ffmpeg extraction against
+an actual multicam clip → worker signal emission → widget slot filling → paint (`grab()`)
+succeeds; (2) the real `ReviewTab.load_master()` path against the same clip — `TrackScanWorker`
+→ `_on_tracks_ready` → `_start_thumbnail_strip` → `ThumbnailStripWorker` → real extractions →
+`trackbar.set_thumbnail()` — 24 slots reserved, filling in progressively. Offscreen renders in
+both themes confirm the three-row layout (thumbnails / waveform+viewport+playhead / ruler) has
+no geometry overlap. All existing suites stay green (38 ffmpeg_cmd, baseline, camera_id,
+manifest, theme).
 
 ## v1.4 progress notes
 

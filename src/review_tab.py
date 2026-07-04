@@ -33,6 +33,7 @@ from probe import StreamInfo, pix_fmt_info
 from review_playback import make_engine
 from review_workers import (
     TrackScanWorker, PeakScanWorker, SpectrogramWorker, MixRenderWorker, FrameFetchWorker,
+    ThumbnailStripWorker,
 )
 from core.scopes import rescale_to_bit_depth
 from core.review_media import mix_cache_key, snapshot_filename
@@ -48,6 +49,7 @@ _SPEC_DEBOUNCE_MS = 250
 _APPROX_SCOPE_THROTTLE_S = 0.2
 _APPROX_SCOPE_MAX_DIM = 640   # shrink via Qt before touching numpy at all — see _update_approx_scope
 _SPEC_TILE_CACHE_MAX = 16
+_THUMBNAIL_COUNT = 24   # filmstrip slots across the OverviewTrackbar
 
 
 def _camera_icon(color: str, size: int = 20) -> QIcon:
@@ -164,6 +166,7 @@ class ReviewTab(QWidget):
         self._track_labels: dict = {}
         self._workers: list = []          # tracked-set — settle()d on shutdown()
         self._current_mix_worker = None   # at most one full-file mix render in flight
+        self._thumb_worker = None         # at most one thumbnail-strip extraction in flight
         self._spec_cache: dict = {}       # (track_idx, t0, t1) -> QImage, capped LRU
         self._spec_cache_order: list = []
         self._pyramids: dict = {}         # track_idx -> PeakPyramid, kept so lanes can re-crop to the viewport
@@ -416,6 +419,11 @@ class ReviewTab(QWidget):
             self._settings.set("last_review_source", str(path))
             self._settings.save()
 
+        if self._thumb_worker is not None:
+            self._thumb_worker.cancel()
+            self._thumb_worker = None
+        self._trackbar.set_thumbnail_count(0)   # clear the previous master's filmstrip
+
         ff, fp = get_ffmpeg()
         w = TrackScanWorker(fp, self._path)
         w.tracks_ready.connect(self._on_tracks_ready)
@@ -448,6 +456,29 @@ class ReviewTab(QWidget):
         peak_w.pyramid_ready.connect(self._on_pyramid_ready)
         self._track(peak_w)
         peak_w.start()
+
+        self._start_thumbnail_strip(video_info.duration)
+
+    def _start_thumbnail_strip(self, duration: float):
+        """Sparse filmstrip thumbnails for the overview timeline — cheap
+        individual-frame extractions directly from the master (no proxy
+        track: cancelled in favour of this simpler on-demand approach)."""
+        if duration <= 0:
+            return
+        self._trackbar.set_thumbnail_count(_THUMBNAIL_COUNT)
+        timestamps = [duration * (i + 0.5) / _THUMBNAIL_COUNT for i in range(_THUMBNAIL_COUNT)]
+        ff, fp = get_ffmpeg()
+        out_dir = get_app_dir() / "_temp" / "review_thumbs"
+        w = ThumbnailStripWorker(ff, self._path, timestamps, out_dir)
+        w.thumbnail_ready.connect(self._trackbar.set_thumbnail)
+        w.finished.connect(lambda w=w: self._on_thumb_worker_finished(w))
+        self._thumb_worker = w
+        self._track(w)
+        w.start()
+
+    def _on_thumb_worker_finished(self, w):
+        if self._thumb_worker is w:
+            self._thumb_worker = None
 
     def _on_pyramid_ready(self, track_idx: int, pyramid):
         # Keep the pyramid so the lane can be re-cropped whenever the viewport

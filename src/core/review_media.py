@@ -72,6 +72,20 @@ def mix_cache_key(track_indices) -> str:
     return "-".join(str(i) for i in sorted(set(track_indices)))
 
 
+def build_thumbnail_strip_cmd(ff: str, path: str, secs: float, out_jpg: str,
+                              width: int = 160) -> list:
+    """A small JPEG at `secs`, for the Review tab's overview thumbnail
+    filmstrip. Unlike `build_frame_extract_cmd`/`build_snapshot_cmd`, this
+    favours SPEED over frame-exactness — a filmstrip tile is a rough visual
+    marker, not a precision reading, and a strip needs many of these — so a
+    single coarse `-ss` before `-i` (no fine-seek second pass) is enough."""
+    return [ff, "-y", "-v", "quiet",
+            "-ss", f"{max(0.0, secs):.3f}", "-i", str(path),
+            "-frames:v", "1", "-an", "-q:v", "6",
+            "-vf", f"scale={width}:-2",
+            str(out_jpg)]
+
+
 def build_review_mix_cmd(ff: str, path: str, track_indices, out_path: str) -> list:
     """Mix an arbitrary subset of the master's own audio tracks into one AAC file.
 

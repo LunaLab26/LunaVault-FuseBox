@@ -24,10 +24,14 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QImage
 
 from core.binaries import no_window
 from core.audio_peaks import build_pcm_extract_cmd, pyramid_from_stream
-from core.review_media import build_frame_extract_cmd, build_snapshot_cmd, build_review_mix_cmd
+from core.review_media import (
+    build_frame_extract_cmd, build_snapshot_cmd, build_review_mix_cmd,
+    build_thumbnail_strip_cmd,
+)
 from core.spectrogram import spectrogram, to_rgb
 from probe import probe, probe_audio_tracks, probe_chapters
 
@@ -340,3 +344,49 @@ class FrameFetchWorker(QThread):
             self.error.emit(err or "snapshot failed")
             return
         self.snapshot_saved.emit(self._snapshot_out)
+
+
+# ── Overview thumbnail filmstrip ──────────────────────────────────────────────
+
+class ThumbnailStripWorker(QThread):
+    """Sparse, cheap JPEG thumbnails for the Review tab's overview filmstrip —
+    a handful of individual frame extractions (fast; each one seeks near a
+    keyframe rather than decoding continuously), not a proxy track or a full
+    video decode. Emits progressively so the strip fills in as each tile
+    lands, rather than blocking on the whole set."""
+    thumbnail_ready = Signal(int, object)   # index, QImage
+
+    def __init__(self, ffmpeg_bin: str, path: str, timestamps: list,
+                out_dir: Path, width: int = 160, parent=None):
+        super().__init__(parent)
+        self._ffmpeg = ffmpeg_bin
+        self._path = str(path)
+        self._timestamps = list(timestamps)
+        self._out_dir = Path(out_dir)
+        self._width = width
+        self._cancelled = False
+        self._proc: Optional[subprocess.Popen] = None
+
+    def cancel(self):
+        self._cancelled = True
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    def run(self):
+        self._out_dir.mkdir(parents=True, exist_ok=True)
+        for i, secs in enumerate(self._timestamps):
+            if self._cancelled:
+                return
+            out = self._out_dir / f"thumb_{i:03d}.jpg"
+            cmd = build_thumbnail_strip_cmd(self._ffmpeg, self._path, secs, str(out),
+                                            width=self._width)
+            _, _, cancelled = _run_cancelable(self, cmd, timeout=15)
+            if cancelled:
+                return
+            if out.exists():
+                img = QImage(str(out))
+                if not img.isNull():
+                    self.thumbnail_ready.emit(i, img)

@@ -10,13 +10,14 @@ scrubber already works.
 from typing import Optional
 
 from PySide6.QtCore import Qt, QRectF, Signal
-from PySide6.QtGui import QPainter, QColor, QPen
+from PySide6.QtGui import QPainter, QColor, QPen, QImage
 
 from widgets.timeline import TimelineBase
 
 _EDGE_TOL = 10     # px tolerance for grabbing a viewport edge
+_SCRUB_TOL = 8     # px tolerance for grabbing the playhead directly, even inside the viewport
 _MIN_SPAN = 0.5    # seconds — viewport can't collapse smaller than this
-_HEIGHT = 72       # taller than the base timeline to fit a ruler strip below the track
+_HEIGHT = 96       # taller than the base timeline to fit a thumbnail row + ruler strip
 
 # "Nice" ruler intervals (seconds) — pick the smallest that isn't too dense.
 _RULER_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800]
@@ -38,19 +39,36 @@ def _fmt_ruler(secs: float) -> str:
 class OverviewTrackbar(TimelineBase):
     viewport_changed = Signal(float, float)   # t0, t1
 
+    _TRK_Y = 54   # pushed down from the base class's 28 to leave room for the thumbnail row above
+    _THUMB_Y = 2
+    _THUMB_H = 38
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._envelope = None       # sequence of 0..1 amplitude values across the full duration
         self._view_t0 = 0.0
         self._view_t1 = 0.0
         self._drag_offset = 0.0     # body-drag: click_secs - view_t0, captured at press time
+        self._thumbnails: list = []   # QImage or None, one per evenly-spaced filmstrip slot
         self.setMouseTracking(True)   # so hover sets the cursor even with no button down
-        self.setFixedHeight(_HEIGHT)  # room for the timestamp ruler under the track
+        self.setFixedHeight(_HEIGHT)  # room for the thumbnail row + timestamp ruler
 
     def set_duration(self, dur: float):
         super().set_duration(dur)
         if self._view_t1 <= self._view_t0 or self._view_t1 > self._duration:
             self._view_t0, self._view_t1 = 0.0, self._duration
+        self._thumbnails = []   # stale — a new master needs a fresh filmstrip
+
+    def set_thumbnail_count(self, n: int):
+        """Reserve `n` evenly-spaced filmstrip slots (call once duration is
+        known); fill them one at a time via `set_thumbnail`."""
+        self._thumbnails = [None] * max(0, n)
+        self.update()
+
+    def set_thumbnail(self, index: int, image):
+        if 0 <= index < len(self._thumbnails):
+            self._thumbnails[index] = image
+            self.update()
 
     def set_envelope(self, envelope):
         """`envelope`: any indexable sequence of 0..1 amplitude values spanning
@@ -73,9 +91,28 @@ class OverviewTrackbar(TimelineBase):
     # ── Painting ──────────────────────────────────────────────────────────────
 
     def _paint_extra(self, p: QPainter, pal):
+        self._paint_thumbnails(p, pal)
         self._paint_envelope(p, pal)
         self._paint_ruler(p, pal)
         self._paint_viewport(p, pal)
+
+    def _paint_thumbnails(self, p: QPainter, pal):
+        """The filmstrip row: each reserved slot painted edge-to-edge across
+        the track width — a coarse 'what's roughly where' map, not meant to
+        line up frame-exactly with any particular second."""
+        tx, tw = self._track_x(), self._track_w()
+        p.fillRect(QRectF(tx, self._THUMB_Y, tw, self._THUMB_H), QColor(pal.input_dk))
+        n = len(self._thumbnails)
+        if n == 0:
+            return
+        cell_w = tw / n
+        for i, img in enumerate(self._thumbnails):
+            if img is None or (hasattr(img, "isNull") and img.isNull()):
+                continue
+            target = QRectF(tx + i * cell_w, self._THUMB_Y, cell_w, self._THUMB_H)
+            p.drawImage(target, img, QRectF(img.rect()))
+        p.setPen(QPen(QColor(pal.border), 1))
+        p.drawRect(QRectF(tx, self._THUMB_Y, tw, self._THUMB_H))
 
     def _paint_ruler(self, p: QPainter, pal):
         """Time ticks + HH:MM:SS / M:SS labels across the full duration, in a
@@ -120,7 +157,7 @@ class OverviewTrackbar(TimelineBase):
             return
         x0 = self._secs_to_x(self._view_t0)
         x1 = self._secs_to_x(self._view_t1)
-        top = self._TRK_Y - 20
+        top = self._THUMB_Y + self._THUMB_H   # flush under the thumbnail row, no overlap
         bot = self._TRK_Y + self._TRK_H + 6
         fill = QColor(pal.accent)
         fill.setAlpha(40)
@@ -140,15 +177,26 @@ class OverviewTrackbar(TimelineBase):
     # ── Hit-test / drag ───────────────────────────────────────────────────────
 
     def _hit_test(self, px: float) -> str:
-        x0 = self._secs_to_x(self._view_t0)
-        x1 = self._secs_to_x(self._view_t1)
-        if abs(px - x0) <= _EDGE_TOL:
-            return "viewport-left"
-        if abs(px - x1) <= _EDGE_TOL:
-            return "viewport-right"
-        if x0 < px < x1:
-            self._drag_offset = self._x_to_secs(px) - self._view_t0
-            return "viewport-body"
+        # The playhead always wins if the click is right on it — even inside a
+        # zoomed viewport — so scrubbing the actual position is never blocked
+        # by the viewport-drag targets sharing the same area.
+        if abs(px - self._secs_to_x(self._pos)) <= _SCRUB_TOL:
+            return "pos"
+        # Viewport-edge/body dragging only applies once the viewport is a real
+        # sub-range. At full duration (the default right after loading a
+        # master) x0/x1 sit at the track's own edges, so "anywhere inside"
+        # would otherwise swallow the ENTIRE track and make scrubbing
+        # impossible except in the last few pixels at each end.
+        if self._duration > 0 and (self._view_t1 - self._view_t0) < self._duration - 1e-6:
+            x0 = self._secs_to_x(self._view_t0)
+            x1 = self._secs_to_x(self._view_t1)
+            if abs(px - x0) <= _EDGE_TOL:
+                return "viewport-left"
+            if abs(px - x1) <= _EDGE_TOL:
+                return "viewport-right"
+            if x0 < px < x1:
+                self._drag_offset = self._x_to_secs(px) - self._view_t0
+                return "viewport-body"
         return "pos"
 
     def mouseMoveEvent(self, event):
