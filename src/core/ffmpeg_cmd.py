@@ -577,7 +577,10 @@ def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,
     # anyway via -map_chapters below (metadata-level, independent of this
     # stream) — the muxer freshly (and safely) regenerates its own chapter
     # track for THIS output rather than copying the conflicting one.
-    cmd += ["-map", "0:v", "-map", "0:a"]
+    # "0:a?" (optional), not "0:a": a baseline with every audio track disabled
+    # in the OutputPlan has zero audio streams, and ffmpeg hard-errors on a
+    # non-optional map matching nothing ("Stream map '' matches no streams").
+    cmd += ["-map", "0:v", "-map", "0:a?"]
     for i in range(1, len(archival_files) + 1):
         cmd += ["-map", f"{i}:v", "-map", f"{i}:a?"]
     cmd += ["-c", "copy", "-map_metadata", "0", "-map_chapters", "0",

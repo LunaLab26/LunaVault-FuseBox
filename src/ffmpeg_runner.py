@@ -112,19 +112,21 @@ class MergeWorker(QThread):
     def __init__(self, clips: list, output_path: Path,
                  plan: OutputPlan, square_mode: str, title: str = "",
                  enable_preview: bool = True, scratch_override: str = "",
-                 archival: bool = False, conform: ConformSpec = DEFAULT_CONFORM):
+                 archival: bool = False, conform: ConformSpec = DEFAULT_CONFORM,
+                 per_clip_archival: bool = False):
         super().__init__()
-        self._clips            = clips
-        self._output           = output_path
-        self._plan             = plan
-        self._square_mode      = square_mode
-        self._title            = title
-        self._enable_preview   = enable_preview
-        self._scratch_override = scratch_override
-        self._archival         = archival   # embed odd-spec originals on parallel archival tracks
-        self._conform          = conform    # baseline the transcode conforms non-matching clips to
-        self._final_tmp        = None
-        self._cancelled        = False
+        self._clips             = clips
+        self._output            = output_path
+        self._plan              = plan
+        self._square_mode       = square_mode
+        self._title             = title
+        self._enable_preview    = enable_preview
+        self._scratch_override  = scratch_override
+        self._archival          = archival   # embed odd-spec originals on parallel archival tracks
+        self._conform           = conform    # baseline the transcode conforms non-matching clips to
+        self._per_clip_archival = per_clip_archival   # one archival track per clip (bit-exact) vs concat by spec
+        self._final_tmp         = None
+        self._cancelled         = False
 
     def _mix_for(self, clip) -> MixSpec:
         """Per-clip MixSpec carrying this clip's drift/polarity from sync."""
@@ -222,6 +224,11 @@ class MergeWorker(QThread):
                 has_camera_audio=has_cam, original_audio_codec=acodec,
                 audio_lossless=audio_lossless, has_wav=clip.has_wav(),
                 baseline_chapter_index=idx,
+                rotation=(st.rotation if st else 0),
+                is_vfr=bool(st.is_vfr if st else False),
+                color_space=(st.color_space if st else "") or "",
+                camera_label=getattr(clip, "camera_label", "") or "",
+                creation_time=(st.creation_time if st else "") or "",
             ))
         return m
 
@@ -267,13 +274,17 @@ class MergeWorker(QThread):
         manifest.baseline_audio_tracks = {kind: i for i, kind in enumerate(enabled)}
 
         # Group odd-spec clips by spec signature, preserving order — each group's
-        # ORIGINAL files become one archival track.
-        groups: dict = {}   # sig -> list[(clip, entry)]
+        # ORIGINAL files become one archival track. In per-clip mode, every clip
+        # gets its own singleton group instead (key includes `i`) — concat-free,
+        # so recovery is bit-exact for every clip, not just already-lone ones, at
+        # the cost of one archival track per clip instead of one per spec group.
+        groups: dict = {}   # key -> list[(clip, entry)]
         for i, clip in enumerate(clips):
             entry = manifest.clips[i]
             if entry.conform_status == "ok":
                 continue
-            groups.setdefault(entry.spec_group, []).append((clip, entry))
+            key = (entry.spec_group, i) if self._per_clip_archival else entry.spec_group
+            groups.setdefault(key, []).append((clip, entry))
 
         archival_files = []
         groups_entries = []
@@ -492,10 +503,12 @@ class MergeWorker(QThread):
             return
         self._cleanup(temp_dir)
 
-        # Sidecar manifest beside the finished master — best-effort, never fails
-        # the merge (the master itself is already complete and valid).
+        # Sidecar manifest + human-readable restore log beside the finished
+        # master — best-effort, never fails the merge (the master itself is
+        # already complete and valid).
         try:
             manifest_mod.write_sidecar(manifest, self._output)
+            manifest_mod.write_restore_log(manifest, self._output)
         except Exception:
             pass
 

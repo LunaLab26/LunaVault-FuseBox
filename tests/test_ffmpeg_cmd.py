@@ -164,7 +164,7 @@ def test_final_archival_mux_maps_and_dispositions():
     # breaks with a codec tag/id conflict when copied into a file that also
     # carries chapters — see the source comment / DEVELOPMENT.md).
     map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
-    assert map_targets[:2] == ["0:v", "0:a"]
+    assert map_targets[:2] == ["0:v", "0:a?"]   # "?" — a baseline with no audio tracks must not hard-error
     assert "0" not in map_targets   # no blanket baseline map
     assert "1:v" in map_targets and "1:a?" in map_targets
     assert "2:v" in map_targets and "2:a?" in map_targets

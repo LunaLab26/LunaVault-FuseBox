@@ -454,7 +454,19 @@ class MergeTab(QWidget):
             "video tracks inside the master, so \"Extract and Share\" can later recover\n"
             "the individual originals. Adds encode time + file size for the extra tracks;\n"
             "the master still plays normally (the baseline track stays the default).")
+        self._archival_check.toggled.connect(
+            lambda on: self._per_clip_archival_check.setVisible(on))
         btn_row.addWidget(self._archival_check)
+
+        self._per_clip_archival_check = QCheckBox("One track per clip (bit-exact)")
+        self._per_clip_archival_check.setToolTip(
+            "Default: same-spec originals share one archival track (fewer tracks, but a\n"
+            "clip recovered from a shared track can differ by a frame / a few audio\n"
+            "priming samples at its boundary — content-complete, not bit-exact). Tick this\n"
+            "to give every odd-spec clip its own track instead — more tracks, but every\n"
+            "clip recovers byte-for-byte identical to its camera original.")
+        self._per_clip_archival_check.hide()   # only meaningful with Archival master on
+        btn_row.addWidget(self._per_clip_archival_check)
         btn_row.addStretch()
 
         self._preflight_btn = QPushButton("Pre-flight…")
@@ -1472,6 +1484,7 @@ class MergeTab(QWidget):
             enable_preview = self._preview_check.isChecked(),
             archival       = self._archival_check.isChecked(),
             conform        = self._current_conform(),
+            per_clip_archival = self._per_clip_archival_check.isChecked(),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.thumbnail.connect(self._on_thumbnail)

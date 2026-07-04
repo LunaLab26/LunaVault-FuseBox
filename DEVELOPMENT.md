@@ -455,6 +455,35 @@ footage (Pixel motion-photo metadata, QuickTime chapter tracks, mixed camera spe
 completes successfully end-to-end** — proven on the user's actual 9-clip, 4-camera folder,
 not just synthetic test clips.
 
+### Phase 4 — restore records + per-clip archival toggle (done)
+
+- **Restore records**: `ClipEntry` gains `rotation`, `is_vfr`, `color_space`, `camera_label`,
+  `creation_time` — all already captured by Phase 1's `probe.StreamInfo`/`assign_cameras`,
+  now threaded into `_build_manifest`. `core/manifest.py` gains `write_restore_log` — a
+  plain-English `<master-stem>.restore.log` beside the sidecar/embedded manifest,
+  per-clip: camera, spec (with rotation/VFR noted), recording time, exactly where it
+  recovers from (baseline chapter vs. archival track — and whether that track is bit-exact
+  or near-exact, spelling out the boundary caveat inline), and camera-audio/WAV recovery
+  notes. Not consumed by Extract — the manifest is authoritative; this is for a human to
+  read. `MergeWorker.run()` writes it alongside the sidecar, best-effort.
+- **Per-clip archival toggle**: a "One track per clip (bit-exact)" checkbox next to
+  "Archival master" (hidden until that's ticked). When on, `_build_and_mux_archival` groups
+  odd-spec clips by `(spec_group, clip_index)` instead of just `spec_group`, so every clip
+  gets its own singleton archival group — the existing lone-clip direct-copy path (proven
+  bit-exact) then applies to every clip, not just already-lone ones. No manifest schema
+  change needed — recovery is entirely location-driven (`archival_track`/`in_track_start`),
+  so Extract adapts automatically to whichever mode produced the master.
+- **A robustness fix found during this verification**: `build_final_archival_mux_cmd`'s
+  baseline audio map (`0:a`, from the Field bug #2 fix above) hard-errors if the baseline
+  happens to have zero audio tracks (all `OutputPlan` audio slots disabled) — surfaced by a
+  synthetic per-clip-toggle test using a no-audio stand-in baseline. Fixed to `0:a?`
+  (optional), matching every other audio map in this pipeline.
+- **Verified**: restore-log content tests (baseline vs. archival wording, bit-exact vs.
+  near-exact caveat only shown when it applies); a real (synthetic, fast) end-to-end test
+  proving the toggle produces the correct track count in each mode (1 shared track by
+  default for two same-spec clips, 2 separate tracks in per-clip mode) — this also caught
+  and confirmed the `0:a?` fix. All suites green.
+
 ### Review-tab integration (Phase 2) — CANCELLED
 
 ~~The multi-video-track master serves both recovery and review. Alongside the archival

@@ -20,6 +20,7 @@ from core.manifest import (  # noqa: E402
     assign_archival_locations,
     to_json, from_json, sidecar_path, write_sidecar, metadata_embed_args,
     parse_from_format_tags, read_manifest,
+    restore_log_path, write_restore_log,
 )
 from core.binaries import get_ffmpeg  # noqa: E402
 
@@ -56,6 +57,47 @@ def test_json_round_trip_preserves_every_field():
     assert len(back.clips) == len(m.clips)
     for a, b in zip(m.clips, back.clips):
         assert a == b, f"clip mismatch:\n  {a}\n  {b}"
+
+
+def test_restore_recipe_fields_round_trip():
+    m = _sample_manifest()
+    m.clips[1].rotation = 270
+    m.clips[1].is_vfr = True
+    m.clips[1].color_space = "bt709"
+    m.clips[1].camera_label = "Ambarella"
+    m.clips[1].creation_time = "2026-07-03T12:00:55Z"
+    back = from_json(to_json(m))
+    c = back.clips[1]
+    assert (c.rotation, c.is_vfr, c.color_space, c.camera_label, c.creation_time) == \
+        (270, True, "bt709", "Ambarella", "2026-07-03T12:00:55Z")
+
+
+def test_restore_log_path_naming():
+    assert restore_log_path("/a/b/pool_day.mov").name == "pool_day.restore.log"
+
+
+def test_restore_log_content_distinguishes_baseline_vs_archival(tmp_path=None):
+    d = Path(tmp_path) if tmp_path else Path(tempfile.mkdtemp())
+    m = _sample_manifest()
+    m.clips[0].camera_label = "Luna Ultra"
+    m.clips[1].camera_label = "Mobile"
+    m.clips[1].rotation = 90
+    m.clips[1].archival_track = 1
+    m.clips[1].in_track_start = 0.0
+    m.clips[1].in_track_duration = 8.0
+    m.clips[2].camera_label = "Mobile"
+    m.clips[2].archival_track = 1
+    m.clips[2].in_track_start = 8.0            # concatenated after clip 1 -> non-zero offset
+    m.clips[2].in_track_duration = 5.0
+    master = d / "pool_day.mov"
+    path = write_restore_log(m, master)
+    text = path.read_text(encoding="utf-8")
+    assert "VID_0001.mp4" in text and "Luna Ultra" in text
+    assert "baseline track, chapter 0" in text
+    assert "rotated 90" in text
+    assert "MOBILE_9987.mp4" in text and "archival track 1" in text
+    assert "this clip has the track to itself" in text   # clip[1]: alone at offset 0
+    assert "concatenated with other same-spec clips" in text   # clip[2]: non-zero offset
 
 
 def test_compact_json_has_no_newlines_for_embedding():
@@ -190,6 +232,9 @@ def _integration_embed_roundtrip() -> bool:
 
 if __name__ == "__main__":
     test_json_round_trip_preserves_every_field()
+    test_restore_recipe_fields_round_trip()
+    test_restore_log_path_naming()
+    test_restore_log_content_distinguishes_baseline_vs_archival()
     test_compact_json_has_no_newlines_for_embedding()
     test_spec_signature_stable_and_discriminating()
     test_spec_signature_splits_on_rotation()

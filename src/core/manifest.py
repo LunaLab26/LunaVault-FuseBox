@@ -61,6 +61,16 @@ class ClipEntry:
     original_audio_codec: str = ""
     audio_lossless: bool = True        # is this clip's camera audio preserved losslessly
     has_wav: bool = False              # a paired WAV backup exists (baseline ALAC track)
+    # ── Restore recipe (Phase 4) — everything Extract needs to put a recovered
+    # clip back exactly as it was, and everything a human reading the restore
+    # log needs to understand what happened to it. Rotation/pix_fmt already ride
+    # with the copied stream on recovery (so playback restores correctly on its
+    # own), but recording them here is what makes the restore log meaningful. ──
+    rotation: int = 0                  # display rotation in degrees (0/90/180/270)
+    is_vfr: bool = False                # variable frame rate in the original
+    color_space: str = ""
+    camera_label: str = ""             # the detected/user-named camera (camera_id.identify_camera)
+    creation_time: str = ""            # ISO-8601 UTC from the original file's own metadata
     # ── Location ───────────────────────────────────────────────────────────────
     # Conforming clips live in the baseline (video 0:v:0 + baseline audio tracks), cut at
     # their chapter. Odd-spec clips live on an archival track, cut at the in-track offset.
@@ -200,6 +210,69 @@ def sidecar_path(master_path) -> Path:
 def write_sidecar(m: Manifest, master_path) -> Path:
     path = sidecar_path(master_path)
     path.write_text(to_json(m, indent=2), encoding="utf-8")
+    return path
+
+
+RESTORE_LOG_SUFFIX = ".restore.log"
+
+
+def restore_log_path(master_path) -> Path:
+    """`<master-stem>.restore.log` beside the master — a plain-English
+    companion to the machine-readable manifest."""
+    p = Path(master_path)
+    return p.with_name(p.stem + RESTORE_LOG_SUFFIX)
+
+
+def _clip_restore_lines(c: ClipEntry) -> list:
+    lines = [f"{c.source_filename}" + (f"  [{c.camera_label}]" if c.camera_label else "")]
+    spec = f"{(c.codec or '?').upper()} {c.width}x{c.height} {c.bit_depth}-bit {c.fps}fps"
+    if c.rotation:
+        spec += f", rotated {c.rotation}°"
+    if c.is_vfr:
+        spec += ", VFR"
+    lines.append(f"  spec: {spec}")
+    if c.creation_time:
+        lines.append(f"  recorded: {c.creation_time}")
+    if c.conform_status == "ok":
+        lines.append(f"  recovers from: baseline track, chapter {c.baseline_chapter_index}"
+                     " (this clip conformed to the baseline — its video is already the original,"
+                     " stream-copied)")
+    else:
+        loc = f"archival track {c.archival_track}"
+        if c.in_track_duration and c.in_track_start > 0.0:
+            loc += f", offset {c.in_track_start:.3f}s (concatenated with other same-spec clips —"
+            loc += " recovery is content-complete but not guaranteed bit-exact at this boundary;"
+            loc += " see DEVELOPMENT.md)"
+        else:
+            loc += " (this clip has the track to itself — recovery is bit-exact)"
+        lines.append(f"  recovers from: {loc}")
+    if c.has_camera_audio:
+        note = "lossless" if c.audio_lossless else "re-encoded (lossy) in the baseline"
+        lines.append(f"  camera audio: {c.original_audio_codec or '?'}, {note}"
+                     + (f", archival audio stream {c.archival_audio_stream}"
+                        if c.archival_audio_stream is not None else ""))
+    else:
+        lines.append("  camera audio: none in the original")
+    if c.has_wav:
+        lines.append("  WAV backup: recoverable losslessly from the baseline's ALAC track")
+    return lines
+
+
+def write_restore_log(m: Manifest, master_path) -> Path:
+    """A plain-English companion to the sidecar/embedded manifest — for a human
+    to read and understand how each clip can be recovered, without needing to
+    parse the JSON. Not consumed by Extract; the manifest is authoritative."""
+    lines = [
+        f"Restore log for {m.master_filename}",
+        f"Created {m.created_utc}",
+        f"{len(m.clips)} original clip(s) archived",
+        "",
+    ]
+    for c in m.clips:
+        lines.extend(_clip_restore_lines(c))
+        lines.append("")
+    path = restore_log_path(master_path)
+    path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
 
