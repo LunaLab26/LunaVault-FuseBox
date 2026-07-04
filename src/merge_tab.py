@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QTreeWidget, QTreeWidgetItem,
+    QTreeWidget, QTreeWidgetItem, QDialog,
     QAbstractItemView, QProgressBar, QFrame,
     QComboBox, QMessageBox, QCheckBox, QScrollArea,
 )
@@ -134,6 +134,50 @@ class ProbeThread(QThread):
             self.clip_probed.emit(i, info)
 
 
+class _WavAssignDialog(QDialog):
+    """Manually pair unmatched WAV files with clips — the fallback for
+    cross-brand naming conventions `clip_model._pair_wav`'s automatic
+    (date, time, clip-number) heuristic couldn't match."""
+
+    def __init__(self, orphans: list, clips: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Assign unmatched WAV files")
+        self._combos: dict = {}   # wav_path -> QComboBox
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Pick which clip each unmatched WAV file belongs to:"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
+        for row, wav in enumerate(orphans):
+            grid.addWidget(QLabel(wav.name), row, 0)
+            combo = QComboBox()
+            combo.addItem("— unused —", None)
+            for clip in clips:
+                label = clip.stem + ("  (already has a WAV)" if clip.has_wav() else "")
+                combo.addItem(label, clip)
+            grid.addWidget(combo, row, 1)
+            self._combos[wav] = combo
+        lay.addLayout(grid)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Apply")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
+        lay.addLayout(btn_row)
+
+    def assignments(self) -> dict:
+        """{wav_path: ClipInfo} for every combo the user pointed at a real clip
+        (skips ones left at "— unused —")."""
+        return {wav: combo.currentData() for wav, combo in self._combos.items()
+                if combo.currentData() is not None}
+
+
 class _CameraGroupTree(QTreeWidget):
     """The clips tree: one top-level item per detected camera, clips nested
     underneath. Dragging a clip onto a different camera group reassigns it
@@ -243,10 +287,21 @@ class MergeTab(QWidget):
         self._dst_banner.hide()
         c.addWidget(self._dst_banner)
 
+        self._unmatched_row = QWidget()
+        self._unmatched_row.hide()
+        unmatched_lay = QHBoxLayout(self._unmatched_row)
+        unmatched_lay.setContentsMargins(0, 0, 0, 0)
         self._unmatched_banner = QLabel()
         self._unmatched_banner.setWordWrap(True)
-        self._unmatched_banner.hide()
-        c.addWidget(self._unmatched_banner)
+        self._unmatched_assign_btn = QPushButton("Assign…")
+        self._unmatched_assign_btn.setToolTip(
+            "Manually pair an unmatched WAV file with a clip — useful when clips and their\n"
+            "recorder audio use naming conventions the app couldn't automatically match.")
+        self._unmatched_assign_btn.clicked.connect(self._open_wav_assign_dialog)
+        unmatched_lay.addWidget(self._unmatched_banner, 1)
+        unmatched_lay.addWidget(self._unmatched_assign_btn)
+        c.addWidget(self._unmatched_row)
+        self._source_folder: Optional[Path] = None
 
         # ── Baseline spec chooser ─────────────────────────────────────────────
         self._res_banner = QWidget()
@@ -966,6 +1021,7 @@ class MergeTab(QWidget):
             event.acceptProposedAction()
 
     def _load_folder(self, folder: Path):
+        self._source_folder = folder
         self._clips = scan_folder(folder)
         if not self._clips:
             self._table.clear()
@@ -980,15 +1036,38 @@ class MergeTab(QWidget):
 
         self._set_loaded(True)
         self._clips_title.setText(f"CLIPS  ·  {len(self._clips)} found")
+        self._refresh_unmatched_banner()
 
-        orphans = unpaired_wavs(folder, self._clips)
+    def _refresh_unmatched_banner(self):
+        if not self._source_folder:
+            self._unmatched_row.hide()
+            return
+        orphans = unpaired_wavs(self._source_folder, self._clips)
         if orphans:
             names = ", ".join(w.name for w in orphans[:4])
             extra = f" (+{len(orphans)-4} more)" if len(orphans) > 4 else ""
             self._unmatched_banner.setText(f"ℹ  Unmatched WAV files (not used): {names}{extra}")
-            self._unmatched_banner.show()
+            self._unmatched_row.show()
         else:
-            self._unmatched_banner.hide()
+            self._unmatched_row.hide()
+
+    def _open_wav_assign_dialog(self):
+        if not self._source_folder:
+            return
+        orphans = unpaired_wavs(self._source_folder, self._clips)
+        if not orphans:
+            return
+        dlg = _WavAssignDialog(orphans, sorted(self._clips, key=lambda c: c.order_idx), self)
+        if dlg.exec():
+            _, fp = get_ffmpeg()
+            for wav_path, clip in dlg.assignments().items():
+                clip.wav_path = wav_path
+                clip.wav_offset = 0.0
+                clip.wav_duration = probe_duration(fp, str(wav_path))
+                clip.sync_done = False   # re-run sync analysis against the newly paired WAV
+            self._refresh_unmatched_banner()
+            self._populate_table()
+            self._update_estimate()
 
         self._dst_banner.setVisible(check_dst_warning(self._clips))
         self._update_primary_labels()
@@ -1171,6 +1250,69 @@ class MergeTab(QWidget):
     def _on_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int):
         if item.parent() is None and column == COL_NAME:   # a camera-group header
             self._table.editItem(item, COL_NAME)
+        elif item.parent() is not None and column == COL_WAV:   # a clip's WAV cell
+            idx = item.data(COL_NAME, Qt.ItemDataRole.UserRole)
+            if idx is not None and 0 <= idx < len(self._clips):
+                self._open_wav_swap_dialog(self._clips[idx])
+
+    def _open_wav_swap_dialog(self, clip: ClipInfo):
+        """Double-clicking a clip's WAV cell — swap or clear which WAV file
+        it's paired with, from every WAV in the source folder (not just the
+        currently-unmatched ones), so a wrongly-auto-paired WAV can be
+        corrected too."""
+        if not self._source_folder:
+            return
+        all_wavs = sorted(self._source_folder.glob("*.wav"))
+        if not all_wavs:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"WAV for {clip.stem}")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(f"Paired audio for “{clip.stem}”:"))
+        combo = QComboBox()
+        combo.addItem("— none —", None)
+        for wav in all_wavs:
+            other = next((c for c in self._clips if c is not clip and c.wav_path == wav), None)
+            label = wav.name + (f"  (currently: {other.stem})" if other else "")
+            combo.addItem(label, wav)
+        if clip.wav_path is not None:
+            i = combo.findData(clip.wav_path)
+            if i >= 0:
+                combo.setCurrentIndex(i)
+        lay.addWidget(combo)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        ok = QPushButton("Apply")
+        ok.setDefault(True)
+        ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
+        lay.addLayout(btn_row)
+        if not dlg.exec():
+            return
+        chosen = combo.currentData()
+        # If another clip already had this WAV, free it up — a WAV pairs with
+        # at most one clip at a time.
+        if chosen is not None:
+            for c in self._clips:
+                if c is not clip and c.wav_path == chosen:
+                    c.wav_path = None
+                    c.wav_offset = 0.0
+                    c.wav_duration = 0.0
+                    c.sync_done = False
+        clip.wav_path = chosen
+        clip.wav_offset = 0.0
+        clip.sync_done = False
+        if chosen is not None:
+            _, fp = get_ffmpeg()
+            clip.wav_duration = probe_duration(fp, str(chosen))
+        else:
+            clip.wav_duration = 0.0
+        self._refresh_unmatched_banner()
+        self._populate_table()
+        self._update_estimate()
 
     def _on_tree_item_edited(self, item: QTreeWidgetItem, column: int):
         if item.parent() is not None or column != COL_NAME:

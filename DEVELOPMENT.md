@@ -244,7 +244,15 @@ records + log.
     merges them (4→3 groups); up/down reorder still swaps GLOBAL order_idx across camera
     boundaries; selection resolves correctly; empty-clips edge case doesn't raise. All
     suites green.
-  - **Remaining: 3c** — click-to-assign for unmatched WAVs.
+  - **3c (done)**: an "Assign…" button next to the unmatched-WAV banner opens `_WavAssignDialog`
+    — a combo per orphan WAV listing every clip (plus "— unused —"), applying chosen pairings
+    on Apply (resets `wav_offset`/`sync_done`, probes the new `wav_duration`). Double-clicking a
+    clip's WAV cell opens a per-clip swap dialog listing every WAV in the source folder
+    (not just orphans), so a wrongly auto-paired WAV can be corrected too; picking a WAV
+    another clip already has steals it away (a WAV pairs with at most one clip). Verified:
+    dialog construction/population, the assign flow, and the swap-steals-from-another-clip
+    flow, all driven through the real methods (not re-implemented logic) via a patched
+    `QDialog.exec`. **Phase 3 (camera-grouped merge UI) is now complete.**
 - **App-wide + merge-tab refinement backlog logged** (window rescaling/reachability, a
   selection-checkbox column with fade-when-excluded, a Timestamp column highlighting
   creation-time vs filename-time differences) — see the dedicated backlog section below;
