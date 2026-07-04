@@ -484,6 +484,65 @@ not just synthetic test clips.
   default for two same-spec clips, 2 separate tracks in per-clip mode) — this also caught
   and confirmed the `0:a?` fix. All suites green.
 
+### Phase 5 — Extract and Share tab (done)
+
+The payoff of the whole epic: recovering original clips back out of an archival master.
+The WhatsApp tab is renamed **"Extract and Share"** in the tab bar (kept the `WhatsAppTab`
+class name internally — a bigger rename would touch many call sites for no functional
+gain). A segmented toggle at the top switches between the unchanged **Share** UI (wrapped,
+unmodified, into its own panel) and a new **Extract** panel; they operate on different
+kinds of source file and don't share state.
+
+- **`core/extract.py`** (new, pure): `RecoveryPlan` + `build_recovery_plan(manifest, entry)`
+  — works out exactly where a clip's video/audio/WAV live in the master:
+    - **video**: `archival_track` at `in_track_start`/`in_track_duration` if it has one (an
+      odd-spec original), else the baseline's video stream (0) at its
+      `baseline_chapter_index`'s computed offset;
+    - **camera audio**: `archival_audio_stream` (same archival track/window) when set, else
+      the baseline's own camera-audio track at the same chapter offset (every clip's camera
+      audio is stream-copied into the baseline uniformly, regardless of whether its video
+      conformed — see the Phase-2 audio model);
+    - **WAV backup**: always from the baseline's ALAC track at the chapter offset — WAV
+      never rides an archival track.
+  `compute_baseline_offsets` sums preceding clips' durations (every clip — conforming or
+  not — occupies a baseline chapter, back-to-back with no gaps) to get exact chapter start
+  times, since the manifest only stores the chapter *index*, not its time range.
+  `build_recover_clip_cmd`/`build_recover_wav_cmd` build the actual ffmpeg stream-copy/PCM-
+  decode commands (input-side `-ss` for a keyframe-accurate seek).
+  **A real bug caught by the module's own tests**: the first draft used absolute stream-
+  index map specifiers (`0:N`); `archival_track`/`archival_audio_stream`/
+  `baseline_audio_tracks` are actually TYPE-relative (`v:N`/`a:N`), per how
+  `assign_archival_locations` already populates them (Phase 2) — fixed before it ever ran
+  for real.
+- **`extract_workers.py`** (new): `ManifestLoadWorker` (reads the manifest off the UI
+  thread) + `ExtractWorker` (recovers a batch of clips — video+audio, then WAV if present
+  — emitting progress/per-clip completion/error signals; a failed WAV doesn't fail the
+  clip, since the video/audio already landed). Same cancel-flag + tracked-Popen discipline
+  as `review_workers.py`.
+- **`whatsapp_tab.py`**: the entire existing Share UI is wrapped unchanged into
+  `self._share_panel` (only `_setup_ui`'s first few lines changed, to build a wrapper
+  layout instead of building directly on `self`). New Extract panel: master path row
+  (Browse + drag-drop), a status label, a camera-grouped `QTreeWidget` of recoverable
+  clips (checkbox per clip, Select all/none, spec + rotation shown, "recovers as" naming
+  the output file(s) and flagging near-exact concat-boundary clips), output folder row,
+  progress bar, Extract/Cancel buttons. `main.py`'s tab label updated to "Extract and
+  Share".
+- **Verified end-to-end, three ways**: (1) `core/extract.py`'s pure logic against a
+  synthetic 5-clip mixed manifest (conforming/lone-archival/concat-group-first/concat-
+  group-second), covering every recovery-sourcing branch; (2) a real ffmpeg integration
+  test building an actual 2-clip archival master and recovering both clips **bit-exact**
+  (video + audio md5 match) via the manifest's own embedded data; (3) the **complete real
+  UI flow** — constructing `WhatsAppTab`, toggling to Extract mode, loading a real master
+  through `_load_extract_master`, confirming the camera-grouped tree populates correctly
+  (2 groups), running `_start_extract()` for real, and confirming the recovered files on
+  disk are bit-exact matches to their originals. Offscreen renders confirm both panels
+  lay out correctly in both themes. All suites green.
+
+**With Phase 5 done, the full archive-and-recover loop (Merge → Archival master → Extract)
+is built, wired, and proven end-to-end** — camera-grouped merge with a chosen baseline,
+lossless archival tracks, a human-readable restore log, and a working Extract tab that
+recovers the original clips back out.
+
 ### Review-tab integration (Phase 2) — CANCELLED
 
 ~~The multi-video-track master serves both recovery and review. Alongside the archival

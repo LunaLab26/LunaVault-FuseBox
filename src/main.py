@@ -81,7 +81,7 @@ class MainWindow(QMainWindow):
         self._about_tab     = AboutTab()
 
         self._tabs.addTab(self._merge_tab,     "Merge clips")
-        self._tabs.addTab(self._whatsapp_tab,  "WhatsApp clip")
+        self._tabs.addTab(self._whatsapp_tab,  "Extract and Share")
         self._tabs.addTab(self._review_tab,    "Review")
         self._tabs.addTab(self._log_tab,       "Log")
         self._tabs.addTab(self._about_tab,     "About")

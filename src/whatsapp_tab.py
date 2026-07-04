@@ -1,4 +1,9 @@
-"""whatsapp_tab.py — WhatsApp clip export tab UI and logic."""
+"""whatsapp_tab.py — "Extract and Share" tab: the original WhatsApp-clip Share
+half (trim + colour-grade + export a short clip), plus a new Extract half
+(recover original camera clips losslessly from an archival master, driven by
+its manifest — see core/extract.py and extract_workers.py). A segmented
+toggle at the top switches between the two — they operate on different kinds
+of source file and don't share state."""
 
 import os
 import tempfile
@@ -6,12 +11,12 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QColor, QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea,
     QLabel, QPushButton, QLineEdit, QFileDialog,
     QProgressBar, QFrame, QSizePolicy,
-    QMessageBox, QCheckBox,
+    QMessageBox, QCheckBox, QTreeWidget, QTreeWidgetItem, QButtonGroup, QAbstractItemView,
 )
 
 from ffmpeg_runner import WhatsAppWorker, FramePreviewWorker, get_ffmpeg, get_app_dir
@@ -20,8 +25,18 @@ from grade_manager import Grade, scan_luts, migrate_grade_key
 from probe import probe as probe_file
 from settings import Settings
 from widgets.timeline import TrimTimeline as TimelineWidget, secs_to_tc as _secs_to_tc
+from core.manifest import Manifest, ClipEntry
+from extract_workers import ManifestLoadWorker, ExtractWorker
 import log_manager
 import theme
+
+
+# ── Extract clip-tree columns ─────────────────────────────────────────────────
+EX_COL_NAME = 0
+EX_COL_CAMERA = 1
+EX_COL_SPEC = 2
+EX_COL_RECOVERY = 3
+EX_N_COLS = 4
 
 
 # ── Timecode helpers ──────────────────────────────────────────────────────────
@@ -117,6 +132,14 @@ class WhatsAppTab(QWidget):
         self._preview_timer.setInterval(350)
         self._preview_timer.timeout.connect(self._request_preview)
 
+        # ── Extract state ────────────────────────────────────────────────────
+        self._extract_master_path: str = ""
+        self._extract_manifest: Optional[Manifest] = None
+        self._manifest_load_worker: Optional[ManifestLoadWorker] = None
+        self._extract_worker: Optional[ExtractWorker] = None
+        self._extract_items: dict = {}   # ClipEntry -> QTreeWidgetItem (for progress updates)
+
+        self.setAcceptDrops(True)
         self._setup_ui()
         self._load_grades()
         self._restyle()
@@ -124,12 +147,52 @@ class WhatsAppTab(QWidget):
         if ctrl is not None:
             ctrl.changed.connect(self._restyle)
 
+    # ── Drag-and-drop (Extract panel only — Share uses its own Browse flow) ───
+
+    def dragEnterEvent(self, event):
+        if self._extract_panel.isVisible() and event.mimeData().hasUrls():
+            for u in event.mimeData().urls():
+                if u.toLocalFile().lower().endswith((".mov", ".mp4")):
+                    event.acceptProposedAction()
+                    return
+
+    def dropEvent(self, event):
+        if not self._extract_panel.isVisible():
+            return
+        for u in event.mimeData().urls():
+            path = u.toLocalFile()
+            if path.lower().endswith((".mov", ".mp4")):
+                self._load_extract_master(path)
+                event.acceptProposedAction()
+                return
+
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _setup_ui(self):
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setSpacing(10)
+        outer.setContentsMargins(14, 14, 14, 14)
+
+        mode_row = QHBoxLayout()
+        self._mode_share_btn = QPushButton("Share a clip")
+        self._mode_extract_btn = QPushButton("Extract originals")
+        for b in (self._mode_share_btn, self._mode_extract_btn):
+            b.setCheckable(True)
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_group.addButton(self._mode_share_btn)
+        self._mode_group.addButton(self._mode_extract_btn)
+        self._mode_share_btn.setChecked(True)
+        self._mode_share_btn.toggled.connect(self._on_mode_toggled)
+        mode_row.addWidget(self._mode_share_btn)
+        mode_row.addWidget(self._mode_extract_btn)
+        mode_row.addStretch()
+        outer.addLayout(mode_row)
+
+        self._share_panel = QWidget()
+        root = QVBoxLayout(self._share_panel)
         root.setSpacing(10)
-        root.setContentsMargins(14, 14, 14, 14)
+        root.setContentsMargins(0, 0, 0, 0)
 
         # ── Source file ───────────────────────────────────────────────────────
         src_row = QHBoxLayout()
@@ -335,6 +398,243 @@ class WhatsAppTab(QWidget):
         self._sync_end_from_start_dur()
         self._update_size_estimate()
 
+        outer.addWidget(self._share_panel, 1)
+
+        self._extract_panel = self._build_extract_panel()
+        outer.addWidget(self._extract_panel, 1)
+        self._extract_panel.hide()
+
+    def _on_mode_toggled(self, share_checked: bool):
+        self._share_panel.setVisible(share_checked)
+        self._extract_panel.setVisible(not share_checked)
+
+    # ── Extract panel construction ───────────────────────────────────────────
+
+    def _build_extract_panel(self) -> QWidget:
+        panel = QWidget()
+        lay = QVBoxLayout(panel)
+        lay.setSpacing(10)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        src_row = QHBoxLayout()
+        self._ex_master_edit = QLineEdit()
+        self._ex_master_edit.setPlaceholderText("Select or drop an archival master (.mov/.mp4)…")
+        self._ex_master_edit.setReadOnly(True)
+        ex_browse_btn = QPushButton("Browse…")
+        ex_browse_btn.setFixedWidth(90)
+        ex_browse_btn.clicked.connect(self._browse_extract_master)
+        src_row.addWidget(QLabel("Master:"))
+        src_row.addWidget(self._ex_master_edit, 1)
+        src_row.addWidget(ex_browse_btn)
+        lay.addLayout(src_row)
+
+        self._ex_status_label = QLabel(
+            "Drop a master here, or Browse, to see what can be recovered from it.")
+        self._ex_status_label.setWordWrap(True)
+        lay.addWidget(self._ex_status_label)
+
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(QLabel("Recoverable clips:"))
+        sel_row.addStretch()
+        select_all_btn = QPushButton("Select all")
+        select_all_btn.clicked.connect(lambda: self._set_all_extract_checks(True))
+        select_none_btn = QPushButton("Select none")
+        select_none_btn.clicked.connect(lambda: self._set_all_extract_checks(False))
+        sel_row.addWidget(select_all_btn)
+        sel_row.addWidget(select_none_btn)
+        lay.addLayout(sel_row)
+
+        self._ex_tree = QTreeWidget()
+        self._ex_tree.setColumnCount(EX_N_COLS)
+        self._ex_tree.setHeaderLabels(["Clip", "Camera", "Spec", "Recovers as"])
+        self._ex_tree.header().setSectionResizeMode(EX_COL_NAME, self._ex_tree.header().ResizeMode.Stretch)
+        self._ex_tree.setAlternatingRowColors(True)
+        self._ex_tree.setMinimumHeight(200)
+        lay.addWidget(self._ex_tree, 1)
+
+        out_row = QHBoxLayout()
+        self._ex_out_dir = QLineEdit()
+        self._ex_out_dir.setPlaceholderText("Output folder for recovered clips…")
+        self._ex_out_dir.setReadOnly(True)
+        ex_out_btn = QPushButton("Browse…")
+        ex_out_btn.setFixedWidth(90)
+        ex_out_btn.clicked.connect(self._browse_extract_out_dir)
+        out_row.addWidget(QLabel("Output folder:"))
+        out_row.addWidget(self._ex_out_dir, 1)
+        out_row.addWidget(ex_out_btn)
+        lay.addLayout(out_row)
+
+        self._ex_progress_frame = QFrame()
+        self._ex_progress_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self._ex_progress_frame.hide()
+        ex_prog_lay = QVBoxLayout(self._ex_progress_frame)
+        self._ex_pbar = QProgressBar()
+        self._ex_pbar.setRange(0, 100)
+        self._ex_pbar.setTextVisible(True)
+        ex_prog_lay.addWidget(self._ex_pbar)
+        self._ex_progress_label = QLabel("")
+        ex_prog_lay.addWidget(self._ex_progress_label)
+        lay.addWidget(self._ex_progress_frame)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._ex_cancel_btn = QPushButton("Cancel")
+        self._ex_cancel_btn.setFixedHeight(36)
+        self._ex_cancel_btn.hide()
+        self._ex_cancel_btn.clicked.connect(self._cancel_extract)
+        self._ex_extract_btn = QPushButton("▶  Extract selected")
+        self._ex_extract_btn.setFixedHeight(36)
+        self._ex_extract_btn.setEnabled(False)
+        self._ex_extract_btn.clicked.connect(self._start_extract)
+        btn_row.addWidget(self._ex_cancel_btn)
+        btn_row.addWidget(self._ex_extract_btn)
+        lay.addLayout(btn_row)
+
+        return panel
+
+    # ── Extract logic ─────────────────────────────────────────────────────────
+
+    def _browse_extract_master(self):
+        start = self._settings.get("last_extract_source", "") or str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select archival master", str(Path(start).parent) if start else "",
+            "Video files (*.mov *.mp4);;All files (*)")
+        if path:
+            self._load_extract_master(path)
+
+    def _load_extract_master(self, path: str):
+        self._settings.set("last_extract_source", path)
+        self._ex_master_edit.setText(path)
+        self._extract_master_path = path
+        self._extract_manifest = None
+        self._ex_tree.clear()
+        self._extract_items = {}
+        self._ex_extract_btn.setEnabled(False)
+        self._ex_status_label.setText("Reading manifest…")
+
+        if self._manifest_load_worker is not None:
+            settle(self._manifest_load_worker, 5000)
+        _, fp = get_ffmpeg()
+        w = ManifestLoadWorker(fp, path)
+        w.manifest_ready.connect(self._on_extract_manifest_ready)
+        self._manifest_load_worker = w
+        w.start()
+
+    def _on_extract_manifest_ready(self, manifest):
+        self._extract_manifest = manifest
+        if manifest is None or not manifest.clips:
+            self._ex_status_label.setText(
+                "No manifest found in this file — it wasn't produced with \"Archival "
+                "master\" enabled, or its sidecar .manifest.json is missing. Nothing to "
+                "recover.")
+            return
+        self._ex_status_label.setText(
+            f"{len(manifest.clips)} original clip(s) recorded in this master's manifest.")
+        self._populate_extract_tree(manifest)
+        self._ex_extract_btn.setEnabled(True)
+
+    def _populate_extract_tree(self, manifest: Manifest):
+        p = theme.active_palette()
+        self._ex_tree.clear()
+        self._extract_items = {}
+        groups: dict = {}
+        for idx, entry in enumerate(manifest.clips):
+            groups.setdefault(entry.camera_label or "Unknown camera", []).append((idx, entry))
+
+        for camera, members in groups.items():
+            group_item = QTreeWidgetItem(self._ex_tree)
+            group_item.setText(EX_COL_NAME, f"{camera}  ({len(members)} clip{'s' if len(members) != 1 else ''})")
+            font = QFont("", -1, QFont.Weight.Bold)
+            for col in range(EX_N_COLS):
+                group_item.setFont(col, font)
+                group_item.setForeground(col, QColor(p.accent))
+            for idx, entry in members:
+                item = QTreeWidgetItem(group_item)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(EX_COL_NAME, Qt.CheckState.Checked)
+                item.setText(EX_COL_NAME, entry.source_filename)
+                item.setText(EX_COL_CAMERA, camera)
+                spec = f"{(entry.codec or '?').upper()} {entry.width}x{entry.height} {entry.bit_depth}-bit"
+                if entry.rotation:
+                    spec += f", {entry.rotation}°"
+                item.setText(EX_COL_SPEC, spec)
+                recovers = entry.source_filename
+                if entry.has_wav:
+                    recovers += f" + {Path(entry.source_filename).stem}.wav"
+                if entry.conform_status != "ok" and entry.archival_track is not None:
+                    recovers += "" if entry.in_track_start == 0.0 else "  (near-exact)"
+                item.setText(EX_COL_RECOVERY, recovers)
+                self._extract_items[idx] = item
+            group_item.setExpanded(True)
+
+    def _set_all_extract_checks(self, checked: bool):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for item in self._extract_items.values():
+            item.setCheckState(EX_COL_NAME, state)
+
+    def _browse_extract_out_dir(self):
+        start = self._ex_out_dir.text() or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "Select output folder", start)
+        if folder:
+            self._ex_out_dir.setText(folder)
+            self._settings.set("last_extract_output_dir", folder)
+
+    def _start_extract(self):
+        if self._extract_manifest is None or not self._extract_master_path:
+            return
+        out_dir = self._ex_out_dir.text().strip()
+        if not out_dir:
+            QMessageBox.information(self, "Choose an output folder",
+                                    "Pick a folder to save the recovered clips into.")
+            return
+        selected = [self._extract_manifest.clips[idx] for idx, item in self._extract_items.items()
+                   if item.checkState(EX_COL_NAME) == Qt.CheckState.Checked]
+        if not selected:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Tick at least one clip to extract.")
+            return
+
+        self._ex_progress_frame.show()
+        self._ex_pbar.setValue(0)
+        self._ex_extract_btn.hide()
+        self._ex_cancel_btn.show()
+
+        ff, _ = get_ffmpeg()
+        w = ExtractWorker(ff, self._extract_master_path, self._extract_manifest,
+                          selected, Path(out_dir))
+        w.progress.connect(self._on_extract_progress)
+        w.clip_done.connect(self._on_extract_clip_done)
+        w.clip_error.connect(self._on_extract_clip_error)
+        w.finished_all.connect(self._on_extract_finished)
+        self._extract_worker = w
+        w.start()
+
+    def _cancel_extract(self):
+        if self._extract_worker is not None:
+            self._extract_worker.cancel()
+
+    def _on_extract_progress(self, done: int, total: int, name: str):
+        pct = int(done / total * 100) if total else 0
+        self._ex_pbar.setValue(pct)
+        self._ex_progress_label.setText(f"{done}/{total}" + (f" — {name}" if name else ""))
+
+    def _on_extract_clip_done(self, name: str, paths: list):
+        self._ex_status_label.setText(f"Recovered {name} → " + ", ".join(p.name for p in paths))
+
+    def _on_extract_clip_error(self, name: str, msg: str):
+        self._ex_status_label.setText(f"Failed to recover {name}: {msg}")
+
+    def _on_extract_finished(self, ok: bool):
+        self._ex_progress_frame.hide()
+        self._ex_cancel_btn.hide()
+        self._ex_extract_btn.show()
+        worker, self._extract_worker = self._extract_worker, None
+        settle(worker, 10000)
+        if ok:
+            self._ex_status_label.setText("Extraction complete.")
+        else:
+            self._ex_status_label.setText("Extraction cancelled.")
+
     # ── Theming ─────────────────────────────────────────────────────────────────
 
     def _style_export_btn(self):
@@ -361,6 +661,14 @@ class WhatsAppTab(QWidget):
         for b in self._grade_buttons:
             b.setSelected(b.grade is self._selected_grade if b.grade else self._selected_grade is None)
         self._timeline.update()
+
+        mode_style = (
+            f"QPushButton {{ padding:6px 14px; border:1px solid {p.border}; color:{p.text_dim}; "
+            f"background:{p.input_dk}; }}"
+            f"QPushButton:checked {{ border-color:{p.accent}; color:{p.accent}; background:{p.surface2}; }}")
+        self._mode_share_btn.setStyleSheet(mode_style)
+        self._mode_extract_btn.setStyleSheet(mode_style)
+        self._ex_status_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
 
     # ── Grade loading ─────────────────────────────────────────────────────────
 
@@ -447,6 +755,13 @@ class WhatsAppTab(QWidget):
         self._preview_worker = None
         self._before_worker = None
         self._retired_workers.clear()
+
+        if self._extract_worker:
+            self._extract_worker.cancel()
+        settle(self._extract_worker, 10000)
+        settle(self._manifest_load_worker, 5000)
+        self._extract_worker = None
+        self._manifest_load_worker = None
 
     def set_source(self, path: str):
         """Called from main window when a merge job completes."""
