@@ -159,9 +159,15 @@ def test_final_archival_mux_maps_and_dispositions():
         extra_out_args=["-metadata", "k=v"])
     # baseline + 2 archival inputs
     assert cmd.count("-i") == 3
-    # all baseline streams, then each archival's video + optional audio
-    assert "-map" in cmd and "0" in cmd
-    assert "1:v" in cmd and "1:a?" in cmd and "2:v" in cmd and "2:a?" in cmd
+    # baseline maps explicit video+audio (NOT a blanket "0" — that would also
+    # pull in the hidden chapter-text data stream MOV chapters create, which
+    # breaks with a codec tag/id conflict when copied into a file that also
+    # carries chapters — see the source comment / DEVELOPMENT.md).
+    map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert map_targets[:2] == ["0:v", "0:a"]
+    assert "0" not in map_targets   # no blanket baseline map
+    assert "1:v" in map_targets and "1:a?" in map_targets
+    assert "2:v" in map_targets and "2:a?" in map_targets
     # baseline video default, archival videos not
     assert cmd[cmd.index("-disposition:v:0") + 1] == "default"
     assert "-disposition:v:1" in cmd and "-disposition:v:2" in cmd

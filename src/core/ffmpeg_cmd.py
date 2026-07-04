@@ -567,7 +567,17 @@ def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,
     cmd = [ff, "-y", "-v", "error", "-i", str(baseline)]
     for f in archival_files:
         cmd += ["-i", str(f)]
-    cmd += ["-map", "0"]                      # all baseline streams
+    # Explicit video+audio, NOT a blanket "-map 0": the baseline was built with
+    # chapters, and ffmpeg's MOV muxer represents those internally as a hidden
+    # "chapter text" data stream (the classic QuickTime chapter-track
+    # mechanism) — copying THAT pre-existing stream via -c copy into a new
+    # file that also carries chapters (and other video tracks) hits a codec
+    # tag/id conflict ("Tag text incompatible with output codec id ..."), a
+    # real failure found on the user's 9-clip multicam merge. Chapters survive
+    # anyway via -map_chapters below (metadata-level, independent of this
+    # stream) — the muxer freshly (and safely) regenerates its own chapter
+    # track for THIS output rather than copying the conflicting one.
+    cmd += ["-map", "0:v", "-map", "0:a"]
     for i in range(1, len(archival_files) + 1):
         cmd += ["-map", f"{i}:v", "-map", f"{i}:a?"]
     cmd += ["-c", "copy", "-map_metadata", "0", "-map_chapters", "0",
