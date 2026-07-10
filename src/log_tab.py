@@ -8,11 +8,12 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QTextEdit, QSplitter, QMessageBox,
+    QTextEdit, QSplitter, QMessageBox, QCheckBox, QFileDialog,
 )
 from PySide6.QtGui import QColor, QFont
 
 import log_manager
+from settings import Settings
 import theme
 
 
@@ -37,8 +38,9 @@ def _fmt_dur(secs: float) -> str:
 
 
 class LogTab(QWidget):
-    def __init__(self):
+    def __init__(self, settings: Settings):
         super().__init__()
+        self._settings = settings
         self._entries: list = []
         self._setup_ui()
         self._restyle()
@@ -69,6 +71,23 @@ class LogTab(QWidget):
         title.setFont(font)
         hdr.addWidget(title)
         hdr.addStretch()
+
+        self._autosave_check = QCheckBox("Auto-save .txt on failure")
+        self._autosave_check.setToolTip(
+            "When a merge or export fails, automatically save a timestamped .txt copy of "
+            "its log entry (to the app's failure_logs folder) — so a diagnostic survives "
+            "even if you never open this tab.")
+        self._autosave_check.setChecked(self._settings.get("auto_save_log_on_failure", True))
+        self._autosave_check.toggled.connect(
+            lambda on: self._settings.set("auto_save_log_on_failure", on))
+        hdr.addWidget(self._autosave_check)
+
+        export_btn = QPushButton("Export…")
+        export_btn.setFixedWidth(90)
+        export_btn.setToolTip("Save the selected entry (or the whole log, if none is selected) "
+                              "as a .txt file.")
+        export_btn.clicked.connect(self._export_log)
+        hdr.addWidget(export_btn)
 
         refresh_btn = QPushButton("⟳  Refresh")
         refresh_btn.setFixedWidth(100)
@@ -184,72 +203,28 @@ class LogTab(QWidget):
         self._render_detail(entry)
 
     def _render_detail(self, entry: dict):
-        lines = []
-        t = entry.get("type", "?")
-        lines.append(f"{'─'*60}")
-        lines.append(f"  {t.upper()} EXPORT — {entry.get('timestamp','')}")
-        lines.append(f"{'─'*60}")
-        lines.append(f"  Output  : {entry.get('output','—')}")
-        lines.append(f"  Source  : {entry.get('source', entry.get('source_folder','—'))}")
-        lines.append(f"  Size    : {entry.get('file_size_mb', 0):.2f} MB")
-        lines.append(f"  Status  : {'OK' if entry.get('success') else 'FAILED — ' + entry.get('message','')}")
+        self._detail.setText(log_manager.render_entry_text(entry))
 
-        if t == "whatsapp":
-            lines.append(f"  Start   : {entry.get('start','—')}")
-            lines.append(f"  Duration: {entry.get('duration','—')}")
-            lines.append(f"  Grade   : {entry.get('grade','None')}")
+    # ── Export ────────────────────────────────────────────────────────────────
 
-        elif t == "merge":
-            lines.append(f"  Folder  : {entry.get('source_folder','—')}")
-            lines.append(f"  Clips   : {entry.get('clip_count',0)}    Total: {_fmt_dur(entry.get('total_duration_secs',0))}")
-            mix = entry.get("mix", {}) or {}
-            if mix.get("mix_enabled") or mix.get("enabled"):
-                lines.append(f"  Mix     : on  ·  {mix.get('kind','lr')}"
-                             + ("  ·  level-matched" if mix.get('match_levels') else ""))
-            if mix.get("include_video") is False:
-                lines.append("  Video   : excluded from output")
-            lines.append("")
-            lines.append("  Per-clip arrangement and sync:")
-            clips = entry.get("clips", [])
-            if not clips:
-                lines.append("    —")
-            for c in clips:
-                name = c.get("name", "?")
-                arr  = c.get("arrangement") or {}
-                lines.append("")
-                head = f"  • {name}"
-                if arr.get("video"):
-                    head += f"   [video: {arr['video']}]"
-                lines.append(head)
+    def _export_log(self):
+        rows = self._table.selectionModel().selectedRows()
+        if rows and rows[0].row() < len(self._entries):
+            entry = self._entries[rows[0].row()]
+            text = log_manager.render_entry_text(entry)
+            ts = entry.get("timestamp", "").replace(":", "").replace("-", "")
+            default_name = f"{entry.get('type','export')}_log_{ts or 'entry'}.txt"
+        else:
+            text = "\n\n".join(log_manager.render_entry_text(e) for e in self._entries) or "(log is empty)"
+            default_name = "lunavault_export_log.txt"
 
-                tracks = arr.get("tracks") or []
-                for tk in tracks:
-                    role = "  (default)" if tk.get("role") == "primary" else ""
-                    loss = "lossless" if tk.get("lossless") else "lossy"
-                    lines.append(f"      - {tk.get('label','?')}  [{tk.get('codec','')} · {loss}]{role}")
-
-                for note in (arr.get("decisions") or []):
-                    lines.append(f"        → {note}")
-
-                # Sync numbers (constant offset on lossless; drift on the mix only)
-                if c.get("has_wav") and not arr.get("is_slowmo"):
-                    off = c.get("audio_offset_ms")
-                    drift = c.get("drift_ms_per_min")
-                    conf = c.get("confidence_ms")
-                    pol = c.get("polarity_inverted")
-                    bits = []
-                    if off is not None:   bits.append(f"offset {off:+.1f} ms")
-                    if drift is not None: bits.append(f"drift {drift:+.1f} ms/min")
-                    if conf is not None:  bits.append(f"±{conf:.1f} ms")
-                    if pol:               bits.append("polarity flipped")
-                    if bits:
-                        lines.append(f"        sync: {'  ·  '.join(bits)}")
-                elif arr.get("is_slowmo"):
-                    f = arr.get("slowmo_factor")
-                    lines.append(f"        sync: slow-motion {f:.1f}× — WAV stretched, pitch-corrected"
-                                 if f else "        sync: slow-motion — WAV stretched")
-
-        self._detail.setText("\n".join(lines))
+        path, _ = QFileDialog.getSaveFileName(self, "Export log", default_name, "Text files (*.txt)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(text, encoding="utf-8")
+        except Exception as e:
+            QMessageBox.warning(self, "Export failed", f"Could not save the log:\n{e}")
 
     # ── Clear log ─────────────────────────────────────────────────────────────
 

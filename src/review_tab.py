@@ -22,33 +22,55 @@ import numpy as np
 from PySide6.QtCore import Qt, QObject, QTimer, QRectF, QPointF, QSize, Signal
 from PySide6.QtGui import QImage, QShortcut, QKeySequence, QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QFrame, QFileDialog,
-    QCheckBox, QStyle,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QFrame, QFileDialog,
+    QCheckBox, QStyle, QScrollArea, QComboBox,
 )
 
 import theme
 from thread_utils import settle
 from ffmpeg_runner import get_ffmpeg, get_app_dir
 from probe import StreamInfo, pix_fmt_info
-from review_playback import make_engine
+from review_playback import make_engine, is_risky_hw_decode_profile, HybridPlaybackEngine
 from review_workers import (
     TrackScanWorker, PeakScanWorker, SpectrogramWorker, MixRenderWorker, FrameFetchWorker,
-    ThumbnailStripWorker,
+    ThumbnailStripWorker, ProxyRenderWorker,
 )
 from core.scopes import rescale_to_bit_depth
-from core.review_media import mix_cache_key, snapshot_filename
+from core.review_media import mix_cache_key, snapshot_filename, proxy_cache_path
 from widgets.video_view import ZoomableVideoView
 from widgets.jog_wheel import JogWheel
 from widgets.scopes_panel import ScopesPanel
 from widgets.audio_lanes import AudioLaneStack
 from widgets.trackbar import OverviewTrackbar
 from widgets.timeline import secs_to_tc
+from widgets.spinner import LoadingSpinner
 
 _MIX_DEBOUNCE_MS = 300
 _SPEC_DEBOUNCE_MS = 250
+_ZOOM_FRAME_DEBOUNCE_MS = 200
 _APPROX_SCOPE_THROTTLE_S = 0.2
+
+_SOFTWARE_DECODE_TOOLTIP = (
+    "Play video without GPU hardware acceleration. Turn this on if the app has\n"
+    "crashed or the screen has gone blank while playing footage in this tab —\n"
+    "some GPUs can't reliably hardware-decode 4K 10-bit video and this avoids\n"
+    "that path entirely, at the cost of smoother playback. Applies immediately.")
+_SOFTWARE_DECODE_FORCED_TOOLTIP = (
+    "Disabled for this master — its 4K+ 10-bit HEVC video is a confirmed-dangerous\n"
+    "combination: hardware decode of this exact content class has caused the native\n"
+    "decoder to consume 14+ GB of memory and made the whole system unresponsive enough\n"
+    "to drop an active remote-desktop session. Software decode is forced for this file\n"
+    "to keep the app — and the rest of your system — stable.")
 _APPROX_SCOPE_MAX_DIM = 640   # shrink via Qt before touching numpy at all — see _update_approx_scope
 _SPEC_TILE_CACHE_MAX = 16
+_PROXY_HEIGHT = 480
+_FAST_PREVIEW_TOOLTIP = (
+    "Play a small, pre-rendered 480p copy instead of the full master — plain 8-bit\n"
+    "H.264 that any GPU decodes instantly, unlike the master's own resolution/codec/\n"
+    "bit-depth. Makes scrubbing and playback much smoother, especially on 4K or 10-bit\n"
+    "footage. Built once per master in the background (see the spinner while it's not\n"
+    "yet available); the exact-frame scopes reading, snapshots and the finished export\n"
+    "are completely unaffected — this only changes what plays back on screen.")
 _THUMBNAIL_COUNT = 24   # filmstrip slots across the OverviewTrackbar
 
 
@@ -93,6 +115,34 @@ def _label_tracks(tracks: list) -> dict:
         sublabel = f"{(t.codec or '?').upper()} · {ch}"
         labels[t.audio_index] = (label, sublabel)
     return labels
+
+
+class _LoadingIndicator(QWidget):
+    """Spinner + caption pair for a section header's `right` slot — see
+    ReviewTab._loading_indicator. The whole pair shows/hides together (a
+    lone caption with no spinning arc would just read as a stuck message)."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self._spinner = LoadingSpinner()
+        self._label = QLabel(text)
+        lay.addWidget(self._spinner)
+        lay.addWidget(self._label)
+        self.setVisible(False)
+
+    def start(self):
+        self._spinner.start()
+        self.setVisible(True)
+
+    def stop(self):
+        self._spinner.stop()
+        self.setVisible(False)
+
+    def restyle(self, palette):
+        self._label.setStyleSheet(f"color:{palette.text_mute}; font-size:11px;")
 
 
 class ReviewSession(QObject):
@@ -159,14 +209,23 @@ class ReviewTab(QWidget):
         self._settings = settings
         self._session = ReviewSession(self)
         use_software = bool(settings.get("review_software_decode", False)) if settings else False
-        self._engine = make_engine(self, use_software=use_software)
+        self._engine = self._new_engine(use_software)
         self._path: str = ""
         self._video_info: Optional[StreamInfo] = None
+        self._auto_forced_software = False   # True while a risky-content override is active
         self._chapters: list = []
+        self._manifest = None             # Optional[core.manifest.Manifest] for the loaded master
+        self._clip_window_end: Optional[float] = None   # auto-pause point while viewing one
+                                                          # archival clip's original (see
+                                                          # _on_video_source_changed); None on the
+                                                          # baseline (play the whole master normally)
         self._track_labels: dict = {}
         self._workers: list = []          # tracked-set — settle()d on shutdown()
         self._current_mix_worker = None   # at most one full-file mix render in flight
         self._thumb_worker = None         # at most one thumbnail-strip extraction in flight
+        self._proxy_worker = None         # at most one 480p proxy render in flight
+        self._proxy_path: Optional[str] = None   # ready proxy for the CURRENTLY loaded master, or None
+        self._using_proxy = False         # True while the engine is playing the proxy, not self._path
         self._spec_cache: dict = {}       # (track_idx, t0, t1) -> QImage, capped LRU
         self._spec_cache_order: list = []
         self._pyramids: dict = {}         # track_idx -> PeakPyramid, kept so lanes can re-crop to the viewport
@@ -194,6 +253,11 @@ class ReviewTab(QWidget):
         self._spec_timer.setInterval(_SPEC_DEBOUNCE_MS)
         self._spec_timer.timeout.connect(self._refresh_spectrograms)
 
+        self._zoom_frame_timer = QTimer(self)
+        self._zoom_frame_timer.setSingleShot(True)
+        self._zoom_frame_timer.setInterval(_ZOOM_FRAME_DEBOUNCE_MS)
+        self._zoom_frame_timer.timeout.connect(self._request_exact_scope)
+
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _section(self, title: str, right: Optional[QWidget] = None):
@@ -220,12 +284,45 @@ class ReviewTab(QWidget):
         self._section_titles.append(lbl)
         return frame, body
 
+    def _loading_indicator(self, text: str) -> "_LoadingIndicator":
+        """Spinner + caption, meant for a section header's `right` slot.
+        Hidden by default; call `.start()` when the section's background
+        worker begins and `.stop()` when it's done, so a slow thumbnail/
+        waveform extraction reads as "working", not stalled."""
+        return _LoadingIndicator(text)
+
+    def _make_vline(self) -> QFrame:
+        """A thin vertical divider — groups the transport row by function
+        (navigation / jog shuttle / snapshot action) instead of one flat row."""
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFixedWidth(1)
+        self._transport_dividers.append(line)
+        return line
+
     def _setup_ui(self):
         self.setAcceptDrops(True)
         st = self.style()
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Everything lives in a scrollable content container — under 150% Windows
+        # display scaling (or just a short window) this tab's stacked sections
+        # (preview+scopes / audio / overview) can easily exceed the available
+        # height; without this, Qt would just refuse to shrink below their
+        # combined minimums and the window could clip off-screen with no way to
+        # reach the rest. Mirrors merge_tab.py's identical fix.
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(self._scroll)
+        self._content = QWidget()
+        self._scroll.setWidget(self._content)
+        root = QVBoxLayout(self._content)
+        root.setContentsMargins(14, 14, 16, 14)   # room for the scrollbar
         root.setSpacing(10)
 
         header_row = QHBoxLayout()
@@ -235,12 +332,16 @@ class ReviewTab(QWidget):
         header_row.addWidget(self._browse_btn)
         header_row.addWidget(self._loaded_name_label)
         header_row.addStretch()
+        self._fast_preview_check = QCheckBox("Fast preview (480p)")
+        self._fast_preview_check.setToolTip(_FAST_PREVIEW_TOOLTIP)
+        if self._settings is not None:
+            self._fast_preview_check.setChecked(
+                bool(self._settings.get("review_fast_preview_480p", False)))
+        self._fast_preview_check.setEnabled(False)   # enabled once a proxy is ready for THIS master
+        self._fast_preview_check.toggled.connect(self._on_fast_preview_toggled)
+        header_row.addWidget(self._fast_preview_check)
         self._software_decode_check = QCheckBox("Software decode")
-        self._software_decode_check.setToolTip(
-            "Play video without GPU hardware acceleration. Turn this on if the app has\n"
-            "crashed or the screen has gone blank while playing footage in this tab —\n"
-            "some GPUs can't reliably hardware-decode 4K 10-bit video and this avoids\n"
-            "that path entirely, at the cost of smoother playback. Applies immediately.")
+        self._software_decode_check.setToolTip(_SOFTWARE_DECODE_TOOLTIP)
         if self._settings is not None:
             self._software_decode_check.setChecked(
                 bool(self._settings.get("review_software_decode", False)))
@@ -252,17 +353,14 @@ class ReviewTab(QWidget):
         top_row = QHBoxLayout()
         top_row.setSpacing(12)
 
-        # Zoom controls live in the Preview section header (right slot).
+        # Fit/1:1 presets live in the Preview section header (right slot); the
+        # continuous zoom control is a drag slider next to the preview itself
+        # (see below) — a vertical strip you move up/down, not a numeric entry.
         self._zoom_label = QLabel("Zoom")
         self._zoom_fit_btn = QPushButton("Fit")
         self._zoom_fit_btn.setToolTip("Scale the frame to fit the preview")
         self._zoom_1to1_btn = QPushButton("1:1")
         self._zoom_1to1_btn.setToolTip("Show the frame at 100% — one screen pixel per video pixel")
-        self._zoom_spin = QSpinBox()
-        self._zoom_spin.setRange(10, 800)
-        self._zoom_spin.setValue(100)
-        self._zoom_spin.setSuffix("%")
-        self._zoom_spin.setToolTip("Zoom to an exact percentage")
         zoom_widget = QWidget()
         zoom_row = QHBoxLayout(zoom_widget)
         zoom_row.setContentsMargins(0, 0, 0, 0)
@@ -270,12 +368,39 @@ class ReviewTab(QWidget):
         zoom_row.addWidget(self._zoom_label)
         zoom_row.addWidget(self._zoom_fit_btn)
         zoom_row.addWidget(self._zoom_1to1_btn)
-        zoom_row.addWidget(self._zoom_spin)
 
         preview_frame, preview_col = self._section("Preview", right=zoom_widget)
         self._preview_frame = preview_frame
         self._video_view = ZoomableVideoView()
-        preview_col.addWidget(self._video_view, 1)
+
+        preview_body_row = QHBoxLayout()
+        preview_body_row.setSpacing(8)
+        preview_body_row.addWidget(self._video_view, 1)
+        self._zoom_slider = QSlider(Qt.Orientation.Vertical)
+        self._zoom_slider.setRange(10, 800)   # percent — matches ZoomableVideoView's own clamp
+        self._zoom_slider.setValue(100)
+        self._zoom_slider.setFixedWidth(22)
+        self._zoom_slider.setToolTip("Drag to zoom (up = in, down = out)")
+        preview_body_row.addWidget(self._zoom_slider)
+        preview_col.addLayout(preview_body_row, 1)
+
+        # ── Video source (baseline vs. an archival clip original) ──────────────
+        # Hidden entirely for a master with no archival tracks — nothing to pick
+        # between yet, and an always-visible one-item combo would just be noise.
+        self._video_source_row = QWidget()
+        video_source_lay = QHBoxLayout(self._video_source_row)
+        video_source_lay.setContentsMargins(0, 0, 0, 0)
+        video_source_lay.setSpacing(8)
+        self._video_source_label = QLabel("Video source:")
+        self._video_source_combo = QComboBox()
+        self._video_source_combo.currentIndexChanged.connect(self._on_video_source_changed)
+        self._video_source_readout = QLabel("")
+        video_source_lay.addWidget(self._video_source_label)
+        video_source_lay.addWidget(self._video_source_combo)
+        video_source_lay.addWidget(self._video_source_readout)
+        video_source_lay.addStretch()
+        self._video_source_row.setVisible(False)
+        preview_col.addWidget(self._video_source_row)
 
         transport_row = QHBoxLayout()
         # Native Qt media icons — guaranteed to render, unlike the exotic glyphs
@@ -305,12 +430,19 @@ class ReviewTab(QWidget):
                               self._step_fwd_btn, self._next_btn, self._snapshot_btn)
         for b in self._icon_buttons:
             b.setFixedSize(30, 26)
+        # Grouped by function, not evenly spaced: navigation (skip/step/play/
+        # step/skip) | jog shuttle | the snapshot action — a divider between
+        # each group signals they're different kinds of control, and keeps
+        # the camera (an action) visually distinct from transport.
+        self._transport_dividers: list = []
         transport_row.addWidget(self._prev_btn)
         transport_row.addWidget(self._step_back_btn)
         transport_row.addWidget(self._play_btn)
         transport_row.addWidget(self._step_fwd_btn)
         transport_row.addWidget(self._next_btn)
+        transport_row.addWidget(self._make_vline())
         transport_row.addWidget(self._jog)
+        transport_row.addWidget(self._make_vline())
         transport_row.addWidget(self._snapshot_btn)
         transport_row.addStretch()
         transport_row.addWidget(self._tc_label)
@@ -330,25 +462,85 @@ class ReviewTab(QWidget):
 
         root.addLayout(top_row, 3)
 
+        # ── Overview section ──────────────────────────────────────────────────
+        # Sits ABOVE Audio tracks (not below) — it's the navigator both the
+        # video and every audio lane below it are read against, so it reads
+        # more naturally as the thing you look at first. OverviewTrackbar's
+        # own track is offset by AudioLaneStack.LANE_LABEL_MARGIN (see
+        # widgets/trackbar.py) so its video track lines up under the audio
+        # lanes' waveforms rather than starting flush at the widget edge.
+        overview_right = QWidget()
+        overview_right_row = QHBoxLayout(overview_right)
+        overview_right_row.setContentsMargins(0, 0, 0, 0)
+        overview_right_row.setSpacing(8)
+        self._overview_loading = self._loading_indicator("Loading thumbnails…")
+        self._overview_hint = QLabel("Drag the box edges to zoom · drag inside to scroll")
+        overview_right_row.addWidget(self._overview_loading)
+        overview_right_row.addWidget(self._overview_hint)
+        self._trackbar = OverviewTrackbar()
+        overview_frame, overview_body = self._section("Overview", right=overview_right)
+        self._overview_frame = overview_frame
+        overview_body.addWidget(self._trackbar)
+        root.addWidget(overview_frame)
+
         # ── Audio section ─────────────────────────────────────────────────────
         self._lanes = AudioLaneStack()
-        audio_frame, audio_body = self._section("Audio tracks")
+        self._audio_loading = self._loading_indicator("Loading waveforms…")
+        audio_frame, audio_body = self._section("Audio tracks", right=self._audio_loading)
         self._audio_frame = audio_frame
         audio_body.addWidget(self._lanes)
         root.addWidget(audio_frame, 2)
 
-        # ── Overview section ──────────────────────────────────────────────────
-        self._overview_hint = QLabel("Drag the box edges to zoom · drag inside to scroll")
-        self._trackbar = OverviewTrackbar()
-        overview_frame, overview_body = self._section("Overview", right=self._overview_hint)
-        self._overview_frame = overview_frame
-        overview_body.addWidget(self._trackbar)
-        root.addWidget(overview_frame)
+        # ── Share a clip (embeds WhatsAppTab's Share panel widget — see
+        # embed_share_panel(); collapsed by default since it's independent of
+        # whatever master is loaded above) ─────────────────────────────────────
+        self._share_section_collapsed = True
+        share_frame = QFrame()
+        share_frame.setObjectName("review_section")
+        self._sections.append(share_frame)
+        self._share_frame = share_frame
+        share_v = QVBoxLayout(share_frame)
+        share_v.setContentsMargins(12, 9, 12, 11)
+        share_v.setSpacing(8)
+        share_header = QWidget()
+        share_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        share_hl = QHBoxLayout(share_header)
+        share_hl.setContentsMargins(0, 0, 0, 0)
+        self._share_title = QLabel("▸  SHARE A CLIP")
+        self._share_title.setObjectName("review_section_title")
+        self._section_titles.append(self._share_title)
+        share_hl.addWidget(self._share_title)
+        share_hl.addStretch()
+        share_header.mousePressEvent = lambda e: self._toggle_share_section()
+        share_v.addWidget(share_header)
+        self._share_body = QWidget()
+        self._share_body_layout = QVBoxLayout(self._share_body)
+        self._share_body_layout.setContentsMargins(0, 4, 0, 0)
+        self._share_body.setVisible(False)
+        share_v.addWidget(self._share_body)
+        root.addWidget(share_frame)
 
         self._empty_label = QLabel("Drop a .mov here, or click Load master… to review it.")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._empty_label)
         self._set_loaded_visible(False)
+
+    def embed_share_panel(self, panel: QWidget):
+        """Take the Share-a-clip widget (built and owned by WhatsAppTab —
+        `WhatsAppTab.share_panel()`) and display it inside this section."""
+        self._share_body_layout.addWidget(panel)
+
+    def _toggle_share_section(self):
+        self._share_section_collapsed = not self._share_section_collapsed
+        self._share_body.setVisible(not self._share_section_collapsed)
+        chevron = "▸" if self._share_section_collapsed else "▾"
+        self._share_title.setText(f"{chevron}  SHARE A CLIP")
+
+    def reveal_share_panel(self):
+        """Expand the Share section — used when switching here via the
+        Extract tab's "Share a clip" shortcut button."""
+        if self._share_section_collapsed:
+            self._toggle_share_section()
 
     def _set_loaded_visible(self, loaded: bool):
         for f in (self._preview_frame, self._scopes_frame, self._audio_frame,
@@ -366,36 +558,186 @@ class ReviewTab(QWidget):
         if path:
             self.load_master(path)
 
+    # ── Developer-panel experiments (review_tab playback) ──────────────────────
+    def _review_frame_poll_ms(self) -> int:
+        try:
+            return int(self._settings.get("dev_review_frame_poll_ms", 300)) if self._settings else 300
+        except Exception:
+            return 300
+
+    def _allow_risky_hw(self) -> bool:
+        return bool(self._settings.get("dev_review_allow_risky_hw_decode", False)) if self._settings else False
+
+    def _new_engine(self, use_software: bool):
+        """make_engine, with the Developer-panel software-playback refresh rate
+        applied — the single seam every engine gets built through."""
+        return make_engine(self, use_software=use_software,
+                           frame_poll_ms=self._review_frame_poll_ms())
+
+    def reload_dev_settings(self):
+        """Re-read the Developer-panel review options and apply what can be applied
+        live: the software-playback refresh rate updates the current engine on the
+        fly, and the overview filmstrip is regenerated with the current tile
+        count/width. (The risky-HEVC override only affects the next master loaded.)"""
+        if isinstance(self._engine, HybridPlaybackEngine):
+            self._engine.set_frame_poll_ms(self._review_frame_poll_ms())
+        if self._path and self._video_info is not None and self._video_info.duration > 0:
+            self._start_thumbnail_strip(self._video_info.duration)
+
     def _on_software_decode_toggled(self, checked: bool):
-        if self._settings is not None:
+        self._apply_decode_mode(checked, persist=True,
+                                status=("Software decode " + ("on" if checked else "off")
+                                       + " — using " + ("CPU" if checked else "GPU") + " video decoding."))
+
+    def _apply_decode_mode(self, checked: bool, persist: bool, status: str = ""):
+        """Swap the playback engine live — the whole point of this switch is
+        recovering from a GPU decode crash, so making the user restart to
+        escape it would be cruel. Tear the old engine down fully before
+        dropping the reference (same QThread-lifetime discipline as
+        shutdown()), build the requested one, re-wire it, and reload the
+        current master at the same position.
+
+        `persist` controls whether this becomes the user's own saved
+        preference — False for `_maybe_force_safe_decode`'s per-file safety
+        override, which must not overwrite what the user actually asked for.
+        """
+        if persist and self._settings is not None:
             self._settings.set("review_software_decode", checked)
             self._settings.save()
-        # Apply live — the whole point of this switch is recovering from a GPU
-        # decode crash, so making the user restart to escape it would be cruel.
-        # Tear the old engine down fully before dropping the reference (same
-        # QThread-lifetime discipline as shutdown()), build the requested one,
-        # re-wire it, and reload the current master at the same position.
         pos = self._session.position
         was_playing = self._session.playing
         self._engine.shutdown()
-        self._engine = make_engine(self, use_software=checked)
+        self._engine = self._new_engine(checked)
         self._wire_engine()
-        self._status_label.setText(
-            "Software decode " + ("on" if checked else "off")
-            + " — using " + ("CPU" if checked else "GPU") + " video decoding.")
+        if status:
+            self._status_label.setText(status)
         if self._path and self._video_info is not None:
-            self._engine.load(self._path, self._session.tracks,
+            self._engine.load(self._current_source_path(), self._session.tracks,
                               fps=self._video_info.fps_float or 29.97)
             self._reapply_audio_after_swap()
             self._engine.seek(pos)
             if was_playing:
                 self._engine.play()
 
+    def _current_source_path(self) -> str:
+        """What the engine should actually be loading right now — the 480p
+        proxy while Fast preview is active and ready, otherwise the real
+        master. Scopes/snapshots/peaks/thumbnails always use `self._path`
+        directly and are unaffected either way."""
+        return self._proxy_path if (self._using_proxy and self._proxy_path) else self._path
+
+    def _maybe_force_safe_decode(self):
+        """Called once per freshly-loaded master, right after its video spec
+        is known (before `_on_tracks_ready` does its own `engine.load()`,
+        so this only needs to pick the right engine INSTANCE — not
+        replicate `_apply_decode_mode`'s load/seek/play tail, which assumes
+        a live mid-session swap with real position/track state to restore).
+
+        Forces software decode for the confirmed-dangerous 4K+/10-bit/HEVC
+        profile (see `is_risky_hw_decode_profile`'s docstring for the real
+        14GB-memory-blowup/remote-desktop-disconnect evidence) — overriding
+        the user's own hardware-decode preference for THIS file only; it is
+        never persisted to settings, and a later, safer master restores
+        whatever the user actually asked for.
+        """
+        # The Developer panel can override the automatic safety force so the user
+        # can experiment with GPU decode on the very profile that was risky here.
+        risky = is_risky_hw_decode_profile(self._video_info) and not self._allow_risky_hw()
+        currently_software = isinstance(self._engine, HybridPlaybackEngine)
+
+        if risky and not currently_software:
+            self._auto_forced_software = True
+            self._software_decode_check.blockSignals(True)
+            self._software_decode_check.setChecked(True)
+            self._software_decode_check.blockSignals(False)
+            self._software_decode_check.setEnabled(False)
+            self._software_decode_check.setToolTip(_SOFTWARE_DECODE_FORCED_TOOLTIP)
+            self._engine.shutdown()
+            self._engine = self._new_engine(True)
+            self._wire_engine()
+            self._status_label.setText(
+                "Software decode forced automatically — this master's 4K+ 10-bit HEVC "
+                "video previously caused instability under hardware decode.")
+        elif self._auto_forced_software and not risky:
+            self._auto_forced_software = False
+            self._software_decode_check.setEnabled(True)
+            self._software_decode_check.setToolTip(_SOFTWARE_DECODE_TOOLTIP)
+            saved_pref = bool(self._settings.get("review_software_decode", False)) if self._settings else False
+            if isinstance(self._engine, HybridPlaybackEngine) != saved_pref:
+                self._software_decode_check.blockSignals(True)
+                self._software_decode_check.setChecked(saved_pref)
+                self._software_decode_check.blockSignals(False)
+                self._engine.shutdown()
+                self._engine = self._new_engine(saved_pref)
+                self._wire_engine()
+
     def _reapply_audio_after_swap(self):
         """After a live engine swap the new engine has no audio set — re-issue
         the current tick-set through the normal debounced path so single-track
         native switches and multi-track renders both come back."""
         self._mix_timer.start()
+
+    # ── Fast-preview (480p proxy) ────────────────────────────────────────────
+
+    def _start_proxy_render(self):
+        """Kick off (or cache-hit-skip) a background 480p proxy render for
+        the currently loaded master. Runs unconditionally on every load —
+        cheap to have ready even if Fast preview isn't checked, since
+        checking it later should be instant rather than a fresh wait."""
+        ff, fp = get_ffmpeg()
+        cache_dir = get_app_dir() / "_temp" / "review_proxy"
+        out_path = proxy_cache_path(cache_dir, self._path, height=_PROXY_HEIGHT)
+        w = ProxyRenderWorker(ff, self._path, str(out_path), height=_PROXY_HEIGHT)
+        w.proxy_ready.connect(self._on_proxy_ready)
+        w.error.connect(self._on_proxy_error)
+        self._proxy_worker = w
+        self._track(w)
+        w.start()
+
+    def _on_proxy_ready(self, master_path: str, proxy_path: str):
+        if master_path != self._path:
+            return   # a later master already loaded — this result is stale
+        self._proxy_worker = None
+        self._proxy_path = proxy_path
+        self._fast_preview_check.setEnabled(True)
+        self._fast_preview_check.setToolTip(_FAST_PREVIEW_TOOLTIP)
+        if self._fast_preview_check.isChecked():
+            self._swap_playback_source(use_proxy=True)
+
+    def _on_proxy_error(self, master_path: str, message: str):
+        if master_path != self._path:
+            return
+        self._proxy_worker = None
+        self._fast_preview_check.setToolTip(
+            f"Couldn't build a fast-preview proxy for this master: {message}")
+
+    def _on_fast_preview_toggled(self, checked: bool):
+        if self._settings is not None:
+            self._settings.set("review_fast_preview_480p", checked)
+            self._settings.save()
+        if checked and self._proxy_path is None:
+            # Preference recorded; _on_proxy_ready applies it the moment the
+            # in-flight render for this master finishes.
+            self._status_label.setText("Fast preview will switch on once its 480p proxy is ready…")
+            return
+        self._swap_playback_source(use_proxy=checked)
+
+    def _swap_playback_source(self, use_proxy: bool):
+        """Live-swap the engine between the real master and its 480p proxy —
+        same reload/reseek pattern as `_apply_decode_mode`'s GPU/software
+        swap, just picking a different source path instead of a different
+        engine instance."""
+        if use_proxy == self._using_proxy or self._video_info is None:
+            return
+        self._using_proxy = use_proxy
+        pos = self._session.position
+        was_playing = self._session.playing
+        self._engine.load(self._current_source_path(), self._session.tracks,
+                          fps=self._video_info.fps_float or 29.97)
+        self._reapply_audio_after_swap()
+        self._engine.seek(pos)
+        if was_playing:
+            self._engine.play()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and any(
@@ -423,6 +765,25 @@ class ReviewTab(QWidget):
             self._thumb_worker.cancel()
             self._thumb_worker = None
         self._trackbar.set_thumbnail_count(0)   # clear the previous master's filmstrip
+        self._overview_loading.stop()
+        self._audio_loading.stop()
+        self._manifest = None
+        self._clip_window_end = None
+        self._video_source_row.setVisible(False)   # repopulated once the new manifest is known
+        self._video_source_readout.setText("")
+
+        # A new master invalidates any proxy in flight/ready for the OLD one —
+        # the initial load always uses the real master (correct immediately,
+        # no waiting on a render); Fast preview upgrades to the new proxy
+        # once _on_proxy_ready confirms it's actually for THIS master.
+        if self._proxy_worker is not None:
+            self._proxy_worker.cancel()
+            self._proxy_worker = None
+        self._proxy_path = None
+        self._using_proxy = False
+        self._fast_preview_check.setEnabled(False)
+        self._fast_preview_check.setToolTip("Preparing a 480p proxy for this master…")
+        self._start_proxy_render()
 
         ff, fp = get_ffmpeg()
         w = TrackScanWorker(fp, self._path)
@@ -430,10 +791,14 @@ class ReviewTab(QWidget):
         self._track(w)
         w.start()
 
-    def _on_tracks_ready(self, video_info: StreamInfo, audio_tracks: list, chapters: list):
+    def _on_tracks_ready(self, video_info: StreamInfo, audio_tracks: list, chapters: list,
+                         manifest):
         self._video_info = video_info
         self._chapters = chapters
+        self._manifest = manifest
         self._track_labels = _label_tracks(audio_tracks)
+        self._maybe_force_safe_decode()
+        self._populate_video_sources(manifest)
 
         bit_depth, subsampling = pix_fmt_info(video_info.pix_fmt)
         self._scopes.set_badges(
@@ -454,31 +819,87 @@ class ReviewTab(QWidget):
         peak_w = PeakScanWorker(ff, self._path, [t.audio_index for t in audio_tracks],
                                 duration=video_info.duration)
         peak_w.pyramid_ready.connect(self._on_pyramid_ready)
+        peak_w.finished.connect(self._audio_loading.stop)
         self._track(peak_w)
+        if audio_tracks:
+            self._audio_loading.start()
         peak_w.start()
 
         self._start_thumbnail_strip(video_info.duration)
 
+    # ── Video source (baseline vs. an archival clip original) ──────────────────
+
+    def _populate_video_sources(self, manifest):
+        """Build the Video source combo from the master's manifest — one entry
+        per ORIGINAL CLIP that has its own archival track (see
+        core.manifest.ClipEntry.archival_track), not one per track: several
+        clips sharing a track (grouped archival mode) each still get their own
+        entry, since they're separately seekable via their own in_track_start.
+        Row stays hidden for a master with nothing to offer (no manifest, or
+        Archival master was off when it was built)."""
+        self._video_source_combo.blockSignals(True)
+        self._video_source_combo.clear()
+        self._video_source_combo.addItem("Master (playable)", None)
+        if manifest is not None:
+            for c in manifest.clips:
+                if c.archival_track is None:
+                    continue
+                spec = f"{(c.codec or '?').upper()} {c.width}x{c.height} {c.fps}fps"
+                self._video_source_combo.addItem(f"{c.source_filename} — original", (
+                    c.archival_track, c.in_track_start, c.in_track_duration, c.source_filename, spec))
+        self._video_source_combo.setCurrentIndex(0)
+        self._video_source_combo.blockSignals(False)
+        self._video_source_row.setVisible(self._video_source_combo.count() > 1)
+        self._on_video_source_changed(0)   # explicit reset — a fresh load's engine already
+                                           # defaults to the baseline, but this also clears
+                                           # any stale readout/clip-window from a prior master
+
+    def _on_video_source_changed(self, index: int):
+        if self._video_info is None:
+            return
+        data = self._video_source_combo.itemData(index)
+        if data is None:
+            self._clip_window_end = None
+            self._video_source_readout.setText("")
+            self._engine.set_video_track(0)
+            self._engine.seek(0.0)
+        else:
+            track_idx, start, duration, name, spec = data
+            self._clip_window_end = (start + duration) if duration > 0 else None
+            self._video_source_readout.setText(f"Viewing original: {name}  ({spec})")
+            self._engine.set_video_track(track_idx)
+            self._engine.seek(start)
+
     def _start_thumbnail_strip(self, duration: float):
         """Sparse filmstrip thumbnails for the overview timeline — cheap
         individual-frame extractions directly from the master (no proxy
-        track: cancelled in favour of this simpler on-demand approach)."""
+        track: cancelled in favour of this simpler on-demand approach).
+
+        Tile count and width are Developer-panel experiments (default 24 / 160px)."""
         if duration <= 0:
             return
-        self._trackbar.set_thumbnail_count(_THUMBNAIL_COUNT)
-        timestamps = [duration * (i + 0.5) / _THUMBNAIL_COUNT for i in range(_THUMBNAIL_COUNT)]
+        if self._thumb_worker is not None:
+            self._thumb_worker.cancel()   # a live re-run (dev panel) supersedes the old strip
+            self._thumb_worker = None
+        count = int(self._settings.get("dev_review_thumb_count", _THUMBNAIL_COUNT)) if self._settings else _THUMBNAIL_COUNT
+        width = int(self._settings.get("dev_review_thumb_width", 160)) if self._settings else 160
+        count = max(1, count)
+        self._trackbar.set_thumbnail_count(count)
+        timestamps = [duration * (i + 0.5) / count for i in range(count)]
         ff, fp = get_ffmpeg()
         out_dir = get_app_dir() / "_temp" / "review_thumbs"
-        w = ThumbnailStripWorker(ff, self._path, timestamps, out_dir)
+        w = ThumbnailStripWorker(ff, self._path, timestamps, out_dir, width=width)
         w.thumbnail_ready.connect(self._trackbar.set_thumbnail)
         w.finished.connect(lambda w=w: self._on_thumb_worker_finished(w))
         self._thumb_worker = w
         self._track(w)
+        self._overview_loading.start()
         w.start()
 
     def _on_thumb_worker_finished(self, w):
         if self._thumb_worker is w:
             self._thumb_worker = None
+        self._overview_loading.stop()
 
     def _on_pyramid_ready(self, track_idx: int, pyramid):
         # Keep the pyramid so the lane can be re-cropped whenever the viewport
@@ -565,6 +986,17 @@ class ReviewTab(QWidget):
         arr10 = rescale_to_bit_depth(arr16, bit_depth=10, src_max=65535)
         self._scopes.set_exact(True)
         self._scopes.set_frame(arr10, bit_depth=10)
+        if self._video_view.zoom_mode() != "fit":
+            # Paused and zoomed past "fit" — swap in this same exact, full
+            # native-resolution frame for detailed visual inspection. The
+            # live/proxy frame the preview otherwise shows (especially under
+            # the software-decode fallback's periodic low-res extraction) can
+            # look soft once zoomed in; this reuses the frame already fetched
+            # for the scopes panel rather than issuing a second ffmpeg call.
+            img8 = (arr16 >> 8).astype(np.uint8)
+            h, w = img8.shape[0], img8.shape[1]
+            qimg = QImage(np.ascontiguousarray(img8).data, w, h, w * 3, QImage.Format.Format_RGB888)
+            self._video_view.set_frame(qimg.copy())
 
     # ── Session wiring ────────────────────────────────────────────────────────
 
@@ -585,6 +1017,11 @@ class ReviewTab(QWidget):
         span = max(1e-6, t1 - t0)
         frac = (secs - t0) / span if t0 <= secs <= t1 else None
         self._lanes.set_playhead(frac)
+        # Viewing one archival clip's original (see _on_video_source_changed):
+        # its own track keeps going past this clip's window into whatever the
+        # concat placed next — stop instead of spilling into a neighbour.
+        if self._clip_window_end is not None and secs >= self._clip_window_end and self._session.playing:
+            self._engine.pause()
 
     def _on_viewport_changed(self, t0: float, t1: float):
         self._trackbar.set_viewport(t0, t1)
@@ -598,7 +1035,7 @@ class ReviewTab(QWidget):
     def _wire_widgets(self):
         self._zoom_fit_btn.clicked.connect(self._video_view.set_zoom_fit)
         self._zoom_1to1_btn.clicked.connect(self._on_zoom_1to1_clicked)
-        self._zoom_spin.valueChanged.connect(
+        self._zoom_slider.valueChanged.connect(
             lambda v: self._video_view.set_zoom_percent(float(v)))
         self._video_view.zoom_changed.connect(self._on_zoom_changed)
 
@@ -638,16 +1075,18 @@ class ReviewTab(QWidget):
 
     def _on_zoom_1to1_clicked(self):
         self._video_view.set_zoom_1to1()
-        self._zoom_spin.blockSignals(True)
-        self._zoom_spin.setValue(100)
-        self._zoom_spin.blockSignals(False)
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(100)
+        self._zoom_slider.blockSignals(False)
 
     def _on_zoom_changed(self, frac: float):
         pct = round(frac * 100)
-        if self._zoom_spin.value() != pct:
-            self._zoom_spin.blockSignals(True)
-            self._zoom_spin.setValue(pct)
-            self._zoom_spin.blockSignals(False)
+        if self._zoom_slider.value() != pct:
+            self._zoom_slider.blockSignals(True)
+            self._zoom_slider.setValue(pct)
+            self._zoom_slider.blockSignals(False)
+        if not self._session.playing:
+            self._zoom_frame_timer.start()   # debounced full-res video-preview refresh
 
     # ── Transport ─────────────────────────────────────────────────────────────
 
@@ -687,7 +1126,7 @@ class ReviewTab(QWidget):
         out_path = snapshot_filename(self._path, frame_idx)
         ff, fp = get_ffmpeg()
         w = FrameFetchWorker(ff, self._path, secs=secs, mode="snapshot", snapshot_out=str(out_path))
-        w.snapshot_saved.connect(lambda p: self._status_label.setText(f"Snapshot saved — {p}"))
+        w.snapshot_saved.connect(lambda p: self._flash_status_ok(f"Snapshot saved — {p}"))
         w.error.connect(lambda msg: self._status_label.setText(f"Snapshot failed: {msg}"))
         self._track(w)
         w.start()
@@ -807,6 +1246,21 @@ class ReviewTab(QWidget):
         self._workers = [w for w in self._workers if not settle(w, 10000)]
         self._engine.shutdown()
 
+    def _flash_status_ok(self, message: str):
+        """A successful action (e.g. a snapshot save) deserves a beat more
+        prominence than the shared muted status line normally gives — briefly
+        tint it `ok` green, then fade back to the normal muted style."""
+        self._status_label.setText(message)
+        p = theme.active_palette()
+        self._status_label.setStyleSheet(f"color:{p.ok}; font-size:11px; font-weight:bold;")
+        QTimer.singleShot(1800, lambda m=message: self._unflash_status(m))
+
+    def _unflash_status(self, expected_text: str):
+        if self._status_label.text() != expected_text:
+            return   # a newer status message has since replaced this one
+        p = theme.active_palette()
+        self._status_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+
     # ── Theming ───────────────────────────────────────────────────────────────
 
     def _restyle(self):
@@ -816,12 +1270,19 @@ class ReviewTab(QWidget):
                 f"QFrame#review_section {{ background:{p.surface}; border:1px solid {p.border_dk}; "
                 "border-radius:8px; }")
         for t in self._section_titles:
-            t.setStyleSheet(f"color:{p.accent}; font-size:10px; font-weight:bold; letter-spacing:1px;")
+            # Muted, not accent — accent is reserved for interactive/active
+            # states (toggles, the primary action, the playhead); a plain
+            # section label isn't clickable and shouldn't wear that colour.
+            t.setStyleSheet(f"color:{p.text_mute}; font-size:10px; font-weight:bold; letter-spacing:1px;")
         self._empty_label.setStyleSheet(f"color:{p.text_mute}; font-size:14px;")
         self._status_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
         self._loaded_name_label.setStyleSheet(f"color:{p.text_mute}; font-size:12px;")
         self._zoom_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
         self._overview_hint.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+        self._overview_loading.restyle(p)
+        self._audio_loading.restyle(p)
+        self._video_source_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+        self._video_source_readout.setStyleSheet(f"color:{p.accent}; font-size:11px; font-weight:bold;")
         self._tc_label.setStyleSheet(
             f"color:{p.text_dim}; font-size:12px; font-family:monospace;")
         self._dur_label.setStyleSheet(
@@ -837,3 +1298,5 @@ class ReviewTab(QWidget):
             f"QPushButton:pressed {{ background:{p.press_bg}; }}")
         for b in self._icon_buttons:
             b.setStyleSheet(icon_style)
+        for line in self._transport_dividers:
+            line.setStyleSheet(f"color:{p.border};")   # QFrame line colour follows the palette

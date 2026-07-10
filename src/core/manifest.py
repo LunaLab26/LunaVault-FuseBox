@@ -56,6 +56,14 @@ class ClipEntry:
     # archival track of its own.
     conform_status: str = ""
     spec_group: str = ""           # spec signature; "" for conforming clips
+    recovery_fidelity: str = ""    # how faithfully this clip can be recovered — set at build time
+                                   # so the app can promise honestly PER CLIP (see verify.py's
+                                   # decode-lossless findings, DEVELOPMENT.md Task 78):
+                                   #   "byte-exact"      — its OWN un-concatenated track: byte for byte.
+                                   #   "decode-lossless" — from a concat/baseline track: identical
+                                   #                       pixels/samples, only container metadata differs.
+                                   #   "transcoded"      — re-encoded into the baseline with no archival
+                                   #                       track: a high-quality copy, not the original.
     # ── Audio (Phase 2) ────────────────────────────────────────────────────────
     has_camera_audio: bool = False     # did the source MP4 carry an audio stream
     original_audio_codec: str = ""
@@ -69,8 +77,18 @@ class ClipEntry:
     rotation: int = 0                  # display rotation in degrees (0/90/180/270)
     is_vfr: bool = False                # variable frame rate in the original
     color_space: str = ""
+    camera_id: str = ""                 # stable key from camera_id.identify_camera — lets Extract
+                                        # cross-reference Settings' persisted camera_labels map
     camera_label: str = ""             # the detected/user-named camera (camera_id.identify_camera)
     creation_time: str = ""            # ISO-8601 UTC from the original file's own metadata
+    metadata_tags: dict = field(default_factory=dict)  # raw provenance tags (GPS/location, device
+                                        # make/model, capture fps — probe.KEY_METADATA_TAGS) from the
+                                        # ORIGINAL file. Container-level metadata like this lives at
+                                        # the WHOLE-FILE level, so it never rides along on a shared/
+                                        # archival stream by itself; recorded here VERBATIM (not
+                                        # renamed/derived) so Extract can replay it exactly on the
+                                        # recovered file regardless of which camera's own tag
+                                        # convention (com.android.*/com.apple.quicktime.*/plain) wrote it.
     # ── Location ───────────────────────────────────────────────────────────────
     # Conforming clips live in the baseline (video 0:v:0 + baseline audio tracks), cut at
     # their chapter. Odd-spec clips live on an archival track, cut at the in-track offset.
@@ -79,6 +97,34 @@ class ClipEntry:
     archival_audio_stream: Optional[int] = None    # 0-based master AUDIO stream for this clip's camera audio
     in_track_start: float = 0.0                    # seconds offset within the archival track
     in_track_duration: float = 0.0
+    # ── Measured concat positions (Task 85) ────────────────────────────────────
+    # The concat demuxer advances each segment's timestamps by the per-clip temp
+    # FILE's own container duration — which nothing forces to equal the clip's
+    # video duration (a WAV/audio stream can out- or under-run the video). The
+    # WAV-backup recovery window used to be seeked by the VIDEO's cumulative
+    # offset and could therefore land on the wrong samples (the verify log's
+    # WAV position-drift finding). These are MEASURED at merge time — probed
+    # from each temp file before the concat — never modelled:
+    concat_start: Optional[float] = None       # this clip's true segment start in the master (Σ of
+                                               # preceding temp-file container durations); None on
+                                               # older manifests → recovery falls back to video offsets
+    wav_track_duration: Optional[float] = None  # measured duration of this clip's WAV/ALAC segment
+    # ── Preserved WAV (opt-in, "preserve this WAV in full") ────────────────────
+    # Set only for a clip whose Primary/WAV-mismatch resolution ticked "Also
+    # preserve this WAV in full" — the complete, untouched original WAV lives
+    # on its OWN standalone audio stream (build_wav_archival_mux_cmd), stream-
+    # copied (byte-exact), independent of whatever alignment/trim the clip's
+    # normal WAV-backup slot uses for playback.
+    wav_archival_stream: Optional[int] = None   # 0-based master AUDIO stream, or None if not preserved
+    # ── Preserved LRV proxy (opt-in, "preserve this LRV proxy on its own track") ──
+    # Set only for a clip whose per-clip video options ticked "Also preserve
+    # the LRV proxy on its own track" — the complete low-res proxy (video +
+    # its own audio) lives on its OWN standalone tracks (build_lrv_archival_
+    # mux_cmd), stream-copied, independent of video_source_override (the
+    # proxy can be preserved as a backup even when the 4K original is what
+    # plays in the baseline).
+    lrv_video_archival_track: Optional[int] = None   # 0-based master VIDEO stream, or None if not preserved
+    lrv_audio_archival_track: Optional[int] = None   # 0-based master AUDIO stream, or None if no/not-preserved audio
 
 
 @dataclass
@@ -127,12 +173,57 @@ def assign_in_track_offsets(entries: list) -> None:
     """Set each clip's in_track_start/in_track_duration cumulatively — the
     layout of one archival track that concatenates these clips in order. The
     boundaries are keyframe-aligned because each original begins with a keyframe,
-    so Extract can re-cut at in_track_start with a stream copy (see the spike)."""
+    so Extract can re-cut at in_track_start with a stream copy (see the spike).
+
+    NOTE: this is only the ESTIMATE from probed container durations. For a
+    multi-clip track those durations drift (container duration != exact
+    frame-duration sum), so after the archival intermediate is actually built
+    its real per-clip boundaries should be re-pinned to measured keyframes via
+    measure_in_track_offsets — otherwise recovery's `-ss` (which snaps to the
+    nearest keyframe) lands on the wrong clip for entries deep in the track."""
     t = 0.0
     for c in entries:
         c.in_track_start = t
         c.in_track_duration = c.duration
         t += c.duration
+
+
+def measure_in_track_offsets(entries: list, precise_durations: list,
+                             keyframe_times: list, total_duration: float) -> None:
+    """Overwrite in_track_start/in_track_duration with boundaries PINNED to the
+    concatenated archival track's real keyframes, so recovery's `-ss` seek
+    lands exactly on each clip's own first frame regardless of duration drift.
+
+    `precise_durations[k]` is clip k's own measured stream duration (a better
+    boundary estimate than the container duration in `entries[k].duration`);
+    `keyframe_times` is the built intermediate's sorted keyframe PTS list;
+    `total_duration` is the intermediate's full length. Each clip's estimated
+    start (cumulative precise duration) is snapped to the nearest actual
+    keyframe — since concat lays clips back-to-back and each original opens on
+    a keyframe, the true boundaries ARE in that list; the estimate only has to
+    be close enough to pick the right one. Falls back to the estimate itself
+    if no keyframes were readable."""
+    if not entries:
+        return
+    n = len(entries)
+    est = [0.0] * n
+    acc = 0.0
+    for k in range(n):
+        est[k] = acc
+        dur = precise_durations[k] if k < len(precise_durations) and precise_durations[k] > 0 else entries[k].duration
+        acc += dur
+
+    def _snap(t):
+        if not keyframe_times:
+            return t
+        return min(keyframe_times, key=lambda kf: abs(kf - t))
+
+    # First clip always starts its track at 0.0; snap the rest to real keyframes.
+    bounds = [0.0] + [_snap(est[k]) for k in range(1, n)]
+    for k in range(n):
+        entries[k].in_track_start = bounds[k]
+        end = bounds[k + 1] if k + 1 < n else max(total_duration, bounds[k])
+        entries[k].in_track_duration = max(0.01, end - bounds[k])
 
 
 def assign_archival_locations(groups_in_order: list, base_video_count: int = 1,
@@ -223,6 +314,13 @@ def restore_log_path(master_path) -> Path:
     return p.with_name(p.stem + RESTORE_LOG_SUFFIX)
 
 
+_FIDELITY_WORDS = {
+    "byte-exact": "byte for byte — an exact copy of the original is kept",
+    "decode-lossless": "exactly as filmed — identical picture and sound (only container metadata differs)",
+    "transcoded": "a high-quality copy, not the original bitstream",
+}
+
+
 def _clip_restore_lines(c: ClipEntry) -> list:
     lines = [f"{c.source_filename}" + (f"  [{c.camera_label}]" if c.camera_label else "")]
     spec = f"{(c.codec or '?').upper()} {c.width}x{c.height} {c.bit_depth}-bit {c.fps}fps"
@@ -231,6 +329,8 @@ def _clip_restore_lines(c: ClipEntry) -> list:
     if c.is_vfr:
         spec += ", VFR"
     lines.append(f"  spec: {spec}")
+    if c.recovery_fidelity in _FIDELITY_WORDS:
+        lines.append(f"  recovery: {_FIDELITY_WORDS[c.recovery_fidelity]}")
     if c.creation_time:
         lines.append(f"  recorded: {c.creation_time}")
     if c.conform_status == "ok":

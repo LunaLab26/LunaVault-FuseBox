@@ -84,7 +84,7 @@ def audio_tracks(clip, ffprobe: Optional[str] = None) -> dict:
     st = clip.stream
 
     has_wav = clip.has_wav()
-    cam_label = ("Camera audio (Bluetooth mic)" if has_wav
+    cam_label = ("Camera audio (AAC)" if has_wav
                  else "Camera audio (on-board mic)")
     cam_note = ("from the MP4 — kept lossless (stream copy)" if has_wav
                 else "on-board camera mic (no WAV pairing) — kept lossless (stream copy)")

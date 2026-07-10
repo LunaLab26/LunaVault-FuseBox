@@ -14,6 +14,22 @@ def _no_window() -> dict:
     return {}
 
 
+# Format-level provenance tags worth capturing/restoring when present — GPS/
+# location and device identity, however the camera happened to spell them.
+# Deliberately raw key names (not derived/renamed) so restoring them later is
+# a verbatim -metadata replay, not a guess at which convention (com.android.*
+# vs com.apple.quicktime.* vs plain) a given camera used — adaptive to
+# whatever tags actually show up, not a hardcoded set of expected cameras.
+# Shared between probe.py (capture) and core/verify.py (comparison) so they
+# never drift apart.
+KEY_METADATA_TAGS = (
+    "location", "location-eng", "com.apple.quicktime.location.ISO6709",
+    "creation_time", "com.apple.quicktime.creationdate",
+    "com.android.capture.fps", "com.android.manufacturer", "com.android.model",
+    "make", "model", "com.apple.quicktime.make", "com.apple.quicktime.model",
+)
+
+
 # ── Baseline spec (the conform target) ─────────────────────────────────────────
 # Historically hardcoded to the Luna Ultra 4K/HEVC/10-bit standard; now the
 # DEFAULT, overridable by the user's chosen baseline (see BaselineSpec below).
@@ -107,6 +123,10 @@ class StreamInfo:
     rotation: int = 0          # display rotation in degrees, normalised 0..359
     device: str = ""           # best-effort device name from metadata (make/model or handler)
     is_vfr: bool = False       # variable frame rate (r_frame_rate != avg_frame_rate)
+    format_tags: dict = field(default_factory=dict)   # raw KEY_METADATA_TAGS present on this
+                                                        # file (GPS/location, device make/model,
+                                                        # capture fps) — restored verbatim on
+                                                        # recovery by core.extract.recover_metadata_args
 
 
 def _run_ffprobe(ffprobe_bin: str, path: str) -> dict:
@@ -145,6 +165,28 @@ def _normalize_fps(f: float) -> str:
         if abs(f - c) < 0.02:
             return f"{c:g}"
     return f"{round(f, 2):g}" if f > 0 else "0"
+
+
+def _nominal_fps(cap_fps: float, r_float: float, avg_float: float, is_vfr: bool) -> float:
+    """Pick a STABLE nominal frame rate for a clip.
+
+    `avg_frame_rate` is total_frames/duration — the true average, but it drifts a
+    few hundredths per clip (the same 29.97 camera can report 29.92, 29.95, 29.97
+    across clips), which wrongly splits identical-spec clips into different
+    baselines and forces needless transcodes. `r_frame_rate` is the clean nominal
+    (e.g. 30000/1001) and is byte-identical across clips from one camera — but it
+    grossly misreads VFR (a Pixel 30fps VFR clip reports r=120). So:
+      • a camera-declared capture fps wins when present (most authoritative);
+      • otherwise use r_frame_rate for CFR clips (stable nominal);
+      • fall back to avg only for genuinely-VFR clips, whose r is the misread one.
+    """
+    if cap_fps > 0:
+        return cap_fps
+    if not is_vfr and r_float > 0:
+        return r_float
+    if avg_float > 0:
+        return avg_float
+    return r_float
 
 
 def _extract_rotation(stream: dict) -> int:
@@ -218,14 +260,16 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
             info.pix_fmt       = s.get("pix_fmt", "")
             info.color_space   = s.get("color_space", "")
             info.color_transfer = s.get("color_transfer", "")
-            # avg_frame_rate is the true display rate; r_frame_rate is the timebase
-            # tick rate and misreads VFR (a Pixel 30fps VFR clip reports r=120). Use
-            # avg, keep r only to detect VFR and as a fallback.
+            # r_frame_rate is the clean, stable nominal rate; avg_frame_rate is the
+            # measured average and drifts slightly per clip. Detect VFR from a large
+            # r-vs-avg gap, then pick the nominal rate (see _nominal_fps) — using r
+            # for CFR keeps same-camera clips on one baseline instead of splitting
+            # them by hundredths-of-an-fps measurement noise.
             r_float = _rational_to_float(s.get("r_frame_rate", "0/1"))
             avg_float = _rational_to_float(s.get("avg_frame_rate", "0/1"))
             cap_fps = _rational_to_float((s.get("tags", {}) or {}).get("com.android.capture.fps", "0"))
-            info.fps_float = cap_fps if cap_fps > 0 else (avg_float if avg_float > 0 else r_float)
             info.is_vfr = bool(r_float > 0 and avg_float > 0 and abs(r_float - avg_float) > 0.5)
+            info.fps_float = _nominal_fps(cap_fps, r_float, avg_float, info.is_vfr)
             info.fps_str = _normalize_fps(info.fps_float)
 
         elif ctype == "audio" and not info.audio_codec:
@@ -242,6 +286,7 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
     info.creation_time = fmt_tags.get("creation_time") or vs_tags.get("creation_time") or ""
     info.rotation = _extract_rotation(video_stream or {})
     info.device = _extract_device(fmt_tags, vs_tags)
+    info.format_tags = {k: v for k, v in fmt_tags.items() if k in KEY_METADATA_TAGS}
 
     # HDR is special and baseline-independent — flag it and stop here.
     if info.color_transfer and info.color_transfer.lower() in HDR_TRANSFERS:
@@ -283,6 +328,17 @@ def apply_conformance(info: StreamInfo, baseline: "BaselineSpec" = DEFAULT_BASEL
     if (info.color_space and baseline.color_space
             and info.color_space.lower() not in (baseline.color_space.lower(), "unknown", "")):
         conflicts.append(info.color_space)
+    # A rotated clip (270°/180°/90°) can numerically match the baseline's own
+    # codec/resolution/fps/pix_fmt while still needing its picture corrected —
+    # and a plain stream-copy into a shared concat track does NOT reliably
+    # carry a rotation Display Matrix that differs from earlier clips in the
+    # same track (ffmpeg's concat demuxer effectively inherits the first
+    # segment's side-data for the whole resulting stream). Confirmed as a real
+    # bug this way: a real recovered clip lost its orientation entirely.
+    # Force conforming so a rotated clip always gets a real (correctly
+    # oriented) encode instead of a copy that can silently drop the tag.
+    if (getattr(info, "rotation", 0) or 0) % 360 != 0:
+        conflicts.append(f"rotated {info.rotation}°")
     info.conflicts = conflicts
     info.status = "ok" if not conflicts else "transcode"
     return info
@@ -294,6 +350,34 @@ def probe_duration(ffprobe_bin: str, path: str) -> float:
         return float(raw.get("format", {}).get("duration", 0) or 0)
     except Exception:
         return 0.0
+
+
+def probe_concat_segment(ffprobe_bin: str, path: str, audio_index: Optional[int]) -> tuple:
+    """(container_duration, audio_stream_duration) for one per-clip temp file —
+    the measured truth the concat demuxer will act on. `container_duration` is
+    how far the concat advances the NEXT segment's timestamps; the audio
+    duration is the `audio_index`-th audio stream's own length (the WAV/ALAC
+    slot when that's what's asked for). Either value is 0.0 when unavailable
+    (callers treat 0/None as "fall back to the modelled video offsets")."""
+    try:
+        raw = _run_ffprobe(ffprobe_bin, path)
+    except Exception:
+        return 0.0, 0.0
+    file_dur = 0.0
+    try:
+        file_dur = float(raw.get("format", {}).get("duration", 0) or 0)
+    except (TypeError, ValueError):
+        pass
+    audio_dur = 0.0
+    if audio_index is not None:
+        audio_streams = [s for s in raw.get("streams", [])
+                         if s.get("codec_type") == "audio"]
+        if 0 <= audio_index < len(audio_streams):
+            try:
+                audio_dur = float(audio_streams[audio_index].get("duration", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    return file_dur, audio_dur
 
 
 def pix_fmt_info(pix_fmt: str) -> tuple:
@@ -358,6 +442,59 @@ def probe_audio_tracks(ffprobe_bin: str, path: str) -> list:
     except Exception:
         return []
     return parse_audio_tracks(raw)
+
+
+# ── Multi-track video (Extract tab's manual-recovery mode) ────────────────────
+# A foreign master (produced by a different tool) can carry more than one video
+# stream — e.g. its own archival-track-style embedding — with no manifest to say
+# which one is the "real" continuous track. Mirrors AudioTrackInfo/
+# probe_audio_tracks above so the Extract tab can offer a video-stream picker.
+
+@dataclass
+class VideoTrackInfo:
+    """One video stream's identity. `video_index` is 0-based among VIDEO
+    streams only (matches ffmpeg's `-map 0:v:N`)."""
+    video_index: int
+    codec: str = ""
+    width: int = 0
+    height: int = 0
+    fps: str = ""          # r_frame_rate string, e.g. "30000/1001"
+    rotation: int = 0      # best-effort: the stream's own "rotate" tag, if any
+                           # (0 if absent — a display-matrix rotation needs a
+                           # separate side-data query, not worth it just for
+                           # this picker's reference display)
+
+
+def parse_video_tracks(raw: dict) -> list:
+    """Pure: turn an ffprobe -show_streams JSON dict into a VideoTrackInfo list."""
+    out = []
+    video_i = 0
+    for s in raw.get("streams", []):
+        if s.get("codec_type") != "video":
+            continue
+        tags = s.get("tags", {}) or {}
+        try:
+            rotation = int(tags.get("rotate", 0) or 0)
+        except (TypeError, ValueError):
+            rotation = 0
+        out.append(VideoTrackInfo(
+            video_index=video_i,
+            codec=s.get("codec_name", "") or "",
+            width=int(s.get("width", 0) or 0),
+            height=int(s.get("height", 0) or 0),
+            fps=s.get("r_frame_rate", "") or "",
+            rotation=rotation,
+        ))
+        video_i += 1
+    return out
+
+
+def probe_video_tracks(ffprobe_bin: str, path: str) -> list:
+    try:
+        raw = _run_ffprobe(ffprobe_bin, path)
+    except Exception:
+        return []
+    return parse_video_tracks(raw)
 
 
 # ── Chapters (Review tab prev/next transport) ──────────────────────────────────

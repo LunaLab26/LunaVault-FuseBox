@@ -56,7 +56,7 @@ class _ScopeCanvas(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(170)   # was 110 — the scopes column was the tightest spot
         self._mode = "wave"          # "hist" | "wave"
         self._hist = None            # dict from histogram_rgb, or None
         self._wave_img = None        # QImage, or None
@@ -159,10 +159,15 @@ class ScopesPanel(QWidget):
         self._mode_wave.setChecked(True)
         self._mode_hist.toggled.connect(self._on_mode_toggled)
 
+        # Parade/RGB is a *style* of Waveform, not a peer of Histogram — a
+        # "Waveform style:" label + smaller buttons give it a clearly
+        # subordinate visual weight instead of reading as a third main mode.
+        self._wave_style_label = QLabel("Waveform style:")
         self._wave_parade = QPushButton("Parade")
         self._wave_rgb = QPushButton("RGB")
         for b in (self._wave_parade, self._wave_rgb):
             b.setCheckable(True)
+            b.setObjectName("wave_style_btn")
         self._wave_group = QButtonGroup(self)
         self._wave_group.setExclusive(True)
         self._wave_group.addButton(self._wave_parade)
@@ -179,7 +184,8 @@ class ScopesPanel(QWidget):
         mode_row = QHBoxLayout()
         mode_row.addWidget(self._mode_hist)
         mode_row.addWidget(self._mode_wave)
-        mode_row.addSpacing(8)
+        mode_row.addSpacing(10)
+        mode_row.addWidget(self._wave_style_label)
         mode_row.addWidget(self._wave_parade)
         mode_row.addWidget(self._wave_rgb)
         mode_row.addStretch()
@@ -230,13 +236,14 @@ class ScopesPanel(QWidget):
         arr, bit_depth = self._current_frame
         hist = histogram_rgb(arr, bit_depth=bit_depth)
         if self._wave_parade.isChecked():
-            img = _parade_to_qimage(waveform_parade(arr, out_h=96, bit_depth=bit_depth))
+            img = _parade_to_qimage(waveform_parade(arr, out_h=150, bit_depth=bit_depth))
         else:
-            img = _ndarray_to_qimage(waveform_rgb(arr, out_h=96, bit_depth=bit_depth))
+            img = _ndarray_to_qimage(waveform_rgb(arr, out_h=150, bit_depth=bit_depth))
         self._canvas.set_data(hist, img)
 
     def _on_mode_toggled(self, checked: bool):
         mode = self.current_mode()
+        self._wave_style_label.setVisible(mode == "wave")
         self._wave_parade.setVisible(mode == "wave")
         self._wave_rgb.setVisible(mode == "wave")
         self._canvas.set_mode(mode)
@@ -250,3 +257,11 @@ class ScopesPanel(QWidget):
                 "border-radius:4px; padding:2px 8px; font-size:11px; }")
         self._approx_label.setStyleSheet(
             f"color:{p.text_mute if self._exact else p.warn}; font-size:11px;")
+        self._wave_style_label.setStyleSheet(f"color:{p.text_mute}; font-size:11px;")
+        # Deliberately smaller/quieter than the main Histogram/Waveform toggle —
+        # a sub-choice, not a peer mode.
+        self._wave_parade.setStyleSheet(
+            f"QPushButton#wave_style_btn {{ background:{p.btn_bg}; color:{p.text_dim}; "
+            f"border:1px solid {p.border}; border-radius:4px; padding:2px 8px; font-size:10px; }}"
+            f"QPushButton#wave_style_btn:checked {{ background:{p.surface2}; border-color:{p.accent}; color:{p.accent}; }}")
+        self._wave_rgb.setStyleSheet(self._wave_parade.styleSheet())

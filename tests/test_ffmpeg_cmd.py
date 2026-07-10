@@ -12,11 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from probe import StreamInfo
 from clip_model import ClipInfo
 from core.ffmpeg_cmd import (
-    hms_to_seconds, build_mux_cmd, build_concat_cmd,
+    hms_to_seconds, build_mux_cmd, build_concat_cmd, build_concat_reencode_cmd,
     build_whatsapp_cmd, build_preview_cmd, build_thumbnail_cmd,
     MixSpec, OutputPlan, OutputTrack, build_mux_cmd_plan,
-    build_archival_concat_cmd, build_final_archival_mux_cmd,
-    transcode_vf_parts, ConformSpec, _video_encoder_args,
+    build_archival_concat_cmd, build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
+    build_lrv_archival_mux_cmd,
+    transcode_vf_parts, ConformSpec, _video_encoder_args, build_clip_sample_cmd,
+    _override_fill,
 )
 
 PF = Path("progress.txt")
@@ -56,10 +58,72 @@ def test_blur_fill_uses_overlay_graph():
     assert "split=2" in parts[0] and "overlay=" in parts[0]
 
 
+def test_transcode_vf_parts_src_override_ignores_clip_conflicts():
+    # No conflicts at all (a clip that matches the baseline) — without an
+    # override this would return no filters; the LRV-proxy override forces
+    # scale/pad unconditionally since clip.conflicts describes the CLIP's own
+    # spec, not the proxy's.
+    clip = _clip([], w=3840, h=2160)   # empty conflicts — "matches baseline"
+    parts = transcode_vf_parts(clip, "pad", src_width=1280, src_height=720)
+    joined = ",".join(parts)
+    assert "force_original_aspect_ratio=decrease" in joined and "pad=3840:2160" in joined
+
+
+def test_transcode_vf_parts_src_override_crop_mode_uses_square_check_on_override_dims():
+    clip = _clip([], w=3840, h=2160)   # clip itself isn't square
+    parts = transcode_vf_parts(clip, "crop", src_width=720, src_height=720)   # proxy IS square
+    assert "crop=" in parts[0]
+
+
+def test_transcode_vf_parts_no_override_unaffected():
+    # Same clip, no override params — falls back to the existing conflict-based path.
+    clip = _clip([], w=3840, h=2160)
+    assert transcode_vf_parts(clip, "pad") == []
+
+
 def test_encoder_args_switch_codec():
     assert "libx265" in _video_encoder_args(ConformSpec(codec="hevc"))
     h264 = _video_encoder_args(ConformSpec(codec="h264", pix_fmt="yuv420p"))
     assert "libx264" in h264 and "hvc1" not in h264 and "yuv420p" in h264
+
+
+def test_encoder_args_hw_encoder_off_by_default_even_with_ff_given():
+    # Default ConformSpec.hw_encoder == "off" — passing `ff` must not matter.
+    args = _video_encoder_args(ConformSpec(codec="hevc"), ff="ffmpeg")
+    assert "libx265" in args
+
+
+def test_encoder_args_no_ff_never_engages_hw_even_if_requested():
+    # `ff` is needed to run the detection probe; without it "auto"/"nvenc" etc.
+    # must fall back to software rather than crash.
+    args = _video_encoder_args(ConformSpec(codec="hevc", hw_encoder="auto"), ff=None)
+    assert "libx265" in args
+
+
+def test_encoder_args_explicit_vendor_skips_detection_probe():
+    # Requesting a vendor by name (not "auto") must use it directly without
+    # calling detect_best_hw — verified by making detect_best_hw explode if hit.
+    import core.gpu_encode as ge
+    real_detect = ge.detect_best_hw
+    ge.detect_best_hw = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not probe"))
+    try:
+        args = _video_encoder_args(ConformSpec(codec="hevc", pix_fmt="yuv420p10le",
+                                               hw_encoder="qsv"), ff="ffmpeg")
+    finally:
+        ge.detect_best_hw = real_detect
+    assert "hevc_qsv" in args and "libx265" not in args
+    assert "p010le" in args   # 10-bit conform maps to the p010le hw surface format
+
+
+def test_encoder_args_auto_falls_back_to_software_when_no_gpu_works():
+    import core.gpu_encode as ge
+    real_detect = ge.detect_best_hw
+    ge.detect_best_hw = lambda ff, codec: None
+    try:
+        args = _video_encoder_args(ConformSpec(codec="hevc", hw_encoder="auto"), ff="ffmpeg")
+    finally:
+        ge.detect_best_hw = real_detect
+    assert "libx265" in args
 
 
 def _ok_clip(with_wav=False, wav_offset=0.0, square=False, cam_audio="aac"):
@@ -119,6 +183,53 @@ def test_mux_transcode_path():
     assert "fps=30000/1001" in s
 
 
+def test_wav_archival_mux_appends_streams_stream_copy_non_default():
+    cmd = build_wav_archival_mux_cmd(
+        "ffmpeg", Path("master.mov"), [Path("c1.wav"), Path("c2.wav")], existing_audio_count=2,
+        output=Path("out.mov"), progress_file=PF, extra_out_args=["-metadata", "k=v"])
+    assert cmd.count("-i") == 3   # master + 2 wav files
+    map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    # explicit video+audio, NOT a blanket "0" — avoids pulling in a hidden
+    # chapter-text stream that conflicts with this file's own regenerated chapters
+    assert map_targets[0] == "0:v" and map_targets[1] == "0:a?"
+    assert "1:a:0" in map_targets and "2:a:0" in map_targets
+    assert "copy" in cmd and "-map_chapters" in cmd
+    # new streams (indices 2, 3 given existing_audio_count=2) explicitly non-default;
+    # the master's own existing audio streams are untouched (no disposition override).
+    assert cmd[cmd.index("-disposition:a:2") + 1] == "0"
+    assert cmd[cmd.index("-disposition:a:3") + 1] == "0"
+    assert "-disposition:a:0" not in cmd and "-disposition:a:1" not in cmd
+    assert cmd[-1] == "out.mov"
+
+
+def test_lrv_archival_mux_appends_video_and_audio_non_default():
+    cmd = build_lrv_archival_mux_cmd(
+        "ffmpeg", Path("master.mov"), [Path("c1.lrv"), Path("c2.lrv")],
+        existing_video_count=1, existing_audio_count=2,
+        output=Path("out.mov"), progress_file=PF)
+    assert cmd.count("-i") == 3   # master + 2 lrv files
+    map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert map_targets[0] == "0:v" and map_targets[1] == "0:a?"
+    assert "1:v?" in map_targets and "1:a?" in map_targets
+    assert "2:v?" in map_targets and "2:a?" in map_targets
+    assert "copy" in cmd
+    # new streams non-default; existing baseline streams untouched
+    assert cmd[cmd.index("-disposition:v:1") + 1] == "0"
+    assert cmd[cmd.index("-disposition:v:2") + 1] == "0"
+    assert cmd[cmd.index("-disposition:a:2") + 1] == "0"
+    assert cmd[cmd.index("-disposition:a:3") + 1] == "0"
+    assert "-disposition:v:0" not in cmd and "-disposition:a:0" not in cmd
+    assert cmd[-1] == "out.mov"
+
+
+def test_wav_archival_mux_no_files_is_a_no_op_pass_through():
+    cmd = build_wav_archival_mux_cmd(
+        "ffmpeg", Path("master.mov"), [], existing_audio_count=2,
+        output=Path("out.mov"), progress_file=PF)
+    assert cmd.count("-i") == 1
+    assert "-disposition:a:0" not in cmd
+
+
 def test_whatsapp_cmd_no_grade():
     cmd = build_whatsapp_cmd("ffmpeg", "in.mp4", "00:00:01", "00:00:05",
                              Path("out.mp4"), None, PF)
@@ -140,6 +251,33 @@ def test_concat_cmd_appends_extra_out_args_before_output():
                            extra_out_args=["-movflags", "use_metadata_tags", "-metadata", "k=v"])
     assert cmd[-1] == "out.mov"
     assert cmd.index("use_metadata_tags") < cmd.index("out.mov")
+
+
+def test_concat_reencode_cmd_rebuilds_a_clean_playable_baseline():
+    # The fix for broken-splice playback: the baseline concat must RE-ENCODE the
+    # video into one continuous, widely-compatible stream (8-bit H.264), not
+    # stream-copy independently-encoded segments (which severs reference
+    # continuity at the joins -> green frames/freezes/static, differently per
+    # player). Audio stays a stream copy (concat-safe for playback).
+    cmd = build_concat_reencode_cmd("ffmpeg", Path("list.txt"), Path("ch.txt"),
+                                    Path("out.mov"), PF, crf=20)
+    s = " ".join(cmd)
+    assert "-f concat" in s                       # still the concat demuxer as input
+    assert "-c:v libx264" in s                     # video RE-ENCODED, not copied
+    assert "-pix_fmt yuv420p" in s                 # 8-bit for maximum device support
+    assert "-profile:v high" in s
+    assert "-crf 20" in s
+    assert "-c:a copy" in s                        # audio still copied (playback-safe)
+    assert "-c copy" not in s                       # crucially NOT a blanket stream copy
+    assert "+faststart" in s                        # moov atom up front for streaming
+    assert "-map_metadata 1" in s                   # chapters preserved
+
+
+def test_concat_reencode_cmd_appends_extra_out_args_before_output():
+    cmd = build_concat_reencode_cmd("ffmpeg", Path("l.txt"), Path("c.txt"), Path("out.mov"), PF,
+                                    extra_out_args=["-metadata", "k=v"])
+    assert cmd[-1] == "out.mov"
+    assert cmd.index("k=v") < cmd.index("out.mov")
 
 
 def test_archival_concat_maps_only_video_and_audio():
@@ -182,6 +320,21 @@ def test_preview_and_thumbnail_single_frame():
     t = build_thumbnail_cmd("ffmpeg", "in.mp4", 2.0, None, "t.jpg")
     assert "-frames:v" in p and p[-1] == "p.jpg"
     assert "-frames:v" in t and t[-1] == "t.jpg"
+
+
+def test_preview_and_thumbnail_skip_to_nearest_keyframe():
+    # Measured directly on a real 4K 10-bit HEVC clip: 1.9s-7.4s per frame
+    # (worse deeper into the file) without -skip_frame nokey, a flat ~0.7s
+    # with it — these are both rough preview references (the before/after
+    # pane and the live-render/software-decode-playback frame), not
+    # precision readings, so the same trade thumbnails already use applies.
+    p = build_preview_cmd("ffmpeg", "in.mp4", "00:00:02", None, "p.jpg")
+    assert "-skip_frame" in p and p[p.index("-skip_frame") + 1] == "nokey"
+    assert p.index("-skip_frame") < p.index("-i")
+
+    t = build_thumbnail_cmd("ffmpeg", "in.mp4", 2.0, None, "t.jpg")
+    assert "-skip_frame" in t and t[t.index("-skip_frame") + 1] == "nokey"
+    assert t.index("-skip_frame") < t.index("-i")
 
 
 def test_mix_lr_uses_join_not_amix():
@@ -356,6 +509,168 @@ def test_plan_no_camera_uniform_slots():
     assert "-c:a:2 aac" in s
 
 
+def test_plan_no_wav_backup_falls_back_to_camera_audio():
+    # A clip with camera audio but no WAV must NOT go silent on the WAV-backup
+    # slot — if the "primary" choice points at that slot (file-wide default),
+    # this clip would otherwise play silent even though real audio exists on
+    # the camera slot. Mirrors the existing wav_aac fallback in the other
+    # direction: the WAV slot falls back to the camera audio, re-encoded ALAC.
+    clip = _ok_clip(with_wav=False)          # cam_audio="aac" by default → has_cam=True
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    s = " ".join(cmd)
+    assert "anullsrc" not in s                       # no silence needed — camera audio covers it
+    assert s.count("-map 0:a:0") == 2                # both slots pull from the same camera input
+    assert "-c:a:0 copy" in s                         # camera slot: stream copy
+    assert "-c:a:1 alac" in s and "-sample_fmt:a:1 s32p" in s   # wav slot: re-encoded lossless
+    assert "Backup Audio (from Camera)" in s
+
+
+# ── Per-clip Primary override (_override_fill / ClipInfo.primary_override) ──
+
+def test_override_fill_camera_into_alac_slot():
+    clip = _ok_clip(with_wav=True)
+    assert _override_fill("camera", "alac", clip) == ("cam_alac", "alac", "Backup Audio (from Camera)")
+
+
+def test_override_fill_wav_into_aac_slot():
+    clip = _ok_clip(with_wav=True)
+    assert _override_fill("wav", "aac", clip) == ("wav_aac", "aac", "Primary Audio (from WAV)")
+
+
+def test_override_fill_unavailable_source_returns_none():
+    clip = _ok_clip(with_wav=False, cam_audio="")   # neither camera nor WAV
+    assert _override_fill("camera", "aac", clip) is None
+    assert _override_fill("wav", "alac", clip) is None
+    assert _override_fill("mix", "aac", clip) is None
+
+
+def test_override_fill_mix_requires_conform_and_both_sources():
+    clip = _ok_clip(with_wav=True)
+    assert _override_fill("mix", "aac", clip) == ("mix", "aac", "Combined Mix (Camera + WAV 50/50)")
+    assert _override_fill("mix", "alac", clip) == ("mix_alac", "alac", "Combined Mix (Camera + WAV, Lossless)")
+    clip.stream.status = "transcode"
+    assert _override_fill("mix", "aac", clip) is None
+
+
+def test_plan_primary_override_forces_wav_into_default_camera_slot():
+    # Global primary = camera (slot 0 = AAC), but this clip overrides Primary
+    # to WAV — the disposition-default slot must carry the WAV, not the camera
+    # audio, even though camera audio is available too.
+    clip = _ok_clip(with_wav=True)
+    clip.primary_override = "wav"
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    s = " ".join(cmd)
+    assert "-c:a:0 aac" in s and "Primary Audio (from WAV)" in s
+    assert "-disposition:a:0 default" in s
+    # The WAV-backup slot (index 1) is untouched by the override — still its
+    # own normal lossless WAV fill, a separate concern from Primary.
+    assert "-c:a:1 alac" in s and "Backup WAV (Lossless)" in s
+
+
+def test_plan_primary_override_forces_camera_into_default_wav_slot():
+    # Global primary = wav (slot 0 = ALAC); override forces Camera instead.
+    clip = _ok_clip(with_wav=True)
+    clip.primary_override = "camera"
+    plan = OutputPlan(tracks=[OutputTrack("wav"), OutputTrack("camera")])
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    s = " ".join(cmd)
+    assert "-c:a:0 alac" in s and "-sample_fmt:a:0 s32p" in s
+    assert "Backup Audio (from Camera)" in s
+    assert "-disposition:a:0 default" in s
+
+
+def test_plan_primary_override_auto_is_unaffected():
+    clip_auto = _ok_clip(with_wav=True)
+    clip_none = _ok_clip(with_wav=True)
+    clip_auto.primary_override = "auto"
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
+    cmd_auto = " ".join(build_mux_cmd_plan("ffmpeg", clip_auto, Path("o.mov"), PF, plan, "crop"))
+    cmd_none = " ".join(build_mux_cmd_plan("ffmpeg", clip_none, Path("o.mov"), PF, plan, "crop"))
+    assert cmd_auto == cmd_none
+
+
+def test_plan_primary_override_ignored_when_source_unavailable():
+    # Clip has no WAV at all — overriding Primary to WAV can't be honoured, so
+    # this must fall back to Auto (camera copy) rather than forcing silence.
+    clip = _ok_clip(with_wav=False)
+    clip.primary_override = "wav"
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    s = " ".join(cmd)
+    assert "-c:a:0 copy" in s          # Auto: camera audio copied, not silence
+
+
+def test_plan_primary_override_skipped_for_slowmo():
+    # Forcing "copy" (un-stretched camera audio) onto a slow-motion clip's
+    # default slot would desync it from the pitch-corrected, time-stretched
+    # video — the override must be ignored and Auto (stretch) used instead.
+    clip = ClipInfo(path=Path("s.mp4"),
+                    stream=StreamInfo(status="ok", width=3840, height=2160,
+                                      duration=40.0, audio_codec="aac"))
+    clip.wav_path = Path("s.wav")
+    clip.wav_duration = 10.0
+    clip.primary_override = "camera"
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    s = " ".join(cmd)
+    assert "atempo=" in s and "Synced Audio (WAV stretched to video)" in s
+
+
+# ── Per-clip video-source override (force transcode / use LRV proxy) ────────
+
+def test_plan_video_override_forces_transcode_on_a_matching_clip():
+    clip = _ok_clip()   # status="ok" — would normally stream-copy
+    clip.video_source_override = "transcode"
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    s = " ".join(cmd)
+    assert "-c:v copy" not in s
+    assert "libx265" in s or "libx264" in s   # re-encoded, not stream-copied
+
+
+def test_plan_video_override_auto_still_stream_copies():
+    clip = _ok_clip()
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    assert "-c:v copy" in " ".join(cmd)
+
+
+def test_plan_video_override_lrv_maps_video_from_second_input():
+    clip = _ok_clip(with_wav=True)
+    clip.stream.duration = 300.0
+    clip.lrv_path = Path("clip.lrv")
+    clip.lrv_width, clip.lrv_height = 1280, 720
+    clip.video_source_override = "lrv"
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    s = " ".join(cmd)
+    assert cmd.count("-i") == 3          # clip.path, clip.lrv_path, clip.wav_path
+    assert str(clip.lrv_path) in cmd
+    # video comes from input 1 (the LRV), via filter_complex since it's a non-zero input
+    assert "[1:v:0]" in s
+    assert "-map [v]" in s
+    assert "-c:v copy" not in s
+    # cut to the CLIP's own duration, not the proxy's own (they rarely match exactly)
+    assert "-t" in cmd and cmd[cmd.index("-t") + 1] == f"{clip.duration:.3f}"
+
+
+def test_plan_video_override_lrv_ignored_when_no_lrv_paired():
+    clip = _ok_clip()
+    clip.video_source_override = "lrv"   # no lrv_path set
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    # falls back to Auto — already matches spec, so still stream-copied
+    assert "-c:v copy" in " ".join(cmd)
+    assert cmd.count("-i") == 1
+
+
+def test_plan_video_override_lrv_scales_using_proxys_own_dimensions():
+    clip = _ok_clip()
+    clip.lrv_path = Path("clip.lrv")
+    clip.lrv_width, clip.lrv_height = 1280, 720
+    clip.video_source_override = "lrv"
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    s = " ".join(cmd)
+    assert "pad=3840:2160" in s or "scale=3840:2160" in s
+
+
 def test_plan_no_audio_no_wav_silent_uniform_tracks():
     # No camera, no WAV → silent tracks so the layout matches other clips.
     clip = _ok_clip(with_wav=False, cam_audio="")
@@ -365,6 +680,37 @@ def test_plan_no_audio_no_wav_silent_uniform_tracks():
     assert "0:v:0" in s and "-c:v copy" in s
     assert "anullsrc" in s
     assert "-c:a:0 aac" in s and "-c:a:1 alac" in s   # silent AAC + silent ALAC
+    assert "-sample_fmt:a:1 s32p" in s   # silence-filled ALAC still gets a forced sample format
+
+
+def test_plan_alac_sample_format_is_forced_and_matches_real_and_silent_fills():
+    # Root-caused directly: ffmpeg's ALAC encoder auto-picks a bit depth from
+    # whatever it's fed. A real WAV backup (often 24-in-32-bit source) and the
+    # anullsrc silence filler used for a clip with no WAV default to DIFFERENT
+    # bit depths (24-bit vs 16-bit) — concatenating segments that declare
+    # different ALAC bit depths corrupts the merged track at the seam (confirmed
+    # directly: decoding threw hundreds of "invalid element channel count" /
+    # "invalid zero block size" errors). Every ALAC-coded slot, whether backed by
+    # a real WAV or silence, must force the SAME -sample_fmt so every clip's
+    # segment in a merge declares identical parameters and concatenates cleanly.
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
+
+    with_wav = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
+    s_with_wav = " ".join(with_wav)
+    assert "-c:a:1 alac" in s_with_wav
+    assert "-sample_fmt:a:1 s32p" in s_with_wav
+
+    no_wav = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=False, cam_audio=""),
+                                Path("o.mov"), PF, plan, "crop")
+    s_no_wav = " ".join(no_wav)
+    assert "-c:a:1 alac" in s_no_wav      # silence-filled, but still ALAC for track-layout consistency
+    assert "-sample_fmt:a:1 s32p" in s_no_wav
+
+    # the two clips must declare the IDENTICAL sample format for their ALAC
+    # track, whichever source fed it — that's what keeps a merge's concatenated
+    # WAV-backup track decodable regardless of which clips have a real backup.
+    fmt = lambda s: s.split("-sample_fmt:a:1 ")[1].split()[0]
+    assert fmt(s_with_wav) == fmt(s_no_wav) == "s32p"
 
 
 def test_camera_title_onboard_without_wav():
@@ -376,10 +722,12 @@ def test_camera_title_onboard_without_wav():
     assert "Bluetooth" not in s
 
 
-def test_camera_title_bluetooth_with_wav():
+def test_camera_title_aac_with_wav():
     plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
-    assert "Camera Audio (Bluetooth mic)" in " ".join(cmd)
+    s = " ".join(cmd)
+    assert "Camera Audio (AAC)" in s
+    assert "Bluetooth" not in s
 
 
 def test_plan_preset_matches_camera_mix():
@@ -390,6 +738,37 @@ def test_plan_preset_matches_camera_mix():
     plan2 = OutputPlan.preset("wav", mix_enabled=True, mix_kind="lr",
                               mix_make_default=True, mix_match_levels=False)
     assert plan2.tracks[0].kind == "mix"     # promoted to default
+
+
+def test_clip_sample_defaults_to_software_x264():
+    cmd = build_clip_sample_cmd("ffmpeg", "in.mp4", 2.0, 5.0, "out.mp4")
+    s = " ".join(cmd)
+    assert "-hwaccel" not in s, "no GPU decode unless asked"
+    assert "-c:v libx264 -preset veryfast" in s
+    assert "scale=-2:160" in s
+
+
+def test_clip_sample_fast_uses_ultrafast():
+    cmd = build_clip_sample_cmd("ffmpeg", "in.mp4", 2.0, 2.0, "out.mp4", fast=True)
+    assert "-preset ultrafast" in " ".join(cmd)
+
+
+def test_clip_sample_hw_decode_prepends_hwaccel_before_input():
+    cmd = build_clip_sample_cmd("ffmpeg", "in.mp4", 2.0, 5.0, "out.mp4", hw_decode=True)
+    assert cmd[:4] == ["ffmpeg", "-y", "-hwaccel", "auto"]
+    # -hwaccel must come before the input it applies to
+    assert cmd.index("-hwaccel") < cmd.index("-i")
+
+
+def test_clip_sample_gpu_vendor_swaps_encoder():
+    cmd = build_clip_sample_cmd("ffmpeg", "in.mp4", 2.0, 5.0, "out.mp4", gpu_vendor="nvenc")
+    s = " ".join(cmd)
+    assert "h264_nvenc" in s and "libx264" not in s
+    assert "-pix_fmt nv12" in s
+    # gpu encode overrides the fast (libx264) preset path
+    cmd2 = build_clip_sample_cmd("ffmpeg", "in.mp4", 2.0, 5.0, "out.mp4",
+                                 gpu_vendor="qsv", fast=True)
+    assert "h264_qsv" in " ".join(cmd2) and "ultrafast" not in " ".join(cmd2)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QImage
 
 from widgets.timeline import TimelineBase
+from widgets.audio_lanes import LANE_LABEL_MARGIN
 
 _EDGE_TOL = 10     # px tolerance for grabbing a viewport edge
 _SCRUB_TOL = 8     # px tolerance for grabbing the playhead directly, even inside the viewport
@@ -53,11 +54,28 @@ class OverviewTrackbar(TimelineBase):
         self.setMouseTracking(True)   # so hover sets the cursor even with no button down
         self.setFixedHeight(_HEIGHT)  # room for the thumbnail row + timestamp ruler
 
+    # The Overview sits directly above the Audio tracks section (see
+    # review_tab.py) and is meant to read as one continuous timeline with
+    # it — the video track below lines up with the waveform lanes above, not
+    # start flush at the widget's own left edge while the lanes start ~180px
+    # in. Overriding these two (everything else in TimelineBase/this class
+    # paints relative to them) shifts the whole track right by the audio
+    # lanes' own label-column width.
+    def _track_x(self) -> int:
+        return self._PAD + LANE_LABEL_MARGIN
+
+    def _track_w(self) -> int:
+        return max(1, self.width() - self._track_x() - self._PAD)
+
     def set_duration(self, dur: float):
         super().set_duration(dur)
         if self._view_t1 <= self._view_t0 or self._view_t1 > self._duration:
             self._view_t0, self._view_t1 = 0.0, self._duration
-        self._thumbnails = []   # stale — a new master needs a fresh filmstrip
+        # NB: do NOT clear the filmstrip here. The default (GPU) engine reports
+        # duration ASYNCHRONOUSLY — this runs after _start_thumbnail_strip has
+        # already reserved the slots and the worker has begun filling them, so
+        # clearing would silently drop every arriving tile. A new master is
+        # cleared authoritatively by load_master via set_thumbnail_count(0).
 
     def set_thumbnail_count(self, n: int):
         """Reserve `n` evenly-spaced filmstrip slots (call once duration is
@@ -91,10 +109,22 @@ class OverviewTrackbar(TimelineBase):
     # ── Painting ──────────────────────────────────────────────────────────────
 
     def _paint_extra(self, p: QPainter, pal):
+        self._paint_label(p, pal)
         self._paint_thumbnails(p, pal)
         self._paint_envelope(p, pal)
         self._paint_ruler(p, pal)
         self._paint_viewport(p, pal)
+
+    def _paint_label(self, p: QPainter, pal):
+        """"Video" in the left margin, at the same x as an audio lane's own
+        name label — the visual cue that this row and the ones below are the
+        same timeline, not an unrelated gap."""
+        f = p.font()
+        f.setPixelSize(12)
+        p.setFont(f)
+        p.setPen(QColor(pal.text))
+        p.drawText(QRectF(self._PAD, self._THUMB_Y, LANE_LABEL_MARGIN - self._PAD, self._THUMB_H),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "Video")
 
     def _paint_thumbnails(self, p: QPainter, pal):
         """The filmstrip row: each reserved slot painted edge-to-edge across

@@ -7,7 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from probe import parse_audio_tracks, pix_fmt_info, AudioTrackInfo, parse_chapters, ChapterInfo
+from probe import (parse_audio_tracks, pix_fmt_info, AudioTrackInfo, parse_chapters, ChapterInfo,
+                   parse_video_tracks, VideoTrackInfo)
 
 
 def _raw_streams(streams):
@@ -104,6 +105,39 @@ def test_chapter_info_is_a_plain_dataclass():
     assert c.start == 1.0 and c.end == 2.0 and c.title == "clip"
 
 
+def test_parse_video_tracks_indexes_video_only_streams():
+    raw = _raw_streams([
+        {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080,
+         "r_frame_rate": "30000/1001"},
+        {"codec_type": "audio", "codec_name": "aac"},
+        {"codec_type": "data", "codec_name": "bin_data"},
+        {"codec_type": "video", "codec_name": "hevc", "width": 3840, "height": 2160,
+         "r_frame_rate": "25/1", "tags": {"rotate": "90"}},
+    ])
+    tracks = parse_video_tracks(raw)
+    assert len(tracks) == 2
+    assert [t.video_index for t in tracks] == [0, 1]
+    assert tracks[0].codec == "h264" and (tracks[0].width, tracks[0].height) == (1920, 1080)
+    assert tracks[0].rotation == 0
+    assert tracks[1].codec == "hevc" and tracks[1].rotation == 90
+
+
+def test_parse_video_tracks_handles_no_video_streams():
+    assert parse_video_tracks(_raw_streams([{"codec_type": "audio"}])) == []
+
+
+def test_parse_video_tracks_falls_back_gracefully_on_missing_fields():
+    tracks = parse_video_tracks(_raw_streams([{"codec_type": "video"}]))
+    assert len(tracks) == 1
+    t = tracks[0]
+    assert t.codec == "" and t.width == 0 and t.height == 0 and t.fps == "" and t.rotation == 0
+
+
+def test_video_track_info_is_a_plain_dataclass():
+    t = VideoTrackInfo(video_index=0, codec="h264")
+    assert t.width == 0 and t.rotation == 0
+
+
 if __name__ == "__main__":
     test_parse_audio_tracks_indexes_audio_only_streams()
     test_parse_audio_tracks_handles_no_audio_streams()
@@ -116,4 +150,8 @@ if __name__ == "__main__":
     test_parse_chapters_handles_missing_or_malformed_fields()
     test_parse_chapters_handles_no_chapters_key()
     test_chapter_info_is_a_plain_dataclass()
+    test_parse_video_tracks_indexes_video_only_streams()
+    test_parse_video_tracks_handles_no_video_streams()
+    test_parse_video_tracks_falls_back_gracefully_on_missing_fields()
+    test_video_track_info_is_a_plain_dataclass()
     print("test_probe_tracks: all tests passed")

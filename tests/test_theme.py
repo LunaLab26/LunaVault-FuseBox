@@ -20,10 +20,17 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
-from theme import DARK, LIGHT
+from theme import DARK, LIGHT, FRIENDLY_DARK, FRIENDLY_LIGHT
+
+_ALL_PALETTES = {"DARK": DARK, "LIGHT": LIGHT,
+                 "FRIENDLY_DARK": FRIENDLY_DARK, "FRIENDLY_LIGHT": FRIENDLY_LIGHT}
 
 HEX_RE = re.compile(r"#[0-9A-Fa-f]{3,4}\b|#[0-9A-Fa-f]{6}\b|#[0-9A-Fa-f]{8}\b")
-EXEMPT = {"theme.py", "about_tab.py", "scopes_panel.py"}
+# portable.py is exempt because its hex literals are the CSS of a STANDALONE
+# album.html — a page opened in a browser with no app, so it can't read the Qt
+# Palette and must carry its own self-contained colours (same spirit as the
+# about_tab/scopes exemptions: not app theme tokens).
+EXEMPT = {"theme.py", "about_tab.py", "scopes_panel.py", "portable.py"}
 
 
 def _offenders() -> list[str]:
@@ -43,21 +50,29 @@ def test_no_hardcoded_colours_outside_theme():
 
 
 def test_warn_is_not_accent():
-    assert DARK.warn != DARK.accent, "DARK.warn must not equal DARK.accent"
-    assert LIGHT.warn != LIGHT.accent, "LIGHT.warn must not equal LIGHT.accent"
+    for name, p in _ALL_PALETTES.items():
+        assert p.warn != p.accent, f"{name}.warn must not equal {name}.accent"
 
 
-def test_both_palettes_define_every_field():
+def test_all_palettes_define_every_field():
     from dataclasses import fields
     for f in fields(DARK):
-        if f.name == "is_light":
+        if f.name in ("is_light", "name"):
             continue
-        assert getattr(DARK, f.name), f"DARK.{f.name} is falsy"
-        assert getattr(LIGHT, f.name), f"LIGHT.{f.name} is falsy"
+        for name, p in _ALL_PALETTES.items():
+            assert getattr(p, f.name), f"{name}.{f.name} is falsy"
+
+
+def test_friendly_and_legacy_are_actually_different():
+    # the whole point of mode-aware theming: friendly must not equal legacy, or
+    # the Legacy toggle shows no visual "before".
+    assert FRIENDLY_DARK.bg != DARK.bg or FRIENDLY_DARK.accent != DARK.accent
+    assert FRIENDLY_LIGHT.bg != LIGHT.bg or FRIENDLY_LIGHT.accent != LIGHT.accent
 
 
 if __name__ == "__main__":
     test_no_hardcoded_colours_outside_theme()
     test_warn_is_not_accent()
-    test_both_palettes_define_every_field()
+    test_all_palettes_define_every_field()
+    test_friendly_and_legacy_are_actually_different()
     print("test_theme: all tests passed")

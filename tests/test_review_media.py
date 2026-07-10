@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.review_media import (
     build_frame_extract_cmd, build_snapshot_cmd, snapshot_filename,
-    mix_cache_key, build_review_mix_cmd, _split_seek,
+    mix_cache_key, build_review_mix_cmd, _split_seek, build_thumbnail_strip_cmd,
+    build_proxy_cmd, proxy_cache_path,
 )
 
 
@@ -95,6 +96,73 @@ def test_build_review_mix_cmd_rejects_empty_selection():
     raise AssertionError("expected ValueError for an empty track selection")
 
 
+def test_thumbnail_strip_cmd_skips_to_nearest_keyframe():
+    # Measured directly on a real 4K 10-bit HEVC clip: without -skip_frame nokey
+    # a single-frame extract took 1.1s-5.2s depending on position (worse later
+    # in the file); with it, every position took ~0.5s flat. A thumbnail tile
+    # is a rough filmstrip marker, not a precision reading, so trading a
+    # possible one-GOP timestamp drift for a ~10x speedup is the right call.
+    cmd = build_thumbnail_strip_cmd("ffmpeg", "master.mov", 42.0, "out.jpg", width=160)
+    assert "-skip_frame" in cmd and cmd[cmd.index("-skip_frame") + 1] == "nokey"
+    assert cmd.index("-skip_frame") < cmd.index("-i")   # must apply to the input, before -i
+    assert "-frames:v" in cmd and cmd[cmd.index("-frames:v") + 1] == "1"
+    assert cmd[-1] == "out.jpg"
+
+
+def test_thumbnail_strip_cmd_forces_full_range_for_the_mjpeg_encoder():
+    # Real bug, found against actual camera footage: ffmpeg's mjpeg encoder
+    # REJECTS standard "tv"/limited-range yuv420p ("Non full-range YUV is
+    # non-standard") — which is what virtually every real clip is — failing
+    # silently under -v quiet (returncode -22, empty stderr, zero thumbnails
+    # ever produced). format=yuvj420p forces full-range before the encode.
+    cmd = build_thumbnail_strip_cmd("ffmpeg", "master.mov", 3.0, "out.jpg", width=160)
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "format=yuvj420p" in vf
+
+
+def test_build_proxy_cmd_preserves_audio_track_order():
+    # -map 0:v:0 then -map 0:a (all audio, in source order) — must match
+    # probe.probe_audio_tracks' audio_index numbering so
+    # PlaybackEngine.set_audio_single(track_idx) behaves the same on the
+    # proxy as on the master.
+    cmd = build_proxy_cmd("ffmpeg", "master.mov", "proxy.mp4", height=480)
+    assert cmd.count("-map") == 2
+    assert cmd[cmd.index("-map") + 1] == "0:v:0"
+    assert cmd[cmd.index("-map", cmd.index("-map") + 1) + 1] == "0:a?"
+    assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert "-pix_fmt" in cmd and cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert cmd[-1] == "proxy.mp4"
+
+
+def test_build_proxy_cmd_scale_never_upsamples():
+    cmd = build_proxy_cmd("ffmpeg", "master.mov", "proxy.mp4", height=480)
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "min(480" in vf and "ih)" in vf
+
+
+def test_proxy_cache_path_is_deterministic_for_the_same_file():
+    with tempfile.TemporaryDirectory() as td:
+        master = Path(td) / "master.mov"
+        master.write_bytes(b"x" * 1000)
+        cache_dir = Path(td) / "cache"
+        p1 = proxy_cache_path(cache_dir, str(master))
+        p2 = proxy_cache_path(cache_dir, str(master))
+        assert p1 == p2
+        assert p1.parent == cache_dir
+        assert p1.suffix == ".mp4"
+
+
+def test_proxy_cache_path_changes_when_the_file_changes():
+    with tempfile.TemporaryDirectory() as td:
+        master = Path(td) / "master.mov"
+        cache_dir = Path(td) / "cache"
+        master.write_bytes(b"x" * 1000)
+        before = proxy_cache_path(cache_dir, str(master))
+        master.write_bytes(b"y" * 2000)   # different size -> different signature
+        after = proxy_cache_path(cache_dir, str(master))
+        assert before != after
+
+
 def _run_all():
     test_split_seek_sums_to_requested_timestamp()
     test_split_seek_handles_timestamps_shorter_than_the_lead_in()
@@ -107,6 +175,12 @@ def _run_all():
     test_build_review_mix_cmd_single_track_still_reencodes_uniformly()
     test_build_review_mix_cmd_multi_track_uses_amix()
     test_build_review_mix_cmd_rejects_empty_selection()
+    test_thumbnail_strip_cmd_skips_to_nearest_keyframe()
+    test_thumbnail_strip_cmd_forces_full_range_for_the_mjpeg_encoder()
+    test_build_proxy_cmd_preserves_audio_track_order()
+    test_build_proxy_cmd_scale_never_upsamples()
+    test_proxy_cache_path_is_deterministic_for_the_same_file()
+    test_proxy_cache_path_changes_when_the_file_changes()
     print("test_review_media: all tests passed")
 
 

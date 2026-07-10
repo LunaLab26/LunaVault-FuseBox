@@ -22,6 +22,7 @@ import theme
 
 _MIN_ZOOM_PCT = 10.0
 _MAX_ZOOM_PCT = 800.0
+_PREVIEW_ASPECT = 16.0 / 9.0   # the preview area itself is always letterboxed to this
 
 
 class _SnapshotFlashOverlay(QWidget):
@@ -132,11 +133,12 @@ class ZoomableVideoView(QWidget):
     def effective_zoom(self) -> float:
         if self._image is None or self._image.isNull():
             return 1.0
+        aw, ah = self._active_size()
         if self._zoom_mode == "fit":
             iw, ih = self._image.width(), self._image.height()
-            if iw <= 0 or ih <= 0 or self.width() <= 0 or self.height() <= 0:
+            if iw <= 0 or ih <= 0 or aw <= 0 or ah <= 0:
                 return 1.0
-            return min(self.width() / iw, self.height() / ih)
+            return min(aw / iw, ah / ih)
         if self._zoom_mode == "1:1":
             return 1.0
         return self._zoom_pct / 100.0
@@ -144,12 +146,43 @@ class ZoomableVideoView(QWidget):
     def flash_snapshot(self):
         self._flash.play()
 
+    def zoom_mode(self) -> str:
+        return self._zoom_mode
+
+    # ── Aspect-locked active area ─────────────────────────────────────────────
+    #
+    # The preview always letterboxes to 16:9 within whatever rect the layout
+    # actually gives this widget — matching real footage's own aspect rather
+    # than stretching/cropping to fill an arbitrary panel shape. Zoom, pan,
+    # and painting all operate relative to this "active rect", not the raw
+    # widget rect.
+
+    def _active_size(self) -> tuple:
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return w, h
+        if w / h > _PREVIEW_ASPECT:
+            return max(1, round(h * _PREVIEW_ASPECT)), h
+        return w, max(1, round(w / _PREVIEW_ASPECT))
+
+    def _active_rect(self) -> QRectF:
+        aw, ah = self._active_size()
+        x = (self.width() - aw) / 2
+        y = (self.height() - ah) / 2
+        return QRectF(x, y, aw, ah)
+
     # ── Painting ──────────────────────────────────────────────────────────────
 
     def paintEvent(self, event):
         pal = theme.active_palette()
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(pal.bg))
+        active = self._active_rect()
+        if active.width() < self.width() or active.height() < self.height():
+            # Dead space outside the 16:9 box reads as "not part of the player",
+            # not just more background — a subtly darker letterbox tone.
+            p.fillRect(self.rect(), QColor(pal.input_dk))
+            p.fillRect(active, QColor(pal.bg))
         if self._image is None or self._image.isNull():
             p.end()
             return
@@ -168,8 +201,8 @@ class ZoomableVideoView(QWidget):
                                             Qt.AspectRatioMode.IgnoreAspectRatio, mode)
             self._cached_pixmap_key = key
 
-        cx = (self.width() - target_w) / 2 + self._pan.x()
-        cy = (self.height() - target_h) / 2 + self._pan.y()
+        cx = active.x() + (active.width() - target_w) / 2 + self._pan.x()
+        cy = active.y() + (active.height() - target_h) / 2 + self._pan.y()
         p.drawPixmap(int(cx), int(cy), self._cached_pixmap)
         p.end()
 
@@ -209,14 +242,16 @@ class ZoomableVideoView(QWidget):
         if abs(new_zoom - old_zoom) < 1e-6:
             return
         iw, ih = self._image.width(), self._image.height()
-        cx = (self.width() - iw * old_zoom) / 2 + self._pan.x()
-        cy = (self.height() - ih * old_zoom) / 2 + self._pan.y()
+        active = self._active_rect()
+        cx = active.x() + (active.width() - iw * old_zoom) / 2 + self._pan.x()
+        cy = active.y() + (active.height() - ih * old_zoom) / 2 + self._pan.y()
         img_x = (pos.x() - cx) / old_zoom
         img_y = (pos.y() - cy) / old_zoom
         self._zoom_mode = "percent"
         self._zoom_pct = new_pct
-        self._pan = QPointF(pos.x() - img_x * new_zoom - (self.width() - iw * new_zoom) / 2,
-                            pos.y() - img_y * new_zoom - (self.height() - ih * new_zoom) / 2)
+        self._pan = QPointF(
+            pos.x() - img_x * new_zoom - active.x() - (active.width() - iw * new_zoom) / 2,
+            pos.y() - img_y * new_zoom - active.y() - (active.height() - ih * new_zoom) / 2)
         self._cached_pixmap = None
         self.update()
         self.zoom_changed.emit(new_zoom)

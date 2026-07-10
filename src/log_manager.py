@@ -10,10 +10,113 @@ from ffmpeg_runner import get_app_dir
 
 
 _LOG_FILE = "export_log.json"
+_FAILURE_LOG_DIR = "failure_logs"
 
 
 def _log_path() -> Path:
     return get_app_dir() / _LOG_FILE
+
+
+def _fmt_dur(secs: float) -> str:
+    if secs <= 0:
+        return "—"
+    h, r = divmod(int(secs), 3600)
+    m, s = divmod(r, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def render_entry_text(entry: dict) -> str:
+    """Human-readable rendering of one log entry — shared by the Log tab's detail
+    pane and both the manual Export button and the auto-save-on-failure file, so
+    all three always show exactly the same thing."""
+    lines = []
+    t = entry.get("type", "?")
+    lines.append(f"{'─'*60}")
+    lines.append(f"  {t.upper()} EXPORT — {entry.get('timestamp','')}")
+    lines.append(f"{'─'*60}")
+    lines.append(f"  Output  : {entry.get('output','—')}")
+    lines.append(f"  Source  : {entry.get('source', entry.get('source_folder','—'))}")
+    lines.append(f"  Size    : {entry.get('file_size_mb', 0):.2f} MB")
+    lines.append(f"  Status  : {'OK' if entry.get('success') else 'FAILED — ' + entry.get('message','')}")
+
+    if t == "whatsapp":
+        lines.append(f"  Start   : {entry.get('start','—')}")
+        lines.append(f"  Duration: {entry.get('duration','—')}")
+        lines.append(f"  Grade   : {entry.get('grade','None')}")
+
+    elif t == "merge":
+        lines.append(f"  Folder  : {entry.get('source_folder','—')}")
+        lines.append(f"  Clips   : {entry.get('clip_count',0)}    Total: {_fmt_dur(entry.get('total_duration_secs',0))}")
+        mix = entry.get("mix", {}) or {}
+        if mix.get("mix_enabled") or mix.get("enabled"):
+            lines.append(f"  Mix     : on  ·  {mix.get('kind','lr')}"
+                         + ("  ·  level-matched" if mix.get('match_levels') else ""))
+        if mix.get("include_video") is False:
+            lines.append("  Video   : excluded from output")
+        lines.append("")
+        lines.append("  Per-clip arrangement and sync:")
+        clips = entry.get("clips", [])
+        if not clips:
+            lines.append("    —")
+        for c in clips:
+            name = c.get("name", "?")
+            arr  = c.get("arrangement") or {}
+            lines.append("")
+            head = f"  • {name}"
+            if arr.get("video"):
+                head += f"   [video: {arr['video']}]"
+            lines.append(head)
+
+            tracks = arr.get("tracks") or []
+            for tk in tracks:
+                role = "  (default)" if tk.get("role") == "primary" else ""
+                loss = "lossless" if tk.get("lossless") else "lossy"
+                lines.append(f"      - {tk.get('label','?')}  [{tk.get('codec','')} · {loss}]{role}")
+
+            for note in (arr.get("decisions") or []):
+                lines.append(f"        → {note}")
+
+            if c.get("has_wav") and not arr.get("is_slowmo"):
+                off = c.get("audio_offset_ms")
+                drift = c.get("drift_ms_per_min")
+                conf = c.get("confidence_ms")
+                pol = c.get("polarity_inverted")
+                bits = []
+                if off is not None:   bits.append(f"offset {off:+.1f} ms")
+                if drift is not None: bits.append(f"drift {drift:+.1f} ms/min")
+                if conf is not None:  bits.append(f"±{conf:.1f} ms")
+                if pol:               bits.append("polarity flipped")
+                if bits:
+                    lines.append(f"        sync: {'  ·  '.join(bits)}")
+            elif arr.get("is_slowmo"):
+                f = arr.get("slowmo_factor")
+                lines.append(f"        sync: slow-motion {f:.1f}× — WAV stretched, pitch-corrected"
+                             if f else "        sync: slow-motion — WAV stretched")
+
+    return "\n".join(lines)
+
+
+def _auto_save_enabled() -> bool:
+    try:
+        from settings import Settings
+        return bool(Settings().get("auto_save_log_on_failure", True))
+    except Exception:
+        return False
+
+
+def _write_failure_txt(entry: dict) -> Optional[Path]:
+    """Best-effort: dump a failed entry to its own timestamped .txt file, so a
+    crash/failure log survives even if the user never opens the Log tab. Never
+    raises — a failure to write this diagnostic must not mask the real failure."""
+    try:
+        d = get_app_dir() / _FAILURE_LOG_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = d / f"{entry.get('type','export')}_failed_{ts}.txt"
+        out.write_text(render_entry_text(entry), encoding="utf-8")
+        return out
+    except Exception:
+        return None
 
 
 def load_log() -> list:
@@ -46,6 +149,12 @@ def _append(entry: dict):
         entries = entries[-500:]
     with open(p, "w", encoding="utf-8") as f:
         json.dump(entries, f, indent=2, ensure_ascii=False)
+
+    # Every entry lands in export_log.json regardless; a FAILED one additionally
+    # gets its own standalone timestamped .txt so a diagnostic survives even if
+    # the user never opens the Log tab — opt-out via the Log tab's checkbox.
+    if not entry.get("success", True) and _auto_save_enabled():
+        _write_failure_txt(entry)
 
 
 def log_whatsapp(

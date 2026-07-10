@@ -25,6 +25,28 @@ DEFAULTS = {
     "theme_mode": "system",
     "last_review_source": "",
     "review_software_decode": False,
+    "auto_save_log_on_failure": True,
+    "camera_labels": {},   # {camera_id: user-given label}, remembered across folder loads
+    "extract_output_format": "native",   # "native" | "mov" | "mp4" — Extract tab recovery container
+    "ui_mode": "friendly",   # "friendly" (Memories/Add + classic tabs) | "legacy" (pre-overhaul
+                             # tab set only) — switched via a hidden toggle (triple-click the logo)
+    # Developer options — experimental, off by default, exposed only via the hidden
+    # Developer panel (triple-click the logo, next to the Legacy toggle). Each is an
+    # independent switch so a change that causes trouble can be rolled back alone.
+    # These currently tune how the per-clip preview sample is generated.
+    "dev_preview_gpu_encode": False,   # encode the preview with a detected GPU encoder (NVENC/QSV/AMF)
+    "dev_preview_hw_decode": False,    # decode the source with GPU hardware acceleration (-hwaccel auto)
+    "dev_preview_fast_sample": False,  # shorter, ultrafast-preset sample for a near-instant preview
+    "dev_preview_height": 160,         # preview proxy resolution (scale height): 160|240|360|480|720
+    "dev_preview_window_size": "medium",  # preview popup size: small|medium|large
+    "dev_preview_aspect_mode": "fit",     # preview video scaling: fit|stretch|crop
+    "dev_preview_loop": True,             # loop the preview sample
+    "dev_preview_speed": 1.0,             # preview playback speed: 0.5 | 1.0 | 2.0
+    # Review-tab playback experiments
+    "dev_review_frame_poll_ms": 300,   # software-decode picture refresh interval: 150 | 300 | 500
+    "dev_review_allow_risky_hw_decode": False,  # let the GPU decode 4K 10-bit HEVC (normally forced to software)
+    "dev_review_thumb_count": 24,      # overview filmstrip tile count: 12 | 24 | 48
+    "dev_review_thumb_width": 160,     # overview filmstrip tile width px: 120 | 160 | 240
 }
 
 

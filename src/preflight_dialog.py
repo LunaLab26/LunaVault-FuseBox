@@ -3,7 +3,16 @@
 Shows, per clip: the video action, the audio tracks that will be created (with
 codec + lossless flag), and the reasoning (missing camera audio, slow-motion
 stretch, etc.), plus the total anticipated output size and a time estimate.
+
+When a `Story` is supplied (see show_me.py), a static "big picture" diagram —
+the same film-strip/tape-reel visual language as the animated "Show me"
+button, frozen at its FINAL frame (everything already landed on the reel/
+shelves/vault) rather than played — sits above the numeric per-clip cards, so
+the shape of the whole merge (what stream-copies, what converts, where each
+audio source ends up) is visible at a glance before reading the details.
 """
+
+from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -12,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.plan_report import MergeReport
+from show_me import Story, ShowMeCanvas
 import theme
 
 
@@ -37,10 +47,11 @@ def _fmt_time(secs: float) -> str:
 class PreflightDialog(QDialog):
     start_requested = Signal()
 
-    def __init__(self, report: MergeReport, parent=None, free_bytes=None, need_bytes=0):
+    def __init__(self, report: MergeReport, parent=None, free_bytes=None, need_bytes=0,
+                story: Optional[Story] = None):
         super().__init__(parent)
         self.setWindowTitle("Pre-flight — what this merge will do")
-        self.setMinimumSize(560, 480)
+        self.setMinimumSize(700, 480) if story is not None else self.setMinimumSize(560, 480)
         self._p = theme.active_palette()
         p = self._p
         self._free_bytes = free_bytes
@@ -86,6 +97,28 @@ class PreflightDialog(QDialog):
             )
             disk.setStyleSheet(f"color:{p.danger if low else p.text_dim}; font-size:11px;")
             root.addWidget(disk)
+
+        # ── Big-picture diagram: film strips / tape reels, frozen at the END
+        # of the "Show me" animation — everything already landed on the reel,
+        # its shelves, and the vault, so the whole shape of the merge reads
+        # at a glance without waiting through the animation (that's what the
+        # separate "✨ Show me" button is for). ──────────────────────────────
+        if story is not None:
+            diagram_frame = QFrame()
+            diagram_frame.setStyleSheet(
+                f"QFrame {{ background:{p.surface2}; border:1px solid {p.border}; border-radius:8px; }}")
+            dl = QVBoxLayout(diagram_frame)
+            dl.setContentsMargins(10, 8, 10, 4)
+            dl.setSpacing(4)
+            dtitle = QLabel("HOW YOUR CLIPS BECOME THE MASTER")
+            dtitle.setStyleSheet(f"color:{p.text_mute}; font-size:10px; font-weight:bold; "
+                                 "letter-spacing:1px; border:none;")
+            dl.addWidget(dtitle)
+            self._diagram = ShowMeCanvas(story)
+            self._diagram.setMinimumSize(640, 320)
+            self._diagram.set_time(self._diagram.total_duration)   # static final frame, no timer
+            dl.addWidget(self._diagram)
+            root.addWidget(diagram_frame)
 
         # ── Per-clip list ────────────────────────────────────────────────────
         scroll = QScrollArea(); scroll.setWidgetResizable(True)

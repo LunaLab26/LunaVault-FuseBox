@@ -8,6 +8,7 @@ core/ffmpeg_cmd.py's split between building commands here and running them
 in a Qt worker (src/review_workers.py).
 """
 
+import hashlib
 from pathlib import Path
 
 # Seconds of coarse (keyframe-nearest) lead-in before the accurate seek that
@@ -77,12 +78,28 @@ def build_thumbnail_strip_cmd(ff: str, path: str, secs: float, out_jpg: str,
     """A small JPEG at `secs`, for the Review tab's overview thumbnail
     filmstrip. Unlike `build_frame_extract_cmd`/`build_snapshot_cmd`, this
     favours SPEED over frame-exactness — a filmstrip tile is a rough visual
-    marker, not a precision reading, and a strip needs many of these — so a
-    single coarse `-ss` before `-i` (no fine-seek second pass) is enough."""
+    marker, not a precision reading, and a strip needs many of these.
+
+    `-skip_frame nokey` tells the decoder to skip straight to the nearest
+    keyframe rather than decode every P-frame in between to reach the exact
+    target — on 4K 10-bit HEVC this is the difference between ~0.5s and
+    several (increasingly, the later in the file) seconds per tile, measured
+    directly: a single-frame extract without it took 1.1s at 0.2s in, 5.2s at
+    9.5s in on a 10s 4K/10-bit clip; with it, every position took ~0.5s flat.
+    A tile can land up to one GOP away from the requested timestamp — a
+    non-issue for a rough filmstrip preview.
+
+    `format=yuvj420p` in the filter chain forces full-range YUV before the
+    MJPEG encode: virtually all camera footage is standard "tv"/limited-range
+    yuv420p, which ffmpeg's mjpeg encoder REJECTS outright ("Non full-range
+    YUV is non-standard") unless told to relax strict compliance — without
+    this, every real-camera clip silently produced zero thumbnail tiles
+    (returncode -22, and `-v quiet` swallows the error text), while only the
+    synthetic full-range test sources used in development happened to work."""
     return [ff, "-y", "-v", "quiet",
-            "-ss", f"{max(0.0, secs):.3f}", "-i", str(path),
+            "-ss", f"{max(0.0, secs):.3f}", "-skip_frame", "nokey", "-i", str(path),
             "-frames:v", "1", "-an", "-q:v", "6",
-            "-vf", f"scale={width}:-2",
+            "-vf", f"scale={width}:-2,format=yuvj420p",
             str(out_jpg)]
 
 
@@ -107,3 +124,46 @@ def build_review_mix_cmd(ff: str, path: str, track_indices, out_path: str) -> li
     cmd += ["-filter_complex", filt, "-map", "[mix]",
             "-c:a", "aac", "-b:a", "256k", str(out_path)]
     return cmd
+
+
+def build_proxy_cmd(ff: str, path: str, out_path: str, height: int = 480) -> list:
+    """A small, hardware-decode-friendly proxy of the WHOLE master: plain
+    8-bit H.264 (High profile, yuv420p) scaled down to `height`, "veryfast"
+    preset — fast enough to build as a one-time background job per master,
+    and light enough that any GPU (or even software) decodes it instantly,
+    unlike the source's own resolution/codec/bit-depth. `scale=-2:'min(h,
+    ih)'` never upsamples a source that's already smaller than `height`.
+
+    `-map 0:v:0 -map 0:a` preserves the master's own audio-track ORDER
+    (matching `probe.probe_audio_tracks`' `audio_index` numbering), so
+    `PlaybackEngine.set_audio_single(track_idx)` picks the same track on the
+    proxy as it would on the master. Audio is re-encoded to AAC (not
+    copied) rather than preserving the source codec (which may be ALAC) —
+    this is a scrub/playback convenience proxy, not an archival copy, and a
+    single uniform codec keeps track switching predictable.
+    """
+    return [ff, "-y", "-v", "error", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-vf", f"scale=-2:min({height}\\,ih)",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(out_path)]
+
+
+def proxy_cache_path(cache_dir: Path, master_path: str, height: int = 480) -> Path:
+    """Deterministic cache path for a master's fast-preview proxy, keyed on
+    the resolved path + size + mtime + target height — so a file replaced
+    at the same path (a re-merge, say) gets a fresh proxy instead of
+    silently reusing a stale one, and switching the target height doesn't
+    collide with a previous proxy at the same name."""
+    p = Path(master_path)
+    try:
+        st = p.stat()
+        sig = f"{st.st_size}_{int(st.st_mtime)}"
+    except OSError:
+        sig = "0_0"
+    key = f"{p.resolve()}|{sig}|{height}"
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    return Path(cache_dir) / f"{p.stem}_{h}_{height}p.mp4"

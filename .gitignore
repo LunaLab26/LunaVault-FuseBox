@@ -25,6 +25,9 @@ env/
 export_log.json
 settings.json
 crash.log
+catalog.json
+/covers/
+/failure_logs/
 
 # ── Diagnostic spike output (contains local file paths) ──────────
 /tools/spike_results.txt

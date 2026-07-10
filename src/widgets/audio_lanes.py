@@ -17,6 +17,17 @@ from PySide6.QtWidgets import (
 
 import theme
 
+# Layout constants for the label column (checkbox + name/codec text) that
+# precedes every lane's waveform canvas. Exported so OverviewTrackbar (see
+# widgets/trackbar.py) can offset its own track by the same amount — the
+# Review tab's Overview timeline is meant to line up with these lanes'
+# waveforms, not start flush at the widget edge while the lanes start ~180px
+# in.
+_CHECKBOX_W = 20
+_INFO_W = 140
+_LANE_SPACING = 10
+LANE_LABEL_MARGIN = _CHECKBOX_W + _LANE_SPACING + _INFO_W + _LANE_SPACING
+
 
 class _LaneCanvas(QWidget):
     def __init__(self, parent=None):
@@ -85,6 +96,7 @@ class _AudioLane(QWidget):
 
         self._checkbox = QCheckBox()
         self._checkbox.setChecked(True)
+        self._checkbox.setFixedWidth(_CHECKBOX_W)   # deterministic width — see LANE_LABEL_MARGIN
         self._checkbox.toggled.connect(lambda c: self.toggled.emit(self.audio_index, c))
 
         self._label = QLabel(label)
@@ -98,11 +110,11 @@ class _AudioLane(QWidget):
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(_LANE_SPACING)
         lay.addWidget(self._checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
         info_widget = QWidget()
         info_widget.setLayout(info)
-        info_widget.setFixedWidth(140)
+        info_widget.setFixedWidth(_INFO_W)
         lay.addWidget(info_widget)
         lay.addWidget(self._canvas, 1)
 

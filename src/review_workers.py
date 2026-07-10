@@ -30,9 +30,10 @@ from core.binaries import no_window
 from core.audio_peaks import build_pcm_extract_cmd, pyramid_from_stream
 from core.review_media import (
     build_frame_extract_cmd, build_snapshot_cmd, build_review_mix_cmd,
-    build_thumbnail_strip_cmd,
+    build_thumbnail_strip_cmd, build_proxy_cmd,
 )
 from core.spectrogram import spectrogram, to_rgb
+from core.manifest import read_manifest
 from probe import probe, probe_audio_tracks, probe_chapters
 
 
@@ -80,10 +81,16 @@ def _run_cancelable(worker, cmd: list, timeout: float) -> tuple:
 # ── Track scan ──────────────────────────────────────────────────────────────
 
 class TrackScanWorker(QThread):
-    """Probe a master's video stream, every audio track, and its chapters
+    """Probe a master's video stream, every audio track, its chapters
     (masters carry per-clip chapters written at merge time — the Review
-    tab's prev/next transport jumps to these)."""
-    tracks_ready = Signal(object, list, list)   # StreamInfo, list[AudioTrackInfo], list[ChapterInfo]
+    tab's prev/next transport jumps to these), and its provenance manifest
+    if one exists — the manifest's per-clip `archival_track` is what lets
+    the Review tab offer "view the individual clip originals" (see
+    core.manifest.read_manifest: embedded copy first, sidecar fallback;
+    None for a master that was built without Archival master, or wasn't
+    built by this app at all)."""
+    tracks_ready = Signal(object, list, list, object)   # StreamInfo, list[AudioTrackInfo],
+                                                         # list[ChapterInfo], Optional[Manifest]
 
     def __init__(self, ffprobe_bin: str, path: str, parent=None):
         super().__init__(parent)
@@ -94,7 +101,8 @@ class TrackScanWorker(QThread):
         video_info = probe(self._ffprobe, self._path)
         audio_tracks = probe_audio_tracks(self._ffprobe, self._path)
         chapters = probe_chapters(self._ffprobe, self._path)
-        self.tracks_ready.emit(video_info, audio_tracks, chapters)
+        manifest = read_manifest(self._ffprobe, self._path)
+        self.tracks_ready.emit(video_info, audio_tracks, chapters, manifest)
 
 
 # ── Peak pyramids (one worker, tracks processed serially) ───────────────────
@@ -390,3 +398,65 @@ class ThumbnailStripWorker(QThread):
                 img = QImage(str(out))
                 if not img.isNull():
                     self.thumbnail_ready.emit(i, img)
+
+
+# ── Fast-preview proxy ─────────────────────────────────────────────────────
+
+class ProxyRenderWorker(QThread):
+    """Background-render a small, hardware-decode-friendly 480p proxy of the
+    whole master (see core.review_media.build_proxy_cmd) — a one-time cost
+    per master; the caller (ReviewTab) picks a cache path keyed on the
+    master's identity, so a repeat load of the same file is a no-op here
+    just like MixRenderWorker's cache-hit skip."""
+    proxy_ready = Signal(str, str)   # master_path, proxy_path
+    error       = Signal(str, str)   # master_path, message
+
+    def __init__(self, ffmpeg_bin: str, master_path: str, out_path: str,
+                height: int = 480, parent=None):
+        super().__init__(parent)
+        self._ffmpeg = ffmpeg_bin
+        self._master_path = str(master_path)
+        self._out_path = str(out_path)
+        self._height = height
+        self._cancelled = False
+        self._proc: Optional[subprocess.Popen] = None
+
+    def cancel(self):
+        self._cancelled = True
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    def run(self):
+        if self._cancelled:
+            return
+        if Path(self._out_path).exists():
+            self.proxy_ready.emit(self._master_path, self._out_path)
+            return
+        Path(self._out_path).parent.mkdir(parents=True, exist_ok=True)
+        cmd = build_proxy_cmd(self._ffmpeg, self._master_path, self._out_path,
+                              height=self._height)
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE, **no_window())
+            _, stderr = self._proc.communicate()
+        except Exception as e:
+            self.error.emit(self._master_path, str(e))
+            return
+        returncode = self._proc.returncode
+        self._proc = None
+        if self._cancelled:
+            # A cancelled render (master swapped mid-flight) leaves no half-built
+            # proxy behind to be mistaken for a complete one later.
+            try:
+                Path(self._out_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            return
+        if returncode != 0 or not Path(self._out_path).exists():
+            msg = stderr.decode(errors="ignore")[-200:] if stderr else "proxy render failed"
+            self.error.emit(self._master_path, msg)
+            return
+        self.proxy_ready.emit(self._master_path, self._out_path)

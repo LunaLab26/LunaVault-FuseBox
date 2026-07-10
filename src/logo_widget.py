@@ -1,8 +1,9 @@
 """logo_widget.py — theme-aware LunaVault logo (swaps light/dark SVG)."""
 
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent, Signal
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import QHBoxLayout, QWidget
 
@@ -60,3 +61,41 @@ def make_icon_widget(height: int = 30) -> QWidget:
         svg.setStyleSheet("background:transparent;")
         lay.addWidget(svg, 0, Qt.AlignmentFlag.AlignVCenter)
     return container
+
+
+class TripleClickArea(QWidget):
+    """Wraps a widget and emits `tripleClicked` on three quick clicks anywhere on
+    it — used to reveal a hidden control (the legacy/friendly mode toggle)
+    without adding any visible affordance. An event filter is installed on
+    `child` ONLY, not its descendants: Qt bubbles an unhandled mouse press up
+    from a non-interactive descendant (e.g. the SVG icon here, which has no
+    click handling of its own and so ignores the event) to its parent — filtering
+    both would double-count the same physical click (confirmed directly: a
+    single press on the SVG fired the filter twice, once for the SVG and once
+    for the bubbled copy on the container). This wrapper is only meant for
+    non-interactive content like an icon; a genuinely interactive child could
+    consume the event before it bubbles here."""
+    tripleClicked = Signal()
+
+    _WINDOW_S = 0.8   # 3 clicks must land within this span to count as "triple"
+
+    def __init__(self, child: QWidget):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(child)
+        self._times: list = []
+        child.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            self._register_click()
+        return super().eventFilter(obj, event)
+
+    def _register_click(self):
+        now = time.monotonic()
+        self._times = [t for t in self._times if now - t < self._WINDOW_S] + [now]
+        if len(self._times) >= 3:
+            self._times = []
+            self.tripleClicked.emit()

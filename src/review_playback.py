@@ -48,8 +48,18 @@ from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
 
 from ffmpeg_runner import FramePreviewWorker, get_ffmpeg, get_app_dir
-from probe import probe
+from probe import probe, pix_fmt_info
 from thread_utils import settle
+
+# 4K (or larger) + 10-bit + HEVC — confirmed twice this session against real
+# footage to break QtPlaybackEngine's native hardware decode: once as a clean
+# GPU-driver TDR crash (see the module docstring above), and again as a
+# ~14 GB memory blow-up in QVideoSink's frame delivery that made the whole
+# system unresponsive enough to drop an active remote-desktop session. Same
+# root content class both times, on two different real files.
+_RISKY_MIN_PIXELS = 3840 * 2160
+_RISKY_MIN_BIT_DEPTH = 10
+_RISKY_CODECS = {"hevc", "h265"}
 
 # Resync the mix-audio player against the video player's clock at this
 # interval, if they've drifted apart by more than the threshold.
@@ -92,6 +102,15 @@ class PlaybackEngine(QObject):
         raise NotImplementedError
 
     def set_audio_mix_file(self, path: str):
+        raise NotImplementedError
+
+    def set_video_track(self, track_idx: int) -> bool:
+        """Switch which VIDEO STREAM plays — 0 is always the baseline; a
+        master with archival tracks (see core.manifest.ClipEntry.archival_track)
+        has one more per odd-spec original/group, letting the Review tab
+        play those individual originals back directly. Unlike
+        set_audio_single, both engines support this (Hybrid's own
+        ffmpeg-based frame extraction just needs the stream index)."""
         raise NotImplementedError
 
     def current_position(self) -> float:
@@ -198,6 +217,10 @@ class QtPlaybackEngine(PlaybackEngine):
         label = self._track_label(track_idx)
         self.audio_mode_changed.emit(f"Playing: {label}" if ok else "Playing: (track unavailable)")
         return ok
+
+    def set_video_track(self, track_idx: int) -> bool:
+        self._player.setActiveVideoTrack(track_idx)
+        return self._player.activeVideoTrack() == track_idx
 
     def set_audio_mix_file(self, path: str):
         """Play a pre-rendered mix (from review_workers.MixRenderWorker),
@@ -350,8 +373,9 @@ class HybridPlaybackEngine(PlaybackEngine):
     _FRAME_POLL_MS = 300
     _POSITION_POLL_MS = 100
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, frame_poll_ms: int = _FRAME_POLL_MS):
         super().__init__(parent)
+        self._frame_poll_ms = int(frame_poll_ms) if frame_poll_ms else self._FRAME_POLL_MS
         self._path = ""
         self._tracks: list = []
         self._fps = 29.97
@@ -361,6 +385,7 @@ class HybridPlaybackEngine(PlaybackEngine):
         self._has_audio = False
         self._play_started_wall = 0.0
         self._play_started_pos = 0.0
+        self._video_track = 0   # 0-based ffmpeg video-stream index — see set_video_track
 
         self._audio_player = QMediaPlayer(self)
         self._audio_out = QAudioOutput(self)
@@ -373,7 +398,7 @@ class HybridPlaybackEngine(PlaybackEngine):
         self._position_timer.timeout.connect(self._on_position_tick)
 
         self._frame_timer = QTimer(self)
-        self._frame_timer.setInterval(self._FRAME_POLL_MS)
+        self._frame_timer.setInterval(self._frame_poll_ms)
         self._frame_timer.timeout.connect(self._request_frame)
 
         self._frame_worker: Optional[FramePreviewWorker] = None
@@ -388,6 +413,7 @@ class HybridPlaybackEngine(PlaybackEngine):
         self._has_audio = False
         self._position = 0.0
         self._playing = False
+        self._video_track = 0   # a fresh master always starts on the baseline
         self._audio_player.stop()
         self._audio_player.setSource(QUrl())
 
@@ -461,10 +487,20 @@ class HybridPlaybackEngine(PlaybackEngine):
             return min(self._duration, self._play_started_pos + elapsed)
         return self._position
 
-    # ── Audio track selection ────────────────────────────────────────────────
+    # ── Track selection ──────────────────────────────────────────────────────
 
     def set_audio_single(self, track_idx: int) -> bool:
         return False
+
+    def set_video_track(self, track_idx: int) -> bool:
+        # Unlike audio (no single "master" player to flip a native track on),
+        # every frame here already goes through an explicit ffmpeg -map — just
+        # point the NEXT extraction at a different stream and re-request one
+        # immediately so the switch is visible without waiting for the next
+        # poll tick.
+        self._video_track = track_idx
+        self._request_frame_at(self.current_position())
+        return True
 
     def set_audio_mix_file(self, path: str):
         """Play a pre-rendered mix (from review_workers.MixRenderWorker) —
@@ -516,6 +552,12 @@ class HybridPlaybackEngine(PlaybackEngine):
 
     # ── Internal: video frame polling ────────────────────────────────────────
 
+    def set_frame_poll_ms(self, ms: int):
+        """Live-adjust the picture refresh interval (the Developer panel's
+        'software playback smoothness' knob) — takes effect on the next tick."""
+        self._frame_poll_ms = int(ms) if ms else self._FRAME_POLL_MS
+        self._frame_timer.setInterval(self._frame_poll_ms)
+
     def _request_frame(self):
         self._request_frame_at(self.current_position())
 
@@ -523,7 +565,8 @@ class HybridPlaybackEngine(PlaybackEngine):
         if self._frame_worker is not None or not self._path:
             return   # a request is already in flight — skip this tick rather than pile up
         w = FramePreviewWorker(source=self._path, timecode=f"{secs:.3f}",
-                               grade=None, out_path=self._frame_out_path)
+                               grade=None, out_path=self._frame_out_path,
+                               video_track=self._video_track)
         w.done.connect(lambda p, s=secs: self._on_frame_done(p, s))
         w.error.connect(self._on_frame_error)
         w.finished.connect(lambda w=w: self._on_frame_worker_finished(w))
@@ -543,13 +586,32 @@ class HybridPlaybackEngine(PlaybackEngine):
             self._frame_worker = None
 
 
-def make_engine(parent=None, use_software: bool = False) -> PlaybackEngine:
+def make_engine(parent=None, use_software: bool = False,
+                frame_poll_ms: int = HybridPlaybackEngine._FRAME_POLL_MS) -> PlaybackEngine:
     """Factory: picks the playback implementation. Pure Qt (GPU hardware
     video decode) is the default — smoother, and correct on most hardware
     per the v1.4 spike. `use_software=True` selects HybridPlaybackEngine
     instead, for hardware where the GPU decoder itself is unreliable (see
     HybridPlaybackEngine's docstring for the field crash that motivated
-    this seam)."""
+    this seam). `frame_poll_ms` sets the software engine's picture refresh
+    interval (the Developer panel exposes it)."""
     if use_software:
-        return HybridPlaybackEngine(parent)
+        return HybridPlaybackEngine(parent, frame_poll_ms=frame_poll_ms)
     return QtPlaybackEngine(parent)
+
+
+def is_risky_hw_decode_profile(video_info) -> bool:
+    """True for the confirmed-dangerous content class: 4K+, 10-bit, HEVC.
+    `video_info` is a probe.StreamInfo (or anything with .codec/.width/
+    .height/.pix_fmt) — callers should force software decode rather than
+    let QtPlaybackEngine touch this content natively."""
+    if video_info is None:
+        return False
+    codec = (getattr(video_info, "codec", "") or "").lower()
+    if codec not in _RISKY_CODECS:
+        return False
+    w, h = getattr(video_info, "width", 0) or 0, getattr(video_info, "height", 0) or 0
+    if w * h < _RISKY_MIN_PIXELS:
+        return False
+    bit_depth, _ = pix_fmt_info(getattr(video_info, "pix_fmt", "") or "")
+    return bit_depth >= _RISKY_MIN_BIT_DEPTH

@@ -47,6 +47,17 @@ def test_report_matches_no_camera():
     _agree(_clip(cam="", wav=True), OutputPlan())
 
 
+def test_report_matches_no_wav_backup():
+    # Camera audio present, no WAV — the WAV-backup slot falls back to camera
+    # audio (re-encoded ALAC) instead of silence; the report must agree.
+    _agree(_clip(cam="aac", wav=False), OutputPlan())
+
+
+def test_report_notes_explain_no_wav_backup():
+    rep = analyze_clip(_clip(cam="aac", wav=False), OutputPlan())
+    assert any("wav-backup slot uses the camera audio" in n.lower() for n in rep.notes)
+
+
 def test_report_matches_mix_on():
     _agree(_clip(cam="aac", wav=True),
            OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")]))

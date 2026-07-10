@@ -2,38 +2,56 @@
   <img src="lunavault_fusebox_logo.png" alt="LunaVault FuseBox" width="520">
 </p>
 
-<p align="center"><em>Preserve every moment. Losslessly.</em></p>
+<p align="center"><em>Your memories, safely kept — and provably yours.</em></p>
 
 # LunaVault FuseBox
 
-A desktop app for turning a day's worth of camera clips into a single, properly
-archived master file — with both microphones kept intact and in sync — plus a
-quick tool for trimming and colour-grading clips to share.
+A safe home for your memories. Point FuseBox at a folder of videos — a birthday,
+a holiday, a quiet afternoon at home — and it checks every one, keeps them
+together as a collection, and lets you get any of them back exactly as you filmed
+it. Nothing is locked in: a collection is an ordinary folder you can open on any
+machine, and FuseBox is there whenever you want to browse, play, or pull a
+memory out.
 
-Built for anyone who shoots with a wireless mic: your camera records the
-Bluetooth mic into the MP4 while a separate WAV preserves the on-board mic.
-FuseBox pairs them, aligns them, and merges everything into one lossless `.mov`.
+It doesn't promise "forever". It promises something you can check: a verified,
+self-contained copy the moment you make it, that you can keep anywhere and always
+recover.
+
+> **Direction:** FuseBox is being re-shaped from a wireless-mic merge tool into a
+> preservation-first keeper of memories. See [`PRODUCT_DIRECTION.md`](PRODUCT_DIRECTION.md)
+> for the vision, [`BUILD_PLAN.md`](BUILD_PLAN.md) for the phased build, and
+> [`COLLECTION_SCHEMA.md`](COLLECTION_SCHEMA.md) for the data model.
 
 ---
 
-## Features
+## What it does
 
-- **Lossless merge** — clips are stream-copied (no re-encode, no quality loss);
-  only clips that differ in resolution or frame rate are conformed.
-- **Smart two-mic audio** — the Bluetooth mic and the on-board WAV are kept as
-  separate tracks, carefully aligned (GCC-PHAT + drift correction), with an
-  optional L/R-split or 50/50 combined track.
-- **Slow-motion aware** — detects slow-mo clips and time-stretches the WAV
-  (pitch-corrected) to match the slowed video.
-- **Colour-grade clip export** — trim any moment, apply one of 28 film/cinema
-  LUTs, and export a share-ready MP4 (the "WhatsApp clip" tab).
-- **Pre-flight** — see exactly what the merge will do (tracks, sizes, time)
-  before you commit, with live MB/s + ETA during the render.
-- **Review tab** — play back a finished master with frame-step/jog scrubbing, audition
-  and mix individual audio tracks, view colour-depth/dynamic-range scopes (histogram
-  and RGB waveform), an audio waveform/spectral view per track, and take full-resolution
-  snapshots.
-- **Light / dark / system theme** and a clean, grouped UI.
+- **Keeps your memories, verified** — merges a folder of clips into one
+  losslessly-archived master, and checks that every memory can be recovered. Each
+  memory is tagged with how faithfully it comes back: *byte for byte*, *exactly as
+  filmed* (identical picture and sound), or a *high-quality copy*.
+- **See a memory come back** — the app proves it: pull any original back out of
+  the archive, exactly as you filmed it.
+- **Collections, organised for you** — footage is auto-grouped into a named,
+  dated collection with a cover; the Home shelf shows them all, and renders
+  instantly even when the files live on a drive or in the cloud.
+- **Walk-away, not locked in** — a collection is a standard folder; the master
+  plays in any player. "Make fully portable" writes each memory as its own file
+  plus a no-app `album.html` you can browse anywhere.
+- **Cloud, provider-agnostic** — keep collections in any sync folder (Jottacloud,
+  Dropbox, OneDrive…); FuseBox treats it as a normal path and keeps a light local
+  index so the shelf works offline.
+
+### Advanced (for power users)
+
+- **Two-mic audio** — for footage shot with a separate wireless mic + WAV: the
+  two mics are kept as separate tracks, aligned (GCC-PHAT + drift correction,
+  slow-motion aware), with optional L/R-split or 50/50 mix.
+- **Review + grade** — frame-step playback, per-track audio audition/mix, colour
+  and audio scopes, full-res snapshots, and trim/LUT export for sharing.
+- **Pre-flight** — see exactly what a merge will do (tracks, sizes, time) before
+  committing, with live MB/s + ETA.
+- **Light / dark / system theme.**
 
 ## Platforms
 

@@ -17,6 +17,7 @@ from PySide6.QtSvgWidgets import QSvgWidget
 
 from logo_widget import make_logo_widget
 from core.binaries import get_app_dir
+from dev_history import HISTORY, LAST_UPDATED
 import theme
 
 _ASSETS = Path(__file__).parent / "assets"
@@ -201,6 +202,19 @@ class AboutTab(QWidget):
         lic_row.addStretch()
         root.addLayout(lic_row)
 
+        root.addWidget(self._divider())
+
+        # ── Development history ──────────────────────────────────────────────
+        self._history_title = QLabel("Development history")
+        root.addWidget(self._history_title)
+        self._history_sub = QLabel(
+            f"What's changed in LunaVault FuseBox, newest first.   ·   Last updated {LAST_UPDATED}")
+        root.addWidget(self._history_sub)
+
+        self._history_rows: list = []
+        for entry in HISTORY:
+            root.addWidget(self._build_history_entry(entry))
+
         root.addStretch()
 
     # ── Support section ─────────────────────────────────────────────────────────
@@ -328,6 +342,52 @@ class AboutTab(QWidget):
         chevron = "▾" if self._support_open else "▸"
         self._support_btn.setText(f"  ♥  Support the project — keep it free   {chevron}")
 
+    def _build_history_entry(self, entry) -> QFrame:
+        card = QFrame()
+        self._cards.append(card)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(6)
+
+        header = QHBoxLayout()
+        date_lbl = QLabel(entry.date)
+        date_lbl.setObjectName("historyDate")
+        title_lbl = QLabel(entry.title)
+        title_lbl.setObjectName("historyTitle")
+        header.addWidget(date_lbl)
+        header.addWidget(title_lbl, 1)
+        lay.addLayout(header)
+
+        summary_lbl = QLabel(entry.summary)
+        summary_lbl.setWordWrap(True)
+        summary_lbl.setObjectName("historySummary")
+        lay.addWidget(summary_lbl)
+
+        details_lbl = QLabel("\n".join(f"•  {d}" for d in entry.details))
+        details_lbl.setWordWrap(True)
+        details_lbl.setObjectName("historyDetails")
+        details_lbl.setVisible(False)
+        lay.addWidget(details_lbl)
+
+        toggle_btn = QPushButton()
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle_btn.setObjectName("historyToggle")
+        toggle_btn.clicked.connect(lambda _, d=details_lbl, b=toggle_btn: self._toggle_history_entry(d, b))
+        lay.addWidget(toggle_btn)
+        self._update_history_toggle(toggle_btn, details_lbl)
+
+        self._history_rows.append((card, date_lbl, title_lbl, summary_lbl, details_lbl, toggle_btn))
+        return card
+
+    def _toggle_history_entry(self, details_lbl: QLabel, toggle_btn: QPushButton):
+        details_lbl.setVisible(not details_lbl.isVisible())
+        self._update_history_toggle(toggle_btn, details_lbl)
+
+    @staticmethod
+    def _update_history_toggle(toggle_btn: QPushButton, details_lbl: QLabel):
+        chevron = "▾" if details_lbl.isVisible() else "▸"
+        toggle_btn.setText(f"{'Hide' if details_lbl.isVisible() else 'Show'} details   {chevron}")
+
     def _open_licenses(self):
         target = get_app_dir() / "licenses" / "THIRD-PARTY-LICENSES.md"
         if not target.exists():
@@ -400,3 +460,14 @@ class AboutTab(QWidget):
             f"QPushButton {{ background:{p.surface2}; color:{p.text}; border:1px solid {p.border}; "
             "border-radius:5px; padding:6px 12px; font-size:12px; }"
             f"QPushButton:hover {{ border-color:{p.accent}; }}")
+        self._history_title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{p.accent};")
+        self._history_sub.setStyleSheet(f"font-size:12px; color:{p.text_mute};")
+        for card, date_lbl, title_lbl, summary_lbl, details_lbl, toggle_btn in self._history_rows:
+            date_lbl.setStyleSheet(f"font-size:11px; color:{p.text_dim}; font-family:monospace;")
+            title_lbl.setStyleSheet(f"font-size:13px; font-weight:bold; color:{p.text};")
+            summary_lbl.setStyleSheet(f"font-size:12px; color:{p.text_mute};")
+            details_lbl.setStyleSheet(f"font-size:12px; color:{p.text}; padding-top:4px;")
+            toggle_btn.setStyleSheet(
+                f"QPushButton {{ background:transparent; color:{p.text_mute}; border:none; "
+                "font-size:11px; text-align:left; padding:2px 0; }"
+                f"QPushButton:hover {{ color:{p.accent}; }}")
