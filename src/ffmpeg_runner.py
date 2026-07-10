@@ -48,7 +48,7 @@ from core.verify import (
     quick_video_rounding_check, quick_wav_rounding_check,
 )
 
-# Re-exported for existing call sites (main.py, merge_tab.py, whatsapp_tab.py).
+# Re-exported for existing call sites (main.py, merge_tab.py, extract_tab.py).
 _no_window = no_window
 
 

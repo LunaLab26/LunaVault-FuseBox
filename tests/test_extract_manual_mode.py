@@ -1,4 +1,4 @@
-"""Tests for whatsapp_tab.py's Extract-tab manual controls (foreign masters
+"""Tests for extract_tab.py's Extract-tab manual controls (foreign masters
 with no manifest): audio-track role assignment, video-stream picker, rotation
 override, and hand-add/edit/remove of clip boundaries. Offscreen, standalone
 — mirrors test_output_suggest.py's QApplication bootstrap.
@@ -21,16 +21,16 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 app = QApplication.instance() or QApplication([])
 
 from settings import Settings  # noqa: E402
-from whatsapp_tab import (  # noqa: E402
-    WhatsAppTab, _ManualClipDialog, _tc_to_secs, _secs_to_ffmpeg,
+from extract_tab import (  # noqa: E402
+    ExtractTab, _ManualClipDialog, _tc_to_secs, _secs_to_ffmpeg,
     EX_COL_EDIT, EX_COL_REMOVE, EX_COL_SPEC,
 )
 from core.manifest import Manifest, ClipEntry  # noqa: E402
 from probe import AudioTrackInfo, VideoTrackInfo, ChapterInfo  # noqa: E402
 
 
-def _tab() -> WhatsAppTab:
-    t = WhatsAppTab(Settings())
+def _tab() -> ExtractTab:
+    t = ExtractTab(Settings())
     t._extract_master_path = "foreign.mov"
     return t
 

@@ -22,7 +22,7 @@ from legacy_mode_toggle import LegacyModeToggle
 from dev_panel import DeveloperPanel
 from settings import Settings, _settings_path
 from merge_tab import MergeTab
-from whatsapp_tab import WhatsAppTab
+from extract_tab import ExtractTab
 from review_tab import ReviewTab
 from log_tab import LogTab
 from about_tab import AboutTab
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         self._library       = LibraryView(settings)
         self._add_flow      = AddFlow(settings)
         self._merge_tab     = MergeTab(settings)
-        self._whatsapp_tab  = WhatsAppTab(settings)
+        self._extract_tab   = ExtractTab(settings)
         self._review_tab    = ReviewTab(settings)
         self._log_tab       = LogTab(settings)
         self._about_tab     = AboutTab()
@@ -121,10 +121,10 @@ class MainWindow(QMainWindow):
         self._library.make_portable_requested.connect(self._make_portable)
         # A finished merge registers its collection folder and refreshes the shelf.
         self._merge_tab.merge_complete.connect(self._register_collection)
-        self._merge_tab.merge_complete.connect(self._whatsapp_tab.set_source)
+        self._merge_tab.merge_complete.connect(self._extract_tab.set_source)
         self._merge_tab.open_in_review.connect(self._open_in_review)
-        self._review_tab.embed_share_panel(self._whatsapp_tab.share_panel())
-        self._whatsapp_tab.open_share_requested.connect(self._open_share_in_review)
+        self._review_tab.embed_share_panel(self._extract_tab.share_panel())
+        self._extract_tab.open_share_requested.connect(self._open_share_in_review)
         # Developer-panel changes that the Review tab can apply live (playback
         # refresh rate) — safe no-op for options it doesn't care about.
         self._dev_panel.changed.connect(self._review_tab.reload_dev_settings)
@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
         if mode == "legacy":
             self._tabs.addTab(self._merge_tab,     "Merge clips")
             self._tabs.addTab(self._review_tab,    "Review")
-            self._tabs.addTab(self._whatsapp_tab,  "Extract and Recover")
+            self._tabs.addTab(self._extract_tab,  "Extract and Recover")
             self._tabs.addTab(self._log_tab,       "Log")
             self._tabs.addTab(self._about_tab,     "About")
         else:
@@ -181,7 +181,7 @@ class MainWindow(QMainWindow):
             self._tabs.addTab(self._add_flow,      "Add")
             self._tabs.addTab(self._merge_tab,     "Merge clips")
             self._tabs.addTab(self._review_tab,    "Review")
-            self._tabs.addTab(self._whatsapp_tab,  "Extract and Recover")
+            self._tabs.addTab(self._extract_tab,  "Extract and Recover")
             self._tabs.addTab(self._log_tab,       "Log")
             self._tabs.addTab(self._about_tab,     "About")
         idx = self._tabs.indexOf(current) if current is not None else -1
@@ -293,7 +293,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._add_flow.shutdown()
         self._merge_tab.shutdown()
-        self._whatsapp_tab.shutdown()
+        self._extract_tab.shutdown()
         self._review_tab.shutdown()
         settle(self._update_thread, 2000)
         self._settings.set("window_geometry", bytes(self.saveGeometry()).hex())

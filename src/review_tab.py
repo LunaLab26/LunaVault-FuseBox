@@ -491,7 +491,7 @@ class ReviewTab(QWidget):
         audio_body.addWidget(self._lanes)
         root.addWidget(audio_frame, 2)
 
-        # ── Share a clip (embeds WhatsAppTab's Share panel widget — see
+        # ── Share a clip (embeds ExtractTab's Share panel widget — see
         # embed_share_panel(); collapsed by default since it's independent of
         # whatever master is loaded above) ─────────────────────────────────────
         self._share_section_collapsed = True
@@ -526,8 +526,8 @@ class ReviewTab(QWidget):
         self._set_loaded_visible(False)
 
     def embed_share_panel(self, panel: QWidget):
-        """Take the Share-a-clip widget (built and owned by WhatsAppTab —
-        `WhatsAppTab.share_panel()`) and display it inside this section."""
+        """Take the Share-a-clip widget (built and owned by ExtractTab —
+        `ExtractTab.share_panel()`) and display it inside this section."""
         self._share_body_layout.addWidget(panel)
 
     def _toggle_share_section(self):

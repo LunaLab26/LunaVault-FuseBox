@@ -10,9 +10,9 @@ add their own marks and drag targets:
   - `_hit_test(px) -> str`   — which drag target is under the pointer
   - `_apply_drag_other(tag, secs)` — handle a non-"pos" drag tag
 
-`TrimTimeline` is today's WhatsApp-tab timeline (in/out markers + scrubber),
-moved here unchanged in behaviour so `whatsapp_tab.py` only needs to swap its
-import. `widgets/trackbar.py`'s `OverviewTrackbar` (Review tab) is the other
+`TrimTimeline` is today's Extract-tab Share-panel timeline (in/out markers +
+scrubber), moved here unchanged in behaviour so `extract_tab.py` only needs to
+swap its import. `widgets/trackbar.py`'s `OverviewTrackbar` (Review tab) is the other
 `TimelineBase` subclass — a viewport window instead of trim handles.
 """
 
@@ -167,7 +167,7 @@ class TimelineBase(QWidget):
 
 
 class TrimTimeline(TimelineBase):
-    """`TimelineBase` + draggable in/out trim markers (the WhatsApp-tab timeline)."""
+    """`TimelineBase` + draggable in/out trim markers (the Extract-tab Share-panel timeline)."""
     in_changed  = Signal(float)   # in marker moved → seconds
     out_changed = Signal(float)   # out marker moved → seconds
 

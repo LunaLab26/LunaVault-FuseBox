@@ -1,4 +1,4 @@
-"""whatsapp_tab.py — "Extract and Recover" tab: the original WhatsApp-clip
+"""extract_tab.py — "Extract and Recover" tab: the original WhatsApp-clip
 Share half (trim + colour-grade + export a short clip), plus an Extract half
 (recover original camera clips from a master). Extract prefers manifest-
 driven recovery (bit-exact/near-exact, aware of archival tracks — see
@@ -293,7 +293,7 @@ class GradeButton(QPushButton):
 
 # ── Main tab ──────────────────────────────────────────────────────────────────
 
-class WhatsAppTab(QWidget):
+class ExtractTab(QWidget):
     open_share_requested = Signal()   # "Share a clip" now lives in the Review tab
 
     def __init__(self, settings: Settings):
