@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-07-10 15:03"
+LAST_UPDATED = "2026-07-10 16:56"
 
 
 @dataclass
@@ -57,6 +57,12 @@ HISTORY: list = [
             "every neighbouring clip's encoding, frame timing, and dropped-frame count. Clip 026 "
             "turned out to be one of the cleanest clips in the whole recording — the likely "
             "explanation is the missing-WAV silence already fixed earlier today, not a new issue.",
+            "Fixed a real bug found on an actual merge: turning on \"Also preserve the LRV proxy "
+            "on its own track\" (or the equivalent WAV option) could fail the whole merge with a "
+            "\"Tag text incompatible with output codec id\" error. Caused by that step copying "
+            "over a hidden internal chapter marker alongside everything else, which clashed with "
+            "the new file's own chapters. Now copies only the video and audio, so nothing hidden "
+            "gets carried across.",
         ],
     ),
     HistoryEntry(
