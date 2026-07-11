@@ -315,6 +315,34 @@ def test_final_archival_mux_maps_and_dispositions():
     assert cmd.index("k=v") < cmd.index("out.mov")
 
 
+def test_final_archival_mux_audio_only_baseline_omits_video_map():
+    # Advanced output -> video unchecked, Archival master still on: the
+    # baseline has zero video streams, so "0:v" must be optional ("0:v?"), and
+    # the "default" disposition must land on the first archival file's video
+    # (output v:0) instead of the nonexistent baseline video (the old
+    # hardcoded v:0/v:1.. indices assumed the baseline always owned v:0 —
+    # confirmed as a real crash: "Stream map '' matches no streams" on a real
+    # audio-only + Archival master export).
+    cmd = build_final_archival_mux_cmd(
+        "ffmpeg", Path("base.mov"), [Path("a1.mov"), Path("a2.mov")], Path("out.mov"), PF,
+        base_has_video=False)
+    map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert map_targets[:2] == ["0:v?", "0:a?"]
+    assert "1:v" in map_targets and "2:v" in map_targets
+    assert cmd[cmd.index("-disposition:v:0") + 1] == "default"
+    assert cmd[cmd.index("-disposition:v:1") + 1] == "0"
+    assert "-disposition:v:2" not in cmd   # only 2 archival videos -> output v:0,v:1
+
+
+def test_final_archival_mux_audio_only_no_archival_video_has_no_disposition():
+    # No odd-spec clips at all (archival_files empty) + no baseline video:
+    # there's no video stream anywhere in the output, so no -disposition:v:*
+    # should be emitted (there's nothing for it to reference).
+    cmd = build_final_archival_mux_cmd(
+        "ffmpeg", Path("base.mov"), [], Path("out.mov"), PF, base_has_video=False)
+    assert "-disposition:v:0" not in cmd
+
+
 def test_preview_and_thumbnail_single_frame():
     p = build_preview_cmd("ffmpeg", "in.mp4", "00:00:02", None, "p.jpg")
     t = build_thumbnail_cmd("ffmpeg", "in.mp4", 2.0, None, "t.jpg")

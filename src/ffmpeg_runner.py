@@ -437,7 +437,8 @@ class MergeWorker(QThread):
         if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
             embed = None
         cmd = build_final_archival_mux_cmd(ff, baseline, archival_files, final_tmp,
-                                           progress_file, extra_out_args=embed)
+                                           progress_file, extra_out_args=embed,
+                                           base_has_video=bool(base_video_count))
         return self._run_stage(cmd, temp_dir, progress_file,
                                "Finalising archive — combining baseline and originals",
                                stage_total, stage_total, total_dur)
@@ -689,6 +690,7 @@ class MergeWorker(QThread):
         # recovered video with no audio at all for every non-archival master.
         enabled_tracks = [t.kind for t in self._plan.tracks if t.enabled]
         manifest.baseline_audio_tracks = {kind: i for i, kind in enumerate(enabled_tracks)}
+        manifest.baseline_has_video = bool(self._plan.include_video)
         if self._archival:
             baseline_target = temp_dir / "baseline.mov"
             embed = None
@@ -1034,7 +1036,18 @@ class MergeWorker(QThread):
             except Exception as e:
                 return StreamCheck("Video", skipped_reason=f"extraction error: {e}")
 
-        if "Video" in predicted_unverifiable:
+        if plan.video_stream is None:
+            # This master was exported with video excluded entirely (Advanced
+            # output) and this clip has no archival track of its own — there
+            # is genuinely no video anywhere to compare. Extraction used to be
+            # attempted anyway and fail with a raw ffmpeg map error ("Stream
+            # map '' matches no streams"), caught by full_video_check()'s own
+            # try/except but reported as a confusing "extraction error"
+            # instead of the clean, expected explanation this is.
+            result.checks.append(StreamCheck(
+                "Video", skipped_reason="not applicable — this master was exported without video "
+                                        "(Advanced output)"))
+        elif "Video" in predicted_unverifiable:
             # Known ahead of any extraction — see core.verify.predict_unverifiable.
             # Same text the reactive "expected_to_differ" diagnosis would have
             # used anyway, just without spending a full source+recovered
@@ -1076,27 +1089,32 @@ class MergeWorker(QThread):
             result.checks.append(full_video_check())
 
         # ── Rotation ─────────────────────────────────────────────────────────
-        try:
-            src_rot = probe_rotation(fp, str(clip.path), **kwargs)
-            rec_rot = probe_rotation(fp, str(self._output), video_stream_index=plan.video_stream, **kwargs)
-            if src_rot == rec_rot:
-                result.checks.append(StreamCheck("Rotation", str(src_rot), str(rec_rot), True))
-            elif not own_archival_track:
-                diag = ("expected: this clip has no archival track of its own, so it either shares the "
-                        "baseline track with others (which can only carry one overall orientation) or "
-                        "was re-encoded straight into the baseline (rotation gets baked into the pixels "
-                        "during that re-encode, so no separate tag is needed — a 0 here doesn't mean the "
-                        "picture is actually sideways). Enable Archival master + \"One track per clip\" "
-                        "(or \"Optimize baseline for delivery\") for a byte-exact copy with its original "
-                        "rotation tag intact.")
-                result.checks.append(StreamCheck("Rotation", str(src_rot), str(rec_rot), False, diagnosis=diag))
-            else:
-                result.checks.append(StreamCheck(
-                    "Rotation", str(src_rot), str(rec_rot), False,
-                    diagnosis="unexpected on a clip with its own archival track (a straight copy of the "
-                              "original) — worth a closer look."))
-        except Exception as e:
-            result.checks.append(StreamCheck("Rotation", skipped_reason=f"probe error: {e}"))
+        if plan.video_stream is None:
+            result.checks.append(StreamCheck(
+                "Rotation", skipped_reason="not applicable — this master was exported without video "
+                                           "(Advanced output)"))
+        else:
+            try:
+                src_rot = probe_rotation(fp, str(clip.path), **kwargs)
+                rec_rot = probe_rotation(fp, str(self._output), video_stream_index=plan.video_stream, **kwargs)
+                if src_rot == rec_rot:
+                    result.checks.append(StreamCheck("Rotation", str(src_rot), str(rec_rot), True))
+                elif not own_archival_track:
+                    diag = ("expected: this clip has no archival track of its own, so it either shares the "
+                            "baseline track with others (which can only carry one overall orientation) or "
+                            "was re-encoded straight into the baseline (rotation gets baked into the pixels "
+                            "during that re-encode, so no separate tag is needed — a 0 here doesn't mean the "
+                            "picture is actually sideways). Enable Archival master + \"One track per clip\" "
+                            "(or \"Optimize baseline for delivery\") for a byte-exact copy with its original "
+                            "rotation tag intact.")
+                    result.checks.append(StreamCheck("Rotation", str(src_rot), str(rec_rot), False, diagnosis=diag))
+                else:
+                    result.checks.append(StreamCheck(
+                        "Rotation", str(src_rot), str(rec_rot), False,
+                        diagnosis="unexpected on a clip with its own archival track (a straight copy of the "
+                                  "original) — worth a closer look."))
+            except Exception as e:
+                result.checks.append(StreamCheck("Rotation", skipped_reason=f"probe error: {e}"))
 
         # ── Key metadata (GPS/location, creation time, device) ──────────────
         # GPS/creation-time/device tags live at the whole-FILE level in MOV/MP4,

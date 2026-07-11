@@ -195,63 +195,89 @@ def log_merge(
     mix: Optional[dict] = None,   # {"enabled","kind","make_default","match_levels"}
     plan=None,                    # core.ffmpeg_cmd.OutputPlan (for arrangement reasoning)
 ):
-    """Log a merge with per-clip audio offset + drift-correction details."""
-    size_mb = 0.0
-    if success and Path(output).exists():
-        size_mb = Path(output).stat().st_size / 1024 / 1024
+    """Log a merge with per-clip audio offset + drift-correction details.
 
-    # Per-clip arrangement reasoning (which tracks were created and why).
-    reports = {}
-    if plan is not None:
-        try:
-            from core.plan_report import analyze_clip
-            for c in clips:
-                rep = analyze_clip(c, plan)
-                reports[c.name] = {
-                    "video": rep.video_action,
-                    "is_slowmo": rep.is_slowmo,
-                    "slowmo_factor": round(rep.slowmo_factor, 2) if rep.is_slowmo else None,
-                    "tracks": [{"label": t.label, "codec": t.out_codec,
-                                "lossless": t.lossless, "role": t.role} for t in rep.audio],
-                    "decisions": rep.notes,
-                    "est_size_mb": round(rep.est_bytes / 1024 / 1024, 1),
-                }
-        except Exception:
-            reports = {}
+    The whole per-clip enrichment below is wrapped in one outer try/except: a
+    failure ANYWHERE in it used to raise straight out of this function, before
+    `_append()` (and therefore `_write_failure_txt()`) ever ran — confirmed as
+    a real gap: a real merge failure left NO entry in export_log.json or
+    failure_logs\\ at all, because building the rich per-clip breakdown for
+    the log threw first. A failed export must always leave a record, even a
+    thin one, so the fallback below still calls `_append()` with whatever
+    survived unchanged plus a note about what broke."""
+    try:
+        size_mb = 0.0
+        if success and Path(output).exists():
+            size_mb = Path(output).stat().st_size / 1024 / 1024
 
-    clip_details = []
-    for c in clips:
-        clip_details.append({
-            "name":            c.name,
-            "duration_secs":   round(c.duration, 3),
-            "has_wav":         c.has_wav(),
-            "audio_offset_ms": round(c.wav_offset * 1000, 1) if c.has_wav() else None,
-            "offset_summary":  c.friendly_offset() if c.has_wav() else "—",
-            # Sync analysis (lossless track = constant offset; drift → mix only)
-            "drift_ms_per_min": round((c.sync_drift_ratio - 1.0) * 60000, 1) if c.has_wav() else None,
-            "drift_ratio":      round(c.sync_drift_ratio, 8) if c.has_wav() else None,
-            "confidence_ms":    round(c.sync_confidence_ms, 2) if c.has_wav() else None,
-            "polarity_inverted": c.sync_polarity_inverted if c.has_wav() else None,
-            "sync_windows":     c.sync_windows if c.has_wav() else None,
-            "window_lags_ms":   c.sync_lags_ms if c.has_wav() else None,
-            "manual_nudge_ms":  round(c.manual_nudge_ms, 1) if c.has_wav() else None,
-            # Track arrangement reasoning (why these tracks, in this order)
-            "arrangement":      reports.get(c.name),
-        })
+        # Per-clip arrangement reasoning (which tracks were created and why).
+        reports = {}
+        if plan is not None:
+            try:
+                from core.plan_report import analyze_clip
+                for c in clips:
+                    rep = analyze_clip(c, plan)
+                    reports[c.name] = {
+                        "video": rep.video_action,
+                        "is_slowmo": rep.is_slowmo,
+                        "slowmo_factor": round(rep.slowmo_factor, 2) if rep.is_slowmo else None,
+                        "tracks": [{"label": t.label, "codec": t.out_codec,
+                                    "lossless": t.lossless, "role": t.role} for t in rep.audio],
+                        "decisions": rep.notes,
+                        "est_size_mb": round(rep.est_bytes / 1024 / 1024, 1),
+                    }
+            except Exception:
+                reports = {}
 
-    total_dur = sum(c.duration for c in clips)
+        clip_details = []
+        for c in clips:
+            clip_details.append({
+                "name":            c.name,
+                "duration_secs":   round(c.duration, 3),
+                "has_wav":         c.has_wav(),
+                "audio_offset_ms": round(c.wav_offset * 1000, 1) if c.has_wav() else None,
+                "offset_summary":  c.friendly_offset() if c.has_wav() else "—",
+                # Sync analysis (lossless track = constant offset; drift → mix only)
+                "drift_ms_per_min": round((c.sync_drift_ratio - 1.0) * 60000, 1) if c.has_wav() else None,
+                "drift_ratio":      round(c.sync_drift_ratio, 8) if c.has_wav() else None,
+                "confidence_ms":    round(c.sync_confidence_ms, 2) if c.has_wav() else None,
+                "polarity_inverted": c.sync_polarity_inverted if c.has_wav() else None,
+                "sync_windows":     c.sync_windows if c.has_wav() else None,
+                "window_lags_ms":   c.sync_lags_ms if c.has_wav() else None,
+                "manual_nudge_ms":  round(c.manual_nudge_ms, 1) if c.has_wav() else None,
+                # Track arrangement reasoning (why these tracks, in this order)
+                "arrangement":      reports.get(c.name),
+            })
 
-    _append({
-        "timestamp":        datetime.now().isoformat(timespec="seconds"),
-        "type":             "merge",
-        "output":           output,
-        "source_folder":    source_folder,
-        "track_order":      track_order,
-        "mix":              mix or {"enabled": False},
-        "clip_count":       len(clips),
-        "total_duration_secs": round(total_dur, 3),
-        "clips":            clip_details,
-        "file_size_mb":     round(size_mb, 2),
-        "success":          success,
-        "message":          message,
-    })
+        total_dur = sum(c.duration for c in clips)
+
+        entry = {
+            "timestamp":        datetime.now().isoformat(timespec="seconds"),
+            "type":             "merge",
+            "output":           output,
+            "source_folder":    source_folder,
+            "track_order":      track_order,
+            "mix":              mix or {"enabled": False},
+            "clip_count":       len(clips),
+            "total_duration_secs": round(total_dur, 3),
+            "clips":            clip_details,
+            "file_size_mb":     round(size_mb, 2),
+            "success":          success,
+            "message":          message,
+        }
+    except Exception as e:
+        entry = {
+            "timestamp":        datetime.now().isoformat(timespec="seconds"),
+            "type":             "merge",
+            "output":           output,
+            "source_folder":    source_folder,
+            "track_order":      track_order,
+            "mix":              mix or {"enabled": False},
+            "clip_count":       len(clips) if clips is not None else 0,
+            "total_duration_secs": 0,
+            "clips":            [],
+            "file_size_mb":     0.0,
+            "success":          success,
+            "message":          f"{message}\n\n(log enrichment failed: {e})",
+        }
+    _append(entry)

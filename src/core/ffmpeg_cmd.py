@@ -782,7 +782,8 @@ def build_archival_concat_cmd(ff: str, concat_file: Path, output: Path) -> list:
 
 def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,
                                  output: Path, progress_file: Path,
-                                 extra_out_args: Optional[list] = None) -> list:
+                                 extra_out_args: Optional[list] = None,
+                                 base_has_video: bool = True) -> list:
     """Mux the baseline (input 0) + each archival intermediate into the final
     master, stream-copied. Baseline video stays default (track 1); archival
     videos are non-default so external tools ignore them. Archival audio is
@@ -790,7 +791,13 @@ def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,
 
     Stream order in the output: all baseline streams first (its video, then its
     audio tracks), then each archival track's video + audio — so archival audio
-    lands after the baseline's own audio slots (see the Phase-2 spike)."""
+    lands after the baseline's own audio slots (see the Phase-2 spike).
+
+    `base_has_video` must match the OutputPlan the baseline was built from
+    (False for an Advanced-output "no video" export) — it decides both the
+    video map and which output stream index gets the "default" disposition,
+    since every video-stream index shifts down by one when the baseline
+    contributes none."""
     cmd = [ff, "-y", "-v", "error", "-i", str(baseline)]
     for f in archival_files:
         cmd += ["-i", str(f)]
@@ -807,13 +814,27 @@ def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,
     # "0:a?" (optional), not "0:a": a baseline with every audio track disabled
     # in the OutputPlan has zero audio streams, and ffmpeg hard-errors on a
     # non-optional map matching nothing ("Stream map '' matches no streams").
-    cmd += ["-map", "0:v", "-map", "0:a?"]
+    # "0:v?" (optional) for the same reason: an Advanced-output "no video"
+    # export's baseline has zero video streams — confirmed directly as a real
+    # crash ("Stream map '' matches no streams" on 0:v) when Archival master
+    # was also on for an audio-only export.
+    cmd += ["-map", "0:v?" if not base_has_video else "0:v", "-map", "0:a?"]
     for i in range(1, len(archival_files) + 1):
         cmd += ["-map", f"{i}:v", "-map", f"{i}:a?"]
-    cmd += ["-c", "copy", "-map_metadata", "0", "-map_chapters", "0",
-            "-disposition:v:0", "default"]
-    for vi in range(1, len(archival_files) + 1):
-        cmd += [f"-disposition:v:{vi}", "0"]
+    cmd += ["-c", "copy", "-map_metadata", "0", "-map_chapters", "0"]
+    # Output video-stream indices shift down by one whenever the baseline
+    # contributes no video (0:v? matched nothing) — the first archival file's
+    # video lands at v:0 instead of v:1, and so on. base_has_video picks the
+    # right "default" slot instead of assuming the baseline always owns v:0.
+    n_archival_video = len(archival_files)
+    if base_has_video:
+        cmd += ["-disposition:v:0", "default"]
+        for vi in range(1, 1 + n_archival_video):
+            cmd += [f"-disposition:v:{vi}", "0"]
+    elif n_archival_video:
+        cmd += ["-disposition:v:0", "default"]
+        for vi in range(1, n_archival_video):
+            cmd += [f"-disposition:v:{vi}", "0"]
     cmd += ["-progress", str(progress_file), "-nostats"]
     if extra_out_args:
         cmd += list(extra_out_args)

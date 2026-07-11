@@ -3032,8 +3032,21 @@ class MergeTab(QWidget):
         worker, self._worker = self._worker, None
         settle(worker)
         out = Path(self._out_dir.text()) / self._out_name.text()
+        # `plan`/`mix` are best-effort — a failure building either must not
+        # skip the log_merge call altogether (see log_manager.log_merge's own
+        # docstring: it's the SECOND line of defence, this is the first).
         try:
             plan = self._effective_plan()
+            mix = {
+                "tracks":       [t.kind for t in plan.tracks if t.enabled],
+                "include_video": plan.include_video,
+                "mix_enabled":  any(t.kind == "mix" and t.enabled for t in plan.tracks),
+                "kind":         plan.mix_kind,
+                "match_levels": plan.mix_match_levels,
+            }
+        except Exception:
+            plan, mix = None, None
+        try:
             log_manager.log_merge(
                 source_folder = self._folder_edit.text(),
                 output        = str(out),
@@ -3041,13 +3054,7 @@ class MergeTab(QWidget):
                 track_order   = self._current_track_order(),
                 success       = success,
                 message       = message,
-                mix           = {
-                    "tracks":       [t.kind for t in plan.tracks if t.enabled],
-                    "include_video": plan.include_video,
-                    "mix_enabled":  any(t.kind == "mix" and t.enabled for t in plan.tracks),
-                    "kind":         plan.mix_kind,
-                    "match_levels": plan.mix_match_levels,
-                },
+                mix           = mix,
                 plan          = plan,
             )
         except Exception:

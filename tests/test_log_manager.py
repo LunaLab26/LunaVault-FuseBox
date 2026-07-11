@@ -123,6 +123,46 @@ def test_append_writes_failure_txt_only_when_success_false_and_enabled():
         run_with_log_path(body_disabled, False)
 
 
+class _ExplodingClip:
+    """A clip whose .duration raises — simulates whatever real-world clip
+    attribute bug once let a merge failure vanish with no log at all (see
+    log_manager.log_merge's docstring)."""
+    name = "broken.mp4"
+
+    @property
+    def duration(self):
+        raise AttributeError("simulated broken clip attribute")
+
+
+def test_log_merge_failure_writes_entry_even_when_clip_enrichment_throws():
+    # A real merge failure must always leave SOME record — even if building
+    # the rich per-clip breakdown blows up partway through (confirmed as a
+    # real gap: this used to raise straight out of log_merge before _append()
+    # ever ran, so a genuine failure left nothing in export_log.json or
+    # failure_logs\ at all).
+    calls = []
+    with tempfile.TemporaryDirectory() as td:
+        tmp_log = Path(td) / "export_log.json"
+
+        def body():
+            lm.log_merge(
+                source_folder=r"C:\clips", output=r"C:\out\master.mov",
+                clips=[_ExplodingClip()], track_order="camera",
+                success=False, message="ffmpeg failed on broken.mp4",
+            )
+            assert len(calls) == 1
+            entry = calls[0]
+            assert entry["success"] is False
+            assert "ffmpeg failed on broken.mp4" in entry["message"]
+            assert "log enrichment failed" in entry["message"]
+
+        def fake_append(entry):
+            calls.append(entry)
+
+        _with_patched(lm, "_log_path", lambda: tmp_log,
+                     lambda: _with_patched(lm, "_append", fake_append, body))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

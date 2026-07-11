@@ -136,6 +136,12 @@ class Manifest:
     # e.g. {"camera": 0, "wav": 1, "mix": 2} — how Extract finds a conforming clip's
     # camera audio and any clip's WAV backup.
     baseline_audio_tracks: dict = field(default_factory=dict)
+    # False only for an Advanced-output "video unchecked" export — the baseline
+    # (and therefore every clip without its own archival video track) has NO
+    # video stream at all. Defaults True so older manifests (written before
+    # this field existed, back when every master always had video) still
+    # recover correctly without a migration.
+    baseline_has_video: bool = True
     clips: list = field(default_factory=list)      # list[ClipEntry]
 
 
@@ -265,6 +271,7 @@ def _manifest_to_dict(m: Manifest) -> dict:
         "master_filename": m.master_filename,
         "created_utc": m.created_utc,
         "baseline_audio_tracks": dict(m.baseline_audio_tracks),
+        "baseline_has_video": m.baseline_has_video,
         "clips": [asdict(c) for c in m.clips],
     }
 
@@ -286,6 +293,7 @@ def from_json(s: str) -> Manifest:
         master_filename=d.get("master_filename", "") or "",
         created_utc=d.get("created_utc", "") or "",
         baseline_audio_tracks=dict(d.get("baseline_audio_tracks", {}) or {}),
+        baseline_has_video=bool(d.get("baseline_has_video", True)),
         clips=clips,
     )
 

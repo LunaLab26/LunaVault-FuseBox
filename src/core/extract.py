@@ -52,7 +52,10 @@ class RecoveryPlan:
     """Everything needed to recover one clip: where its video/audio/WAV live
     in the master, and where they should land on disk."""
     entry: ClipEntry
-    video_stream: int              # absolute master stream index
+    video_stream: Optional[int]    # absolute master stream index, or None if
+                                   # this clip has no video anywhere (baseline
+                                   # was exported without video AND this clip
+                                   # has no archival track of its own)
     video_start: float
     video_duration: float
     audio_stream: Optional[int]    # absolute master stream index, or None
@@ -103,7 +106,12 @@ def build_recovery_plan(manifest: Manifest, entry: ClipEntry) -> Optional[Recove
     else:
         if entry.baseline_chapter_index is None or entry.baseline_chapter_index not in baseline_offsets:
             return None
-        video_stream = 0
+        # No archival track of its own AND the baseline itself has no video
+        # (an Advanced-output "video unchecked" export) — there is genuinely
+        # no video anywhere for this clip. video_stream stays None; every
+        # video-touching recovery/verify step below must check for that
+        # instead of assuming master stream 0 is always video.
+        video_stream = 0 if manifest.baseline_has_video else None
         video_start, video_duration = baseline_offsets[entry.baseline_chapter_index]
         # Measured concat positions (Task 87, same field the WAV window uses):
         # cumulative video durations drift ±1 frame at clip boundaries (measured
@@ -162,9 +170,10 @@ def build_preview_sample_cmd(ff: str, master_path: str, plan: RecoveryPlan,
     per-clip preview sample."""
     cmd = [ff, "-y", "-v", "error",
            "-ss", f"{max(0.0, start_ts):.3f}", "-i", str(master_path),
-           "-t", f"{max(0.1, duration):.3f}",
-           "-map", f"0:v:{plan.video_stream}", "-vf", "scale=-2:160",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
+           "-t", f"{max(0.1, duration):.3f}"]
+    if plan.video_stream is not None:
+        cmd += ["-map", f"0:v:{plan.video_stream}", "-vf", "scale=-2:160",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
     if plan.audio_stream is not None:
         cmd += ["-map", f"0:a:{plan.audio_stream}", "-c:a", "aac", "-b:a", "96k"]
     cmd += ["-movflags", "+faststart", str(out_path)]
@@ -205,8 +214,14 @@ def build_recover_clip_cmd(ff: str, master_path: str, plan: RecoveryPlan, out_pa
     seek = plan.video_start + (SEEK_EPS if plan.video_measured else 0.0)
     cmd = [ff, "-y", "-v", "error",
            "-ss", f"{max(0.0, seek):.3f}", "-i", str(master_path),
-           "-t", f"{max(0.01, plan.video_duration):.3f}",
-           "-map", f"0:v:{plan.video_stream}"]
+           "-t", f"{max(0.01, plan.video_duration):.3f}"]
+    # No video map at all when this clip has none anywhere (an Advanced-output
+    # "video unchecked" export with no archival track for this clip) — a bare
+    # "0:v:N" hard-errors on a master with zero video streams ("Stream map ''
+    # matches no streams"), confirmed as a real crash on both this app's own
+    # MD5 verify and a real Extract recovery of an audio-only master.
+    if plan.video_stream is not None:
+        cmd += ["-map", f"0:v:{plan.video_stream}"]
     if include_audio and plan.audio_stream is not None:
         cmd += ["-map", f"0:a:{plan.audio_stream}"]
     cmd += ["-c", "copy", str(out_path)]

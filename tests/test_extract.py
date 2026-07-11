@@ -459,6 +459,83 @@ def test_recover_cmd_applies_copy_seek_guard_only_when_measured():
     assert f"{10.033 + SEEK_EPS:.3f}" in cmd_m, "measured window must seek EPS late"
 
 
+# ── Audio-only baseline (Advanced output -> video unchecked) ───────────────
+
+def _audio_only_manifest() -> Manifest:
+    """Same shape as _mixed_manifest's first two clips, but the baseline was
+    exported with video excluded entirely."""
+    return Manifest(
+        master_filename="master.mov",
+        baseline_audio_tracks={"camera": 0, "wav": 1},
+        baseline_has_video=False,
+        clips=[
+            ClipEntry(source_filename="A.mp4", duration=10.0, conform_status="ok",
+                      baseline_chapter_index=0, has_camera_audio=True, has_wav=True),
+            ClipEntry(source_filename="C.mp4", duration=4.0, conform_status="transcode",
+                      baseline_chapter_index=1, has_camera_audio=True, has_wav=True,
+                      archival_track=1, archival_audio_stream=2,
+                      in_track_start=0.0, in_track_duration=4.0),
+        ],
+    )
+
+
+def test_recovery_plan_video_stream_none_when_baseline_has_no_video():
+    # A clip with no archival track of its own, on a baseline that was
+    # exported without video, has NO video anywhere to recover — video_stream
+    # must be None, not the old hardcoded 0 (which used to point at a stream
+    # that doesn't exist and crashed every video-touching recovery command).
+    m = _audio_only_manifest()
+    plan = build_recovery_plan(m, m.clips[0])
+    assert plan.video_stream is None
+    assert plan.audio_stream == 0
+    assert plan.wav_stream == 1
+
+
+def test_recovery_plan_video_stream_still_set_for_clips_own_archival_track():
+    # An odd-spec clip with its OWN archival track still has real, recoverable
+    # video (preserved independently of the baseline) even when the baseline
+    # itself has none — archival preservation doesn't depend on the delivered
+    # baseline containing video.
+    m = _audio_only_manifest()
+    plan = build_recovery_plan(m, m.clips[1])
+    assert plan.video_stream == 1
+    assert plan.audio_stream == 2
+
+
+def test_recover_clip_cmd_omits_video_map_when_baseline_has_no_video():
+    m = _audio_only_manifest()
+    plan = build_recovery_plan(m, m.clips[0])
+    cmd = build_recover_clip_cmd("ffmpeg", "master.mov", plan, "A.mp4")
+    map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert not any(t.startswith("0:v") for t in map_targets)
+    assert "0:a:0" in map_targets
+    assert "copy" in cmd and cmd[-1] == "A.mp4"
+
+
+def test_preview_sample_cmd_omits_video_map_when_baseline_has_no_video():
+    from core.extract import build_preview_sample_cmd
+    m = _audio_only_manifest()
+    plan = build_recovery_plan(m, m.clips[0])
+    cmd = build_preview_sample_cmd("ffmpeg", "master.mov", plan, 0.0, 5.0, "sample.mov")
+    map_targets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert not any(t.startswith("0:v") for t in map_targets)
+    assert "0:a:0" in map_targets
+
+
+def test_baseline_has_video_survives_manifest_round_trip():
+    from core.manifest import to_json, from_json
+    m = _audio_only_manifest()
+    m2 = from_json(to_json(m))
+    assert m2.baseline_has_video is False
+    # absent in old JSON -> True (tolerant load; every pre-existing manifest
+    # was written when a baseline always had video)
+    import json as _json
+    d = _json.loads(to_json(m))
+    d.pop("baseline_has_video", None)
+    old = from_json(_json.dumps(d))
+    assert old.baseline_has_video is True
+
+
 def test_measured_fields_survive_manifest_round_trip():
     from core.manifest import to_json, from_json
     m = _mixed_manifest()

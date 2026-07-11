@@ -89,6 +89,13 @@ def _init_qt():
     mt_mod.QMessageBox.warning = staticmethod(lambda *a, **k: _safe_dialog_print("  [dialog:warning]", a))
     mt_mod.QMessageBox.information = staticmethod(lambda *a, **k: _safe_dialog_print("  [dialog:info]", a))
     mt_mod.QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    # _on_finished's "Merge complete!" dialog builds a raw QMessageBox instance
+    # and calls .exec() directly, NOT one of the classmethod shortcuts above —
+    # confirmed as a real gap this way: every SUCCESSFUL headless merge hung
+    # here indefinitely (a modal exec() blocks even with no display to click),
+    # invisible until something finally killed the process, at which point it
+    # was mis-recorded as a timeout rather than the pass it actually was.
+    mt_mod.QMessageBox.exec = lambda self: 0
 
 PER_TEST_TIMEOUT_S = int(os.environ.get("MD5_PER_TEST_TIMEOUT_S", "1200"))
                             # 20 min default hard cap per merge — a hang here must not stall the

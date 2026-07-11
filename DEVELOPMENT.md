@@ -2810,3 +2810,98 @@ rather than pursued further this session.
   fields, the recovery command maps video+audio or video-only correctly).
 
   42 test files green.
+
+### Task 98 — Battle-test campaign, Exhibit A: audio-only export crash + recovery/verify gaps (fixed)
+
+  Real user report: Advanced output → video unchecked ("audio-only export") failed
+  during merge, and no crash log appeared in `failure_logs\`. Reproduced headlessly
+  against 2 real clips (a fresh `MergeTab` driven exactly like `tests/md5_matrix_
+  test.py`, `_include_video = False`, real ffmpeg, no mocking) rather than guessed
+  at from reading code.
+
+  **The crash (`core/ffmpeg_cmd.py`, `ffmpeg_runner.py`).**
+  `build_final_archival_mux_cmd` mapped the baseline's video with a bare `"-map",
+  "0:v"` — fine when the baseline always has a video stream, but an audio-only
+  baseline has NONE, and ffmpeg hard-errors ("Stream map '' matches no streams")
+  the moment Archival master is also on (which auto-selects on for a mixed-spec
+  folder, as happened here). Mirrors the exact reasoning the function already
+  applied to `"0:a?"` two lines above (a baseline with every audio track disabled
+  has zero audio streams) — just never extended to video. Fixed with a new
+  `base_has_video` parameter: `"0:v?"` when False, and the `-disposition:v:N`
+  assignment recomputed from actual output stream positions instead of assuming
+  the baseline always occupies v:0 (every archival video's output index shifts
+  down by one when the baseline contributes none). `_build_and_mux_archival`
+  passes `base_has_video=bool(base_video_count)` (already computed from
+  `self._plan.include_video` for the manifest's own bookkeeping — this was the
+  ONE caller not yet using it).
+
+  **Recovery/verify never anticipated a video-less baseline either
+  (`core/manifest.py`, `core/extract.py`, `ffmpeg_runner.py`).** Even after the
+  crash fix, MD5 verify's Video/Rotation/Metadata checks and the real Extract-
+  and-Recover feature would still try to map a video stream that doesn't exist —
+  `build_recovery_plan` unconditionally set `video_stream = 0` for any clip
+  without its own archival track. New `Manifest.baseline_has_video` (defaults
+  True — every manifest written before this field existed always had video, no
+  migration needed), set from `self._plan.include_video` alongside the sibling
+  `baseline_audio_tracks` assignment. `RecoveryPlan.video_stream` is now
+  `Optional[int]` — `None` only when BOTH the baseline has no video AND this
+  clip has no archival track of its own (a clip with its own archival track
+  still recovers real, preserved video even when the delivered baseline has
+  none — archival preservation doesn't depend on the baseline). `build_recover_
+  clip_cmd`/`build_preview_sample_cmd` skip the video map entirely when `None`
+  instead of emitting a doomed `0:v:N`; this is the SAME command real Extract-
+  and-Recover uses, so a user extracting from an audio-only master hit the
+  identical crash, not just this app's own verify pass. Verify's Video/Rotation
+  checks now report a clean `skipped_reason` ("not applicable — this master was
+  exported without video") instead of leaking the raw ffmpeg parse error caught
+  by `full_video_check`'s own try/except.
+
+  **The missing failure log.** Root cause not the same failure this session's
+  repro reproduced (that one DID leave a log — verified directly), but a real,
+  separate gap found by reading `log_manager.log_merge`/`merge_tab._on_finished`
+  together: `_on_finished` wraps the ENTIRE call to `log_manager.log_merge` —
+  which builds a rich per-clip breakdown (`analyze_clip`, sync/offset fields,
+  `_effective_plan()`) — in a bare `except Exception: pass`. Any exception
+  anywhere in that enrichment used to raise straight out of `log_merge` BEFORE
+  `_append()` (and therefore `_write_failure_txt()`) ever ran, so a failure log
+  is entirely at the mercy of code that has nothing to do with logging. Hardened
+  both layers: `log_merge` now wraps its own enrichment in a try/except and
+  falls back to a thin-but-real entry (still calls `_append()`) on any failure;
+  `_on_finished` now builds `plan`/`mix` in their own inner try/except so a
+  failure there doesn't skip the `log_merge` call altogether. Belt-and-braces —
+  either layer alone would have caught the class of bug that was found.
+
+  **Test-harness bug found along the way (`tests/md5_matrix_test.py`).** While
+  confirming the fix end-to-end, every SUCCESSFUL headless merge with MD5 verify
+  on hung indefinitely after verification finished — `_on_finished`'s "Merge
+  complete!" dialog constructs a raw `QMessageBox(self)` instance and calls
+  `.exec()` directly, which the harness's existing dialog-safety patching
+  (`QMessageBox.warning`/`.information`/`.question` classmethods,
+  `_CameraNamingDialog.exec`) never covered — a modal `.exec()` blocks forever
+  offscreen with nothing to click it. This means every historical matrix run's
+  PASSING configs were likely silently eating the full per-test timeout instead
+  of finishing in seconds, then getting recorded as `"timeout"` — probably the
+  real explanation for slow/inconclusive past matrix runs, not the merges
+  themselves being slow. Fixed with `mt_mod.QMessageBox.exec = lambda self: 0`
+  alongside the existing `_CameraNamingDialog.exec` patch.
+
+  **New finding, not fixed (needs its own investigation): WAV-backup MD5
+  mismatch.** Both test clips' WAV-backup track failed MD5 verify with
+  "Both sides decoded cleanly — worth a closer look at this clip's seam" —
+  confirmed via a control run (same 2 clips, video included, otherwise
+  identical settings) that this is unrelated to the audio-only work above; it
+  reproduces identically either way. Flagged for a dedicated follow-up rather
+  than folded into this fix, since Exhibit A's own scope is the crash/logging,
+  and this is a different code path (WAV backup recovery windowing) with its
+  own honest "worth a closer look" diagnosis already built in.
+
+  Tests: `test_ffmpeg_cmd.py` (+2: `"0:v?"` map + disposition renumbering when
+  `base_has_video=False`, with/without archival video streams present);
+  `test_extract.py` (+5: `video_stream` is `None` only for the no-archival-
+  track case, still set for a clip with its own archival track, `build_recover_
+  clip_cmd`/`build_preview_sample_cmd` omit the video map, `baseline_has_video`
+  round-trips through JSON and defaults `True` for old manifests missing the
+  key); `test_log_manager.py` (+1: a clip whose `.duration` raises still
+  produces a real, appended failure entry, not a swallowed exception).
+
+  42 test files green.

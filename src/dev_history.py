@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-07-10 16:56"
+LAST_UPDATED = "2026-07-11 09:44"
 
 
 @dataclass
@@ -25,6 +25,32 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-07-11",
+        title="Fixed audio-only exports (Advanced output → video unchecked)",
+        summary="Exporting with video unchecked in Advanced output could fail the merge, and no "
+                "crash log was left behind to explain why. Both are fixed, along with two related "
+                "gaps found while testing: recovering a clip from an audio-only master (via "
+                "Extract, or this app's own MD5 verification) could hit the same kind of error, "
+                "and a merge-failure log could occasionally go missing even when the on-screen "
+                "error dialog appeared.",
+        details=[
+            "Fixed: exporting audio-only with Archival master also on could fail with an ffmpeg "
+            "\"stream map\" error while assembling the final file. The step that combines the "
+            "watchable copy with the originals always expected a video track to exist, even when "
+            "the export deliberately had none.",
+            "Fixed: recovering a clip from an audio-only master — either through this app's own "
+            "verification pass or the Extract tab's \"recover original clips\" feature — could hit "
+            "the same kind of error, since the recovery step also assumed video was always "
+            "present. Recovery/verification now correctly recognise \"no video in this export\" "
+            "and skip the video-specific checks with a clear explanation instead of a raw error.",
+            "Hardened the failure-log writer: building the detailed per-clip breakdown for a "
+            "failed merge's log entry could, in rare cases, throw an error of its own — which "
+            "meant the failure never got logged at all, even though the on-screen error dialog "
+            "still appeared. A failed merge now always leaves a log entry, even if the detailed "
+            "breakdown can't be built for some reason.",
+        ],
+    ),
     HistoryEntry(
         date="2026-07-10",
         title="Detect a camera's file-split WAVs, show WAV length, and add per-clip transcode/proxy control",
