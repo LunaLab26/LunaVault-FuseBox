@@ -110,6 +110,7 @@ class StreamInfo:
     pix_fmt: str = ""
     color_space: str = ""
     color_transfer: str = ""
+    color_primaries: str = ""
     audio_codec: str = ""
     audio_sample_rate: int = 0
     audio_channels: int = 0
@@ -260,6 +261,7 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
             info.pix_fmt       = s.get("pix_fmt", "")
             info.color_space   = s.get("color_space", "")
             info.color_transfer = s.get("color_transfer", "")
+            info.color_primaries = s.get("color_primaries", "")
             # r_frame_rate is the clean, stable nominal rate; avg_frame_rate is the
             # measured average and drifts slightly per clip. Detect VFR from a large
             # r-vs-avg gap, then pick the nominal rate (see _nominal_fps) — using r

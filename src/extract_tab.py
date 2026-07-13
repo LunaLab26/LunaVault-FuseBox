@@ -40,6 +40,7 @@ from core.extract import (generic_recovered_filename, build_recovery_plan, build
                           recovered_filenames, is_mp4_compatible_audio, build_generic_recovery_plans,
                           GenericRecoveryPlan)
 from camera_id import identify_camera
+from core.eta import format_hms, format_completion
 from extract_workers import ManifestLoadWorker, ExtractWorker, GenericExtractWorker
 from merge_tab import _ClipPreviewDialog
 import log_manager
@@ -327,6 +328,7 @@ class ExtractTab(QWidget):
         self._extract_generic_plans: Optional[list] = None   # no-manifest fallback (chapter-based)
         self._manifest_load_worker: Optional[ManifestLoadWorker] = None
         self._extract_worker = None   # ExtractWorker | GenericExtractWorker
+        self._ex_bytes_seen = False   # first bytes_progress sample has arrived (see _on_extract_progress)
         self._extract_items: dict = {}   # ClipEntry -> QTreeWidgetItem (for progress updates)
         self._extract_preview_threads: list = []   # keep _ExtractSampleThread instances alive while running
         self._extract_preview_dialogs: list = []   # keep open _ClipPreviewDialog instances alive
@@ -601,7 +603,17 @@ class ExtractTab(QWidget):
         # embeds it into the Review tab via share_panel() below.
 
         self._extract_panel = self._build_extract_panel()
-        outer.addWidget(self._extract_panel, 1)
+        # Scrollable: at higher display-scaling factors the tree's own
+        # minimum height plus every fixed-height row below it (format,
+        # output folder, progress, buttons) can exceed the available window
+        # height — with no scroll area, Qt has nowhere to put the shortfall
+        # and rows visually collide instead of the window simply scrolling
+        # (confirmed directly: reported as overlapping text at 150% scaling).
+        extract_scroll = QScrollArea()
+        extract_scroll.setWidgetResizable(True)
+        extract_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        extract_scroll.setWidget(self._extract_panel)
+        outer.addWidget(extract_scroll, 1)
 
     def share_panel(self) -> QWidget:
         """The Share-a-clip widget, built (and still fully owned/updated) by
@@ -723,6 +735,16 @@ class ExtractTab(QWidget):
         ex_prog_lay.addWidget(self._ex_pbar)
         self._ex_progress_label = QLabel("")
         ex_prog_lay.addWidget(self._ex_progress_label)
+        # Enriched readout mirroring the Merge tab: 2-decimal byte-weighted
+        # percent + current/expected-total GB on one line, the conservative
+        # total-time/wall-clock-completion estimate on the next (see
+        # core.eta and ExtractWorker.bytes_progress).
+        self._ex_stats_label = QLabel("—")
+        self._ex_stats_label.setWordWrap(True)
+        ex_prog_lay.addWidget(self._ex_stats_label)
+        self._ex_eta_label = QLabel("—")
+        self._ex_eta_label.setWordWrap(True)
+        ex_prog_lay.addWidget(self._ex_eta_label)
         lay.addWidget(self._ex_progress_frame)
 
         btn_row = QHBoxLayout()
@@ -1358,6 +1380,9 @@ class ExtractTab(QWidget):
 
         self._ex_progress_frame.show()
         self._ex_pbar.setValue(0)
+        self._ex_stats_label.setText("—")
+        self._ex_eta_label.setText("Estimating…")
+        self._ex_bytes_seen = False
         self._ex_extract_btn.hide()
         self._ex_cancel_btn.show()
 
@@ -1372,6 +1397,7 @@ class ExtractTab(QWidget):
             w = GenericExtractWorker(ff, self._extract_master_path, selected, Path(out_dir),
                                      container=container)
         w.progress.connect(self._on_extract_progress)
+        w.bytes_progress.connect(self._on_extract_bytes_progress)
         w.clip_done.connect(self._on_extract_clip_done)
         w.clip_error.connect(self._on_extract_clip_error)
         w.finished_all.connect(self._on_extract_finished)
@@ -1383,9 +1409,40 @@ class ExtractTab(QWidget):
             self._extract_worker.cancel()
 
     def _on_extract_progress(self, done: int, total: int, name: str):
-        pct = int(done / total * 100) if total else 0
-        self._ex_pbar.setValue(pct)
+        # Clip-count context line only — the bar itself is driven by the
+        # byte-weighted percent from _on_extract_bytes_progress (more
+        # accurate across clips of very different sizes), falling back to
+        # this clip-count percent only until the first byte sample arrives.
+        if not self._ex_bytes_seen:
+            pct = int(done / total * 100) if total else 0
+            self._ex_pbar.setValue(pct)
         self._ex_progress_label.setText(f"{done}/{total}" + (f" — {name}" if name else ""))
+
+    def _on_extract_bytes_progress(self, data: dict):
+        self._ex_bytes_seen = True
+        pct = data.get("pct", 0.0)
+        self._ex_pbar.setValue(int(pct))
+
+        produced = data.get("produced_bytes")
+        expected = data.get("expected_total_bytes")
+        rate     = data.get("rate_bps", 0) or 0
+        elapsed  = data.get("elapsed_secs", 0) or 0
+        eta      = data.get("eta_secs")
+        total_s  = data.get("total_secs")
+
+        parts = [f"{pct:.2f}%"]
+        if produced is not None and expected:
+            parts.append(f"{produced/1024**3:.2f} / {expected/1024**3:.2f} GB")
+        if rate > 0:
+            parts.append(f"{rate/1024/1024:.0f} MB/s")
+        parts.append(f"Elapsed {format_hms(elapsed)}")
+        self._ex_stats_label.setText("  ·  ".join(parts))
+
+        if eta is not None:
+            self._ex_eta_label.setText(
+                f"Total ~{format_hms(total_s)} — completes ~{format_completion(eta)}")
+        else:
+            self._ex_eta_label.setText("Estimating…")
 
     def _on_extract_clip_done(self, name: str, paths: list):
         self._ex_status_label.setText(f"Recovered {name} → " + ", ".join(p.name for p in paths))

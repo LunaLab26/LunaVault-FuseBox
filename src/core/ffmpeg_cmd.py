@@ -52,8 +52,18 @@ def hms_to_seconds(hms: str) -> float:
 # (Phase 2 will add the L/R split track and per-clip drift correction.)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _mix_filtergraph(mix: MixSpec) -> str:
-    """Filter_complex string that turns camera [0:a:0] + WAV [1:a:0] into [mix]."""
+def _mix_filtergraph(mix: MixSpec, n_outputs: int = 1) -> str:
+    """Filter_complex string that turns camera [0:a:0] + WAV [1:a:0] into [mix].
+
+    `n_outputs` > 1 fans the SAME derived mix out into that many distinct,
+    single-use `[mix0]`..`[mixN-1]` pads via `asplit` instead of the single
+    `[mix]` pad. Needed because a clip's Primary-slot override and a
+    separately-enabled Mixed Audio track can BOTH resolve to "mix" for the
+    same clip — an ffmpeg filtergraph output label can only be consumed once
+    (`-map` on it twice fails with "Output with label 'mix' does not exist...
+    or was already used elsewhere" — a real crash found this way), so each
+    consumer needs its own pad even though the content is identical.
+    """
     cam = "[0:a:0]"
     wav = "[1:a:0]"
     cam_pre = []
@@ -68,11 +78,16 @@ def _mix_filtergraph(mix: MixSpec) -> str:
         wav_pre.append(f"atempo={mix.drift_ratio:.6f}")
     cam_chain = cam + ",".join(cam_pre + ["aformat=channel_layouts=mono"]) + "[cam_m]"
     wav_chain = wav + ",".join(wav_pre + ["aformat=channel_layouts=mono"]) + "[wav_m]"
+    combine_label = "mix" if n_outputs <= 1 else "mixsrc"
     if mix.kind == "5050":
-        combine = "[cam_m][wav_m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"
+        combine = f"[cam_m][wav_m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[{combine_label}]"
     else:  # "lr"
-        combine = "[cam_m][wav_m]join=inputs=2:channel_layout=stereo:map=0.0-FL|1.0-FR[mix]"
-    return ";".join([cam_chain, wav_chain, combine])
+        combine = f"[cam_m][wav_m]join=inputs=2:channel_layout=stereo:map=0.0-FL|1.0-FR[{combine_label}]"
+    parts = [cam_chain, wav_chain, combine]
+    if n_outputs > 1:
+        outs = "".join(f"[mix{i}]" for i in range(n_outputs))
+        parts.append(f"[{combine_label}]asplit={n_outputs}{outs}")
+    return ";".join(parts)
 
 
 def _build_conform_with_mix(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
@@ -310,6 +325,16 @@ class ConformSpec:
     codec: str = "hevc"           # "hevc" | "h264"
     pix_fmt: str = "yuv420p10le"
     color_space: str = "bt709"
+    # Matrix coefficients (-colorspace), transfer characteristics (-color_trc), and
+    # primaries (-color_primaries) are three DISTINCT ffmpeg options that only
+    # coincidentally share one identifier for bt709 — a BT.2020 clip commonly probes
+    # as color_space="bt2020nc" (matrix) with color_primaries="bt2020" and
+    # color_transfer="arib-std-b67"/"smpte2084" (HDR), and feeding "bt2020nc" into
+    # -color_primaries/-color_trc makes libx265 reject the command outright. Empty
+    # (unset) falls back to color_space in _video_encoder_args, preserving the old
+    # bt709-everywhere behaviour for any caller that only sets color_space.
+    color_transfer: str = ""
+    color_primaries: str = ""
     fill: str = "black"           # aspect-mismatch pad fill: "black" | "blur"
     hw_encoder: str = "off"       # "off" | "auto" | "nvenc" | "qsv" | "amf"
     quality: int = 18             # CRF (software) / equivalent quality knob (GPU) — see QUALITY_PRESETS
@@ -377,6 +402,8 @@ def _video_encoder_args(conform: "ConformSpec", ff: str = None) -> list:
     actually probes as working on this machine; otherwise falls back to the
     software encoder unchanged from before this option existed."""
     cs = conform.color_space or "bt709"
+    primaries = getattr(conform, "color_primaries", "") or cs
+    trc = getattr(conform, "color_transfer", "") or cs
     codec = (conform.codec or "hevc").lower()
 
     quality = getattr(conform, "quality", 18) or 18
@@ -387,14 +414,14 @@ def _video_encoder_args(conform: "ConformSpec", ff: str = None) -> list:
         if vendor:
             hw_args = hw_video_encoder_args(codec, vendor, conform.pix_fmt, quality)
             if hw_args:
-                return hw_args + ["-colorspace", cs, "-color_primaries", cs, "-color_trc", cs]
+                return hw_args + ["-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
 
     args = ["-crf", str(quality), "-preset", "medium", "-pix_fmt", conform.pix_fmt]
     if codec in ("hevc", "h265"):
         return ["-c:v", "libx265"] + args + ["-tag:v", "hvc1",
-                "-colorspace", cs, "-color_primaries", cs, "-color_trc", cs]
+                "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
     return ["-c:v", "libx264"] + args + [
-        "-colorspace", cs, "-color_primaries", cs, "-color_trc", cs]
+        "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
 
 
 def transcode_vf_parts(clip: ClipInfo, square_mode: str,
@@ -607,6 +634,11 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         clip, square_mode, conform,
         src_width=(clip.lrv_width or None) if use_lrv else None,
         src_height=(clip.lrv_height or None) if use_lrv else None)
+    # A clip's Primary-slot override and a separately-enabled Mixed Audio
+    # track can both independently resolve to "mix"/"mix_alac" for the same
+    # clip — each needs its OWN single-use filtergraph pad (see
+    # _mix_filtergraph's docstring for the crash this avoids).
+    mix_fill_count = sum(1 for f in fills if f[1] in ("mix", "mix_alac"))
     has_fc_audio = any(f[1] in ("stretch", "mix", "mix_alac") for f in fills)
     # A plain "-vf" shorthand implicitly picks its own input regardless of any
     # explicit -map, so once video comes from a NON-zero input (the LRV proxy)
@@ -619,14 +651,15 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     if any(f[1] == "stretch" for f in fills):
         factor = (clip.wav_duration / dur) if dur > 0 else 1.0
         fc.append(f"[{wav_idx}:a:0]{atempo_chain(factor)}[s]")
-    if any(f[1] in ("mix", "mix_alac") for f in fills):
-        fc.append(_mix_filtergraph(mix))
+    if mix_fill_count:
+        fc.append(_mix_filtergraph(mix, n_outputs=mix_fill_count))
     if fc:
         cmd += ["-filter_complex", ";".join(fc)]
 
     # ── Maps ──────────────────────────────────────────────────────────────────
     if plan.include_video:
         cmd += ["-map", "[v]" if uses_fc_video else f"{video_src_idx}:v:0"]
+    mix_slot_i = 0
     for (kind, fill, codec, title) in fills:
         if fill in ("copy", "cam_alac"):
             cmd += ["-map", "0:a:0"]
@@ -635,7 +668,8 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         elif fill == "stretch":
             cmd += ["-map", "[s]"]
         elif fill in ("mix", "mix_alac"):
-            cmd += ["-map", "[mix]"]
+            cmd += ["-map", f"[mix{mix_slot_i}]" if mix_fill_count > 1 else "[mix]"]
+            mix_slot_i += 1
         else:  # silence
             cmd += ["-map", f"{silence_idx}:a:0"]
 
@@ -672,13 +706,25 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         cmd += [f"-disposition:a:{i}", "default" if i == 0 else "0"]
         cmd += [f"-metadata:s:a:{i}", f"title={title}"]
 
-    if use_lrv:
-        # The LRV proxy's own duration rarely matches the camera file's to the
-        # millisecond (confirmed directly: a real proxy ran ~0.3s longer than
-        # its paired 4K clip) — cut the OUTPUT to this clip's own true
-        # duration so a per-clip drift never bleeds into the concatenated
-        # master's timing.
-        cmd += ["-t", f"{max(0.01, dur):.3f}"]
+    # Cut the OUTPUT to this clip's own true (video) duration — UNCONDITIONALLY,
+    # not just for the LRV-proxy-swap path. Any audio input can legitimately run
+    # longer than the video: a WAV recorder commonly keeps rolling a beat past
+    # the camera stopping, and a clip-split WAV that still carries the NEXT
+    # clip's audio can overrun by that clip's ENTIRE duration. Without this,
+    # ffmpeg has no -shortest and no -t, so the per-clip temp file's container
+    # duration follows the LONGEST stream, not the video — confirmed as a real,
+    # high-impact bug this way: a real user's clip-split master had one clip's
+    # segment run ~384s longer than its own video (its WAV backup was still the
+    # camera's UN-split original, spanning both the clip and its split
+    # successor), which the concat demuxer then advanced by, drifting every
+    # later clip's presentation position by the overrun and leaving the video
+    # decoder holding a frozen last frame for the difference — exactly the
+    # "freeze frame" symptom reported. Previously this cutoff only existed for
+    # the LRV-swap case (a smaller, more consistent instance of the same class
+    # of bug — a proxy's own duration rarely matches its paired clip's to the
+    # millisecond); reproduced directly and confirmed this is the general case,
+    # not LRV-specific.
+    cmd += ["-t", f"{max(0.01, dur):.3f}"]
     cmd += ["-progress", str(progress_file), "-nostats", str(out)]
     return cmd
 
@@ -713,9 +759,15 @@ def build_concat_cmd(ff: str, concat_file: Path, chapters_file: Path,
     return cmd
 
 
+# ProRes profile numbers for prores_ks's -profile:v, keyed by the Compatible-
+# playback-master UI's own quality names.
+PRORES_PROFILES = {"proxy": 0, "standard": 2, "hq": 3}
+
+
 def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
                               output: Path, progress_file: Path,
-                              crf: int = 20, extra_out_args: Optional[list] = None) -> list:
+                              crf: int = 20, extra_out_args: Optional[list] = None,
+                              codec: str = "h264", prores_profile: str = "hq") -> list:
     """Concatenate the per-clip temp files but RE-ENCODE the video into ONE clean,
     continuous, widely-compatible stream — the fix for the broken-splice playback
     a stream-copy concat produces.
@@ -730,24 +782,39 @@ def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
     encoder one coherent GOP/reference structure end to end, so there are no
     splices left to break.
 
-    Video → 8-bit H.264 (yuv420p, high profile) for the widest device/player
-    support; audio stream-copied (concat-safe for playback); `+faststart` puts the
-    moov atom up front. The baseline is the WATCHABLE copy — the lossless
-    originals live in the archival tracks / kept clip files — so re-encoding it
-    here costs nothing that matters and buys a file that plays everywhere.
+    `codec="h264"` (default): 8-bit H.264 (yuv420p, high profile) for the widest
+    device/player support. `codec="prores"`: Apple ProRes (prores_ks) instead —
+    an edit-friendly intermediate rather than a delivery format, useful when the
+    footage itself is troublesome for H.264 (e.g. a 4K 10-bit HEVC source whose
+    decode is heavy enough that an H.264 re-encode on a loaded machine drops/
+    duplicates frames — ProRes's intra-only GOP is far more forgiving of that).
+    `prores_profile` (only used when codec="prores") is one of PRORES_PROFILES'
+    keys: "proxy" (smallest, offline-edit quality), "standard" (422), or "hq"
+    (422 HQ, the default — matches this app's own one-off ProRes transcodes).
 
-    Validated on a real merge (task #13): the resulting baseline is one clean
-    h264/yuv420p stream that decodes end-to-end with ZERO errors, versus the
-    hundreds of broken-reference errors a stream-copy concat of the same clips
-    produced.
+    Audio is stream-copied either way (concat-safe for playback); `+faststart`
+    puts the moov atom up front for H.264 (harmless no-op for ProRes/.mov, kept
+    for a uniform command shape). The baseline is the WATCHABLE copy — the
+    lossless originals live in the archival tracks / kept clip files — so
+    re-encoding it here costs nothing that matters.
+
+    Validated on a real merge (task #13): the H.264 path's resulting baseline is
+    one clean h264/yuv420p stream that decodes end-to-end with ZERO errors,
+    versus the hundreds of broken-reference errors a stream-copy concat of the
+    same clips produced.
     """
     cmd = [ff, "-y",
            "-f", "concat", "-safe", "0", "-i", str(concat_file),
            "-i", str(chapters_file),
-           "-map_metadata", "1", "-map", "0",
-           "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
-           "-pix_fmt", "yuv420p", "-profile:v", "high",
-           "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+           "-map_metadata", "1", "-map", "0"]
+    if codec == "prores":
+        profile_num = PRORES_PROFILES.get(prores_profile, PRORES_PROFILES["hq"])
+        cmd += ["-c:v", "prores_ks", "-profile:v", str(profile_num),
+               "-vendor", "apl0", "-pix_fmt", "yuv422p10le"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+               "-pix_fmt", "yuv420p", "-profile:v", "high"]
+    cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
            "-c:a", "copy",
            "-movflags", "+faststart",
            "-progress", str(progress_file), "-nostats"]

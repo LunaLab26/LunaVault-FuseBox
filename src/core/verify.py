@@ -341,7 +341,15 @@ def predict_unverifiable(entry, plan, own_archival_track: bool,
         this condition, not just some.
     """
     predicted = {}
-    if entry.conform_status == "transcode" and plan.video_stream == 0:
+    # Any clip whose video isn't a byte-exact copy of its own archival track —
+    # "transcode" (odd spec), "hdr" (routed through the same encoder path —
+    # see manifest.ClipEntry.recovery_fidelity's own docstring), or an
+    # "ok"-conform clip whose shared baseline itself got re-encoded (compat
+    # baseline) — is expected to differ from its original here. Checking only
+    # the literal string "transcode" missed both "hdr" and the compat-baseline
+    # case, producing a spurious "unexpected mismatch" report for video that
+    # was never promised to survive byte-exact.
+    if entry.recovery_fidelity == "transcoded" and plan.video_stream == 0:
         predicted["Video"] = (
             "expected: this clip needed conforming and has no archival track of its own, "
             "so it was re-encoded straight into the shared baseline — its video is supposed "

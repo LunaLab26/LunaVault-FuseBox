@@ -104,12 +104,23 @@ PER_TEST_TIMEOUT_S = int(os.environ.get("MD5_PER_TEST_TIMEOUT_S", "1200"))
                             # ones; raise MD5_PER_TEST_TIMEOUT_S when running just that one.
 LOAD_TIMEOUT_S = 90
 
-# (archival, per_clip_archival, optimize_baseline, quality_preset_or_None)
+# (archival, per_clip_archival, optimize_baseline, quality_preset_or_None,
+#  compat_baseline, compat_codec, compat_prores_profile)
 MATRIX = [
-    ("baseline_only",     False, False, False, None),
-    ("archival_shared",   True,  False, False, None),
-    ("archival_percpip",  True,  True,  False, None),
-    ("optimize_youtube",  True,  True,  True,  "youtube"),
+    ("baseline_only",     False, False, False, None,     False, "h264",   "hq"),
+    ("archival_shared",   True,  False, False, None,     False, "h264",   "hq"),
+    ("archival_percpip",  True,  True,  False, None,     False, "h264",   "hq"),
+    ("optimize_youtube",  True,  True,  True,  "youtube", False, "h264",   "hq"),
+    # Compatible playback master: unit-tested at the command-builder level
+    # already (test_ffmpeg_cmd.py), but never through a REAL merge until now —
+    # these four cover H.264 and all three ProRes profiles, each combined with
+    # Archival master + One track per clip so MD5 verify also proves the
+    # archival originals stay byte-exact regardless of what the baseline
+    # itself gets re-encoded to.
+    ("compat_h264",       True,  True,  False, None,     True,  "h264",   "hq"),
+    ("compat_prores_proxy", True, True, False, None,     True,  "prores", "proxy"),
+    ("compat_prores_std", True,  True,  False, None,     True,  "prores", "standard"),
+    ("compat_prores_hq",  True,  True,  False, None,     True,  "prores", "hq"),
 ]
 
 
@@ -126,13 +137,16 @@ def _wait_for(condition, timeout_s, tick=0.05):
 
 def run_one(source_folder: Path, work_dir: Path, test_id: str,
            archival: bool, per_clip: bool, optimize: bool, quality_preset,
-           baseline_index: int = 0) -> dict:
+           baseline_index: int = 0, compat_baseline: bool = False,
+           compat_codec: str = "h264", compat_prores_profile: str = "hq") -> dict:
     _init_qt()
     settings = Settings()
     result = {
         "test_id": test_id, "archival": archival, "per_clip_archival": per_clip,
         "optimize_baseline": optimize, "quality_preset": quality_preset,
         "baseline_index": baseline_index, "source_folder": str(source_folder),
+        "compat_baseline": compat_baseline, "compat_codec": compat_codec,
+        "compat_prores_profile": compat_prores_profile,
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     mt = None
@@ -159,6 +173,13 @@ def run_one(source_folder: Path, work_dir: Path, test_id: str,
         mt._verify_md5_check.setChecked(True)
         if optimize and quality_preset in mt._quality_radios:
             mt._quality_radios[quality_preset].setChecked(True)
+        mt._compat_baseline_check.setChecked(compat_baseline)
+        if compat_baseline:
+            if compat_codec == "prores":
+                mt._compat_codec_prores_radio.setChecked(True)
+                mt._prores_profile_radios[compat_prores_profile].setChecked(True)
+            else:
+                mt._compat_codec_h264_radio.setChecked(True)
         for _ in range(10):
             app.processEvents()
             time.sleep(0.02)
@@ -167,6 +188,9 @@ def run_one(source_folder: Path, work_dir: Path, test_id: str,
             "archival": mt._archival_check.isChecked(),
             "per_clip_archival": mt._per_clip_archival_check.isChecked(),
             "optimize_baseline": mt._optimize_baseline_check.isEnabled() and mt._optimize_baseline_check.isChecked(),
+            "compat_baseline": mt._compat_baseline_check.isChecked(),
+            "compat_codec": getattr(mt, "compat_codec", "h264"),
+            "compat_prores_profile": getattr(mt, "compat_prores_profile", "hq"),
         }
 
         out_dir = work_dir / test_id
@@ -253,11 +277,15 @@ def _write_summary(summary_path: Path, results: list):
     lines = [f"MD5 recovery matrix — {len(results)} test(s) run", ""]
     for r in results:
         eff = r.get("effective", {})
+        compat = eff.get("compat_baseline", r.get("compat_baseline"))
+        compat_txt = "" if not compat else (
+            f" compat=prores/{eff.get('compat_prores_profile', r.get('compat_prores_profile'))}"
+            if eff.get("compat_codec", r.get("compat_codec")) == "prores" else " compat=h264")
         lines.append(f"[{r.get('status', '?').upper():16s}] {r.get('test_id', '?'):20s} "
                      f"archival={eff.get('archival', r.get('archival'))!s:5} "
                      f"otpc={eff.get('per_clip_archival', r.get('per_clip_archival'))!s:5} "
                      f"optimize={eff.get('optimize_baseline', r.get('optimize_baseline'))!s:5} "
-                     f"quality={r.get('quality_preset')}")
+                     f"quality={r.get('quality_preset')}{compat_txt}")
         if r.get("verify_summary"):
             lines.append(f"                   {r['verify_summary']}")
         if r.get("error"):
@@ -293,10 +321,15 @@ def run_matrix(source_folder: Path, work_dir: Path, tag: str, baseline_index: in
     durations = []
     total = len(matrix)
     print(f"Starting matrix '{tag}': {total} tests against {source_folder}")
-    for i, (test_id, archival, per_clip, optimize, quality) in enumerate(matrix):
+    for i, (test_id, archival, per_clip, optimize, quality, compat_baseline,
+           compat_codec, compat_prores_profile) in enumerate(matrix):
         full_id = f"{tag}_{test_id}"
+        compat_desc = (f" compat={compat_codec}"
+                      + (f"/{compat_prores_profile}" if compat_codec == "prores" else "")
+                      if compat_baseline else "")
         print(f"\n[{i+1}/{total}] {full_id}  "
-             f"(archival={archival} otpc={per_clip} optimize={optimize} quality={quality})", flush=True)
+             f"(archival={archival} otpc={per_clip} optimize={optimize} quality={quality}"
+             f"{compat_desc})", flush=True)
         _write_progress(progress_path, i, total, durations, full_id)
         t0 = time.time()
 
@@ -310,6 +343,9 @@ def run_matrix(source_folder: Path, work_dir: Path, tag: str, baseline_index: in
             "--optimize", "1" if optimize else "0",
             "--quality", quality or "",
             "--baseline-index", str(baseline_index),
+            "--compat-baseline", "1" if compat_baseline else "0",
+            "--compat-codec", compat_codec,
+            "--compat-prores-profile", compat_prores_profile,
             "--out", str(out_path),
         ]
         # Base fields every result needs regardless of how the subprocess
@@ -319,7 +355,9 @@ def run_matrix(source_folder: Path, work_dir: Path, tag: str, baseline_index: in
         # directly: exactly this happened on the first live run).
         base_fields = dict(test_id=full_id, archival=archival, per_clip_archival=per_clip,
                           optimize_baseline=optimize, quality_preset=quality,
-                          baseline_index=baseline_index, source_folder=str(source_folder))
+                          baseline_index=baseline_index, source_folder=str(source_folder),
+                          compat_baseline=compat_baseline, compat_codec=compat_codec,
+                          compat_prores_profile=compat_prores_profile)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=per_test_timeout_s)
             if out_path.exists():
@@ -364,6 +402,9 @@ if __name__ == "__main__":
     ap.add_argument("--per-clip")
     ap.add_argument("--optimize")
     ap.add_argument("--quality")
+    ap.add_argument("--compat-baseline", default="0")
+    ap.add_argument("--compat-codec", default="h264")
+    ap.add_argument("--compat-prores-profile", default="hq")
     ap.add_argument("--out")
     args = ap.parse_args()
 
@@ -372,6 +413,8 @@ if __name__ == "__main__":
             Path(args.source_folder), Path(args.work_dir), args.test_id,
             args.archival == "1", args.per_clip == "1", args.optimize == "1",
             args.quality or None, args.baseline_index,
+            compat_baseline=args.compat_baseline == "1",
+            compat_codec=args.compat_codec, compat_prores_profile=args.compat_prores_profile,
         )
         Path(args.out).write_text(json.dumps(result), encoding="utf-8")
         sys.exit(0 if result.get("status") == "pass" else 1)

@@ -29,6 +29,7 @@ from probe import probe, probe_duration, pix_fmt_info, BaselineSpec, apply_confo
 from settings import Settings
 from core.ffmpeg_cmd import (OutputPlan, OutputTrack, ConformSpec, DEFAULT_CONFORM, build_clip_sample_cmd,
                              QUALITY_PRESETS, DEFAULT_QUALITY_PRESET, quality_for_preset)
+from core.eta import format_hms, format_completion
 from core.baseline import ClipSpec, enumerate_specs, recommend_baseline
 from core.sync_advanced import LARGE_MISMATCH_S
 import log_manager
@@ -928,7 +929,18 @@ class MergeTab(QWidget):
         self._show_sync_check = QCheckBox("Show sync details")
         self._show_sync_check.setToolTip("Show the WAV Offset and Drift columns.")
         self._show_sync_check.toggled.connect(self._on_show_sync_toggled)
-        clips_frame, clips_box = self._section("CLIPS", right=self._show_sync_check)
+        clips_hdr_extra = QWidget()
+        clips_hdr_row = QHBoxLayout(clips_hdr_extra)
+        clips_hdr_row.setContentsMargins(0, 0, 0, 0)
+        clips_hdr_row.setSpacing(8)
+        select_all_btn = QPushButton("Select all")
+        select_all_btn.clicked.connect(lambda: self._set_all_clips_selected(True))
+        select_none_btn = QPushButton("Select none")
+        select_none_btn.clicked.connect(lambda: self._set_all_clips_selected(False))
+        clips_hdr_row.addWidget(select_all_btn)
+        clips_hdr_row.addWidget(select_none_btn)
+        clips_hdr_row.addWidget(self._show_sync_check)
+        clips_frame, clips_box = self._section("CLIPS", right=clips_hdr_extra)
         self._clips_title = self._section_titles[-1]
 
         # Probing (ffprobe per clip) can take a noticeable moment on a large real
@@ -1068,11 +1080,19 @@ class MergeTab(QWidget):
         pbar_row = QHBoxLayout()
         self._pbar = QProgressBar()
         self._pbar.setRange(0, 100)
-        self._stats_label = QLabel("—")
-        self._stats_label.setFixedWidth(420)
         pbar_row.addWidget(self._pbar, 1)
-        pbar_row.addWidget(self._stats_label)
         prog_layout.addLayout(pbar_row)
+
+        # Two lines: current rate/GB/percent, then the conservative total-
+        # time + wall-clock completion estimate (see core.eta) — full width
+        # rather than squeezed beside the bar, since both lines carry real
+        # precision (2-decimal percent, exact GB, a dated completion time).
+        self._stats_label = QLabel("—")
+        self._stats_label.setWordWrap(True)
+        prog_layout.addWidget(self._stats_label)
+        self._eta_label = QLabel("—")
+        self._eta_label.setWordWrap(True)
+        prog_layout.addWidget(self._eta_label)
 
         thumb_row = QHBoxLayout()
         self._thumb_label = QLabel("Rendering…")
@@ -1429,20 +1449,82 @@ class MergeTab(QWidget):
         self._compat_baseline_check = QCheckBox("Compatible playback master")
         self._compat_baseline_check.setChecked(bool(getattr(self, "compat_baseline", False)))
         self._compat_baseline_check.setToolTip(
-            "Rebuild the watchable video as one clean, continuous stream (8-bit H.264)\n"
-            "instead of stream-copying the clips together end-to-end. Stream-copying\n"
-            "joins independently-encoded segments without re-encoding, which breaks the\n"
+            "Rebuild the watchable video as one clean, continuous stream instead of\n"
+            "stream-copying the clips together end-to-end. Stream-copying joins\n"
+            "independently-encoded segments without re-encoding, which breaks the\n"
             "video's internal frame references at each join — some players show green or\n"
             "garbled frames, freezes, or stutters, and every player copes differently.\n"
             "This option makes a master that plays smoothly everywhere. Your archival\n"
             "originals are unaffected. Adds re-encode time and is not bit-exact for the\n"
             "playable track (the lossless originals still are).")
         self._compat_baseline_check.toggled.connect(
-            lambda on: setattr(self, "compat_baseline", bool(on)))
+            lambda on: (setattr(self, "compat_baseline", bool(on)), self._update_compat_codec_rows()))
         box.addWidget(self._compat_baseline_check)
+
+        # Codec choice for the compatible-playback re-encode — H.264 for the
+        # widest device/player support, or ProRes as an edit-friendly
+        # intermediate. Surfaced directly: a real report found H.264 re-encodes
+        # of heavy 4K 10-bit HEVC source footage drop/duplicate frames on a
+        # loaded machine, while the same footage converts to ProRes cleanly
+        # (ProRes's intra-only GOP has no inter-frame reference chain to break).
+        codec_row = QHBoxLayout()
+        codec_row.addSpacing(20)
+        self._compat_codec_group = QButtonGroup(self)
+        self._compat_codec_h264_radio = QRadioButton("H.264 (widest compatibility)")
+        self._compat_codec_prores_radio = QRadioButton("ProRes (edit-friendly intermediate)")
+        self._compat_codec_group.addButton(self._compat_codec_h264_radio)
+        self._compat_codec_group.addButton(self._compat_codec_prores_radio)
+        saved_codec = getattr(self, "compat_codec", "h264")
+        self._compat_codec_h264_radio.setChecked(saved_codec != "prores")
+        self._compat_codec_prores_radio.setChecked(saved_codec == "prores")
+        self._compat_codec_h264_radio.toggled.connect(self._on_compat_codec_changed)
+        self._compat_codec_prores_radio.toggled.connect(self._on_compat_codec_changed)
+        codec_row.addWidget(self._compat_codec_h264_radio)
+        codec_row.addWidget(self._compat_codec_prores_radio)
+        codec_row.addStretch()
+        box.addLayout(codec_row)
+
+        prores_row = QHBoxLayout()
+        prores_row.addSpacing(40)
+        self._prores_profile_group = QButtonGroup(self)
+        self._prores_profile_radios: dict = {}
+        for key, label in (("proxy", "Proxy"), ("standard", "Standard (422)"), ("hq", "HQ (422 HQ)")):
+            radio = QRadioButton(label)
+            self._prores_profile_group.addButton(radio)
+            self._prores_profile_radios[key] = radio
+            prores_row.addWidget(radio)
+        saved_profile = getattr(self, "compat_prores_profile", "hq")
+        self._prores_profile_radios.get(saved_profile, self._prores_profile_radios["hq"]).setChecked(True)
+        for radio in self._prores_profile_radios.values():
+            radio.toggled.connect(self._on_prores_profile_changed)
+        prores_row.addStretch()
+        box.addLayout(prores_row)
+        self._update_compat_codec_rows()
 
         self._update_archival_dependency_states()
         return frame
+
+    def _on_compat_codec_changed(self, *_args):
+        self.compat_codec = "prores" if self._compat_codec_prores_radio.isChecked() else "h264"
+        self._update_compat_codec_rows()
+
+    def _on_prores_profile_changed(self, *_args):
+        for key, radio in self._prores_profile_radios.items():
+            if radio.isChecked():
+                self.compat_prores_profile = key
+                break
+
+    def _update_compat_codec_rows(self):
+        """The codec choice only matters (and is only shown enabled) once
+        Compatible playback master is on; the ProRes profile row only matters
+        once ProRes itself is chosen — same cascading-enable pattern as the
+        archival dependency chain above."""
+        compat_on = self._compat_baseline_check.isChecked()
+        self._compat_codec_h264_radio.setEnabled(compat_on)
+        self._compat_codec_prores_radio.setEnabled(compat_on)
+        prores_on = compat_on and self._compat_codec_prores_radio.isChecked()
+        for radio in self._prores_profile_radios.values():
+            radio.setEnabled(prores_on)
 
     def _update_archival_dependency_states(self):
         """Cascading fade: each setting needs the one above it. Disabling (not
@@ -1825,7 +1907,8 @@ class MergeTab(QWidget):
             st = c.stream
             if st and st.width and st.height:
                 specs.append(ClipSpec(st.codec, st.width, st.height, st.fps_str, st.pix_fmt,
-                                      pix_fmt_info(st.pix_fmt)[0], st.color_space, st.duration))
+                                      pix_fmt_info(st.pix_fmt)[0], st.color_space, st.duration,
+                                      color_transfer=st.color_transfer, color_primaries=st.color_primaries))
         return specs
 
     def _build_baseline_chooser(self):
@@ -1915,8 +1998,9 @@ class MergeTab(QWidget):
         fill = "blur" if self._fill_combo.currentIndex() == 1 else "black"
         return ConformSpec(width=g.width, height=g.height, fps=_fps_to_ffmpeg(g.fps),
                            codec=g.codec, pix_fmt=g.pix_fmt,
-                           color_space=g.color_space or "bt709", fill=fill,
-                           hw_encoder=hw, quality=quality)
+                           color_space=g.color_space or "bt709",
+                           color_transfer=g.color_transfer, color_primaries=g.color_primaries,
+                           fill=fill, hw_encoder=hw, quality=quality)
 
     def _start_gpu_probe(self):
         ff, _ = get_ffmpeg()
@@ -2174,17 +2258,12 @@ class MergeTab(QWidget):
         import shutil
         from core.plan_report import analyze_merge
         from preflight_dialog import PreflightDialog
-        from show_me import build_story
         report = analyze_merge(clips, self._effective_plan())
-        story = build_story(
-            clips,
-            archival=self._archival_check.isChecked(),
-            per_clip_archival=self._per_clip_archival_check.isChecked(),
-            optimize_baseline=self._effective_optimize_baseline(),
-            compat_baseline=bool(getattr(self, "compat_baseline", False)),
-            audio_tracks=[t.kind for t in self._effective_plan().tracks if t.enabled],
-            output_name=self._out_name.text().strip() or "master.mov",
-        )
+        # Same ordering analyze_merge itself uses internally, so report.clips[i]
+        # and ordered_clips[i] refer to the same clip — needed so the
+        # diagnostics feature can attach a real ClipInfo (.path, .duration) to
+        # each card by index.
+        ordered_clips = sorted(clips, key=lambda c: c.order_idx)
         free = None
         out_dir = self._out_dir.text().strip()
         if out_dir:
@@ -2193,7 +2272,7 @@ class MergeTab(QWidget):
             except Exception:
                 free = None
         dlg = PreflightDialog(report, self, free_bytes=free,
-                              need_bytes=self._estimated_need_bytes(), story=story)
+                              need_bytes=self._estimated_need_bytes(), clips=ordered_clips)
         dlg.start_requested.connect(self._start_merge)
         dlg.exec()
 
@@ -2772,6 +2851,12 @@ class MergeTab(QWidget):
         self._populate_table()
         self._dst_banner.setVisible(check_dst_warning(self._clips))
 
+    def _set_all_clips_selected(self, selected: bool):
+        for clip in self._clips:
+            clip.selected = selected
+        self._populate_table()
+        self._update_estimate()
+
     # ── Output ────────────────────────────────────────────────────────────────
 
     def _suggest_output_paths(self, folder: Path):
@@ -2798,10 +2883,21 @@ class MergeTab(QWidget):
     # ── Merge ─────────────────────────────────────────────────────────────────
 
     def _estimated_need_bytes(self) -> int:
-        """Peak space needed on the output drive: temp clips + final ≈ 2× output."""
+        """Peak space needed on the output drive: the whole pipeline's own
+        estimated write volume (per-clip mux + concat/compat-baseline re-encode
+        + archival/preserve passes — see core.plan_report.
+        estimate_total_pipeline_bytes) plus headroom for the temp clips
+        alongside the final master."""
         try:
-            from core.plan_report import analyze_merge
-            return int(analyze_merge(self._selected_clips(), self._effective_plan()).total_bytes * 2.2)
+            from core.plan_report import estimate_total_pipeline_bytes
+            clips = self._selected_clips()
+            plan = self._effective_plan()
+            total = estimate_total_pipeline_bytes(
+                clips, plan, archival=self._archival_check.isChecked(),
+                compat_baseline=self._compat_baseline_check.isChecked(),
+                compat_codec=getattr(self, "compat_codec", "h264"),
+                compat_prores_profile=getattr(self, "compat_prores_profile", "hq"))
+            return int(total * 1.1)   # headroom on top of the pipeline's own multi-pass estimate
         except Exception:
             return 0
 
@@ -2901,6 +2997,8 @@ class MergeTab(QWidget):
         self._step_label.setText("Starting…")
         self._kind_badge.setText("")
         self._pbar.setValue(0)
+        self._stats_label.setText("—")
+        self._eta_label.setText("Estimating…")
         self._start_btn.hide()
         self._cancel_btn.show()
 
@@ -2921,6 +3019,8 @@ class MergeTab(QWidget):
             # plays everywhere); the classic tab leaves it off unless a caller opts
             # in. See ffmpeg_runner / task #13.
             compat_baseline = getattr(self, "compat_baseline", False),
+            compat_codec = getattr(self, "compat_codec", "h264"),
+            compat_prores_profile = getattr(self, "compat_prores_profile", "hq"),
         )
         self._last_verify_summary = ""
         self._worker.progress.connect(self._on_progress)
@@ -2955,7 +3055,14 @@ class MergeTab(QWidget):
         idx   = data.get("stage_idx", 1) - 1
         pct   = data.get("pct", 0)
         size  = data.get("size", 0)
-        self._pbar.setValue(int(pct))
+        # byte_pct (whole-job, byte-weighted) drives the bar/readout for the
+        # write-heavy stages; verify's raw dict carries no byte_pct at all
+        # (it reads/decodes, writes no persistent sized output — see
+        # MergeWorker._metrics), so it naturally falls back to its own
+        # clip-count pct instead.
+        byte_pct = data.get("byte_pct")
+        display_pct = byte_pct if byte_pct is not None else pct
+        self._pbar.setValue(int(display_pct))
         p = theme.active_palette()
         pill_ok    = f"background:{p.ok}; color:white; border-radius:4px; padding:3px 7px; font-size:11px;"
         pill_accent = f"background:{p.accent}; color:{p.text}; border-radius:4px; padding:3px 7px; font-size:11px;"
@@ -2992,21 +3099,36 @@ class MergeTab(QWidget):
             f"background:{kind_col}; color:white; border-radius:4px; padding:2px 8px; "
             "font-size:10px; font-weight:600;")
 
-        rate    = data.get("rate_bps", 0) or 0
-        eta     = data.get("eta_secs", 0) or 0
-        elapsed = data.get("elapsed_secs", 0) or 0
+        if stage == "verify":
+            # No byte/rate/ETA model for verify (see MergeWorker._metrics) —
+            # an honest placeholder beats a frozen, increasingly-stale GB/ETA
+            # readout left over from the write phase.
+            self._stats_label.setText(f"{display_pct:.2f}%")
+            self._eta_label.setText("MD5 verification — no time estimate for this pass")
+            return
 
-        def _mmss(secs):
-            m, s = divmod(int(secs), 60)
-            return f"{m}:{s:02d}"
+        rate     = data.get("rate_bps", 0) or 0
+        elapsed  = data.get("elapsed_secs", 0) or 0
+        eta      = data.get("eta_secs")
+        total    = data.get("total_secs")
+        produced = data.get("produced_bytes")
+        expected = data.get("expected_total_bytes")
 
-        parts = [f"{size/1024**3:.2f} GB", f"{pct:.0f}%"]
+        parts = [f"{display_pct:.2f}%"]
+        if produced is not None and expected:
+            parts.append(f"{produced/1024**3:.2f} / {expected/1024**3:.2f} GB")
+        else:
+            parts.append(f"{size/1024**3:.2f} GB")
         if rate > 0:
             parts.append(f"{rate/1024/1024:.0f} MB/s")
-        parts.append(f"Elapsed {_mmss(elapsed)}")
-        if eta > 1:
-            parts.append(f"ETA {_mmss(eta)}")
+        parts.append(f"Elapsed {format_hms(elapsed)}")
         self._stats_label.setText("  ·  ".join(parts))
+
+        if eta is not None:
+            self._eta_label.setText(
+                f"Total ~{format_hms(total)} — completes ~{format_completion(eta)}")
+        else:
+            self._eta_label.setText("Estimating…")
 
     def _on_thumbnail(self, path: str):
         px = QPixmap(path)

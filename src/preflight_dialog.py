@@ -4,12 +4,13 @@ Shows, per clip: the video action, the audio tracks that will be created (with
 codec + lossless flag), and the reasoning (missing camera audio, slow-motion
 stretch, etc.), plus the total anticipated output size and a time estimate.
 
-When a `Story` is supplied (see show_me.py), a static "big picture" diagram —
-the same film-strip/tape-reel visual language as the animated "Show me"
-button, frozen at its FINAL frame (everything already landed on the reel/
-shelves/vault) rather than played — sits above the numeric per-clip cards, so
-the shape of the whole merge (what stream-copies, what converts, where each
-audio source ends up) is visible at a glance before reading the details.
+Also offers optional pre-flight DIAGNOSTIC checks (core/diagnostics.py,
+diagnostics_workers.py) — container structure, packet timestamps, stream-copy
+compatibility, and decode-error scans — run on demand against the real clip
+files, with results attached to each clip's own card. Informational only:
+findings never block "Start merge" (the same way the disk-space warning is a
+heads-up, not a hard stop) — it's the user's call what to do about a flagged
+clip (re-encode anyway, swap in an LRV proxy, drop it, etc.).
 """
 
 from typing import Optional
@@ -17,11 +18,13 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QWidget, QFrame,
+    QWidget, QFrame, QCheckBox, QProgressBar,
 )
 
 from core.plan_report import MergeReport
-from show_me import Story, ShowMeCanvas
+from core.binaries import get_ffmpeg
+from core import diagnostics as diag
+from diagnostics_workers import DiagnosticsWorker
 import theme
 
 
@@ -48,14 +51,17 @@ class PreflightDialog(QDialog):
     start_requested = Signal()
 
     def __init__(self, report: MergeReport, parent=None, free_bytes=None, need_bytes=0,
-                story: Optional[Story] = None):
+                clips: Optional[list] = None):
         super().__init__(parent)
         self.setWindowTitle("Pre-flight — what this merge will do")
-        self.setMinimumSize(700, 480) if story is not None else self.setMinimumSize(560, 480)
+        self.setMinimumSize(560, 480)
         self._p = theme.active_palette()
         p = self._p
         self._free_bytes = free_bytes
         self._need_bytes = need_bytes
+        self._clips = clips or []          # real ClipInfo objects, same order as report.clips
+        self._diag_worker: Optional[DiagnosticsWorker] = None
+        self._clip_diag_labels: dict = {}   # 0-based clip index -> QLabel
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
@@ -98,27 +104,9 @@ class PreflightDialog(QDialog):
             disk.setStyleSheet(f"color:{p.danger if low else p.text_dim}; font-size:11px;")
             root.addWidget(disk)
 
-        # ── Big-picture diagram: film strips / tape reels, frozen at the END
-        # of the "Show me" animation — everything already landed on the reel,
-        # its shelves, and the vault, so the whole shape of the merge reads
-        # at a glance without waiting through the animation (that's what the
-        # separate "✨ Show me" button is for). ──────────────────────────────
-        if story is not None:
-            diagram_frame = QFrame()
-            diagram_frame.setStyleSheet(
-                f"QFrame {{ background:{p.surface2}; border:1px solid {p.border}; border-radius:8px; }}")
-            dl = QVBoxLayout(diagram_frame)
-            dl.setContentsMargins(10, 8, 10, 4)
-            dl.setSpacing(4)
-            dtitle = QLabel("HOW YOUR CLIPS BECOME THE MASTER")
-            dtitle.setStyleSheet(f"color:{p.text_mute}; font-size:10px; font-weight:bold; "
-                                 "letter-spacing:1px; border:none;")
-            dl.addWidget(dtitle)
-            self._diagram = ShowMeCanvas(story)
-            self._diagram.setMinimumSize(640, 320)
-            self._diagram.set_time(self._diagram.total_duration)   # static final frame, no timer
-            dl.addWidget(self._diagram)
-            root.addWidget(diagram_frame)
+        # ── Diagnostics ──────────────────────────────────────────────────────
+        if self._clips:
+            root.addWidget(self._build_diagnostics_section())
 
         # ── Per-clip list ────────────────────────────────────────────────────
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
@@ -143,6 +131,116 @@ class PreflightDialog(QDialog):
         start.clicked.connect(self._on_start)
         btns.addWidget(close); btns.addWidget(start)
         root.addLayout(btns)
+
+    # ── Diagnostics section ───────────────────────────────────────────────────
+
+    def _build_diagnostics_section(self) -> QFrame:
+        p = self._p
+        frame = QFrame()
+        frame.setStyleSheet(f"QFrame {{ background:{p.surface2}; border:1px solid {p.border}; border-radius:8px; }}")
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(6)
+
+        title = QLabel("DIAGNOSTICS")
+        title.setStyleSheet(f"color:{p.text_mute}; font-size:10px; font-weight:bold; "
+                            "letter-spacing:1px; border:none;")
+        lay.addWidget(title)
+
+        self._diag_checks: dict = {}
+        for info in diag.CHECKS:
+            row = QHBoxLayout(); row.setSpacing(8)
+            chk = QCheckBox(info.label)
+            chk.setChecked(info.default_on)
+            cost_txt = {"fast": "fast", "medium": "~10-30s/clip", "slow": "can take minutes/clip"}[info.cost_hint]
+            chk.setToolTip(f"{info.description}\n\nCost: {cost_txt}")
+            self._diag_checks[info.check_id] = chk
+            row.addWidget(chk)
+            cost = QLabel(f"({cost_txt})")
+            cost.setStyleSheet(f"color:{p.text_dim}; font-size:10.5px; border:none;")
+            row.addWidget(cost)
+            row.addStretch()
+            lay.addLayout(row)
+
+        run_row = QHBoxLayout()
+        self._diag_status_label = QLabel("Informational only — findings never block starting the merge.")
+        self._diag_status_label.setStyleSheet(f"color:{p.text_dim}; font-size:10.5px; border:none;")
+        run_row.addWidget(self._diag_status_label, 1)
+        self._diag_cancel_btn = QPushButton("Cancel")
+        self._diag_cancel_btn.clicked.connect(self._cancel_diagnostics)
+        self._diag_cancel_btn.hide()
+        run_row.addWidget(self._diag_cancel_btn)
+        self._diag_run_btn = QPushButton("Run diagnostics")
+        self._diag_run_btn.clicked.connect(self._run_diagnostics)
+        run_row.addWidget(self._diag_run_btn)
+        lay.addLayout(run_row)
+
+        self._diag_pbar = QProgressBar()
+        self._diag_pbar.setRange(0, 100)
+        self._diag_pbar.hide()
+        lay.addWidget(self._diag_pbar)
+
+        return frame
+
+    def _run_diagnostics(self):
+        check_ids = [cid for cid, chk in self._diag_checks.items() if chk.isChecked()]
+        if not check_ids or not self._clips:
+            return
+        ff, fp = get_ffmpeg()
+        self._diag_run_btn.hide()
+        self._diag_cancel_btn.show()
+        self._diag_pbar.setValue(0)
+        self._diag_pbar.show()
+        self._diag_status_label.setText("Starting…")
+        for chk in self._diag_checks.values():
+            chk.setEnabled(False)
+
+        self._diag_worker = DiagnosticsWorker(ff, fp, self._clips, check_ids, self)
+        self._diag_worker.progress.connect(self._on_diag_progress)
+        self._diag_worker.result_ready.connect(self._on_diag_result)
+        self._diag_worker.finished_all.connect(self._on_diag_finished)
+        self._diag_worker.start()
+
+    def _cancel_diagnostics(self):
+        if self._diag_worker is not None:
+            self._diag_worker.cancel()
+
+    def _on_diag_progress(self, done: int, total: int, name: str):
+        pct = int(done / total * 100) if total else 0
+        self._diag_pbar.setValue(pct)
+        self._diag_status_label.setText(
+            f"Checking {done}/{total}" + (f" — {name}" if name else ""))
+
+    def _on_diag_result(self, idx: int, result):
+        label = self._clip_diag_labels.get(idx)
+        if label is None:
+            return
+        p = self._p
+        colors = {"clean": p.ok, "warning": p.warn, "problem": p.danger, "error": p.text_dim}
+        symbols = {"clean": "✓", "warning": "⚠", "problem": "✗", "error": "?"}
+        color = colors.get(result.verdict, p.text_dim)
+        symbol = symbols.get(result.verdict, "?")
+        existing = label.property("_diag_lines") or []
+        existing.append((color, f"{symbol} {result.label}: {result.detail}"))
+        label.setProperty("_diag_lines", existing)
+        label.setText("\n".join(f"<span style='color:{c};'>{t}</span>" for c, t in existing))
+        label.show()
+
+    def _on_diag_finished(self, ok: bool):
+        from thread_utils import settle
+        worker, self._diag_worker = self._diag_worker, None
+        if worker is not None:
+            settle(worker, 10000)
+        self._diag_cancel_btn.hide()
+        self._diag_run_btn.show()
+        self._diag_pbar.hide()
+        for chk in self._diag_checks.values():
+            chk.setEnabled(True)
+        self._diag_status_label.setText(
+            "Informational only — findings never block starting the merge."
+            if ok else "Diagnostics cancelled.")
+
+    # ── Per-clip cards ─────────────────────────────────────────────────────────
 
     def _clip_card(self, idx: int, cr) -> QFrame:
         p = self._p
@@ -183,6 +281,16 @@ class PreflightDialog(QDialog):
 
         for n in cr.notes:
             lay.addWidget(self._note("→ " + n))
+
+        if idx - 1 < len(self._clips):
+            diag_label = QLabel("")
+            diag_label.setWordWrap(True)
+            diag_label.setStyleSheet("font-size:10.5px; border:none; margin-left:2px;")
+            diag_label.setTextFormat(Qt.TextFormat.RichText)
+            diag_label.hide()
+            lay.addWidget(diag_label)
+            self._clip_diag_labels[idx - 1] = diag_label
+
         return card
 
     def _note(self, text: str) -> QLabel:

@@ -14,8 +14,15 @@ import core.verify as verify_mod  # noqa: E402
 from core.verify import predict_unverifiable, _PREDICTED_PREFIX  # noqa: E402
 
 
-def _entry(conform_status="ok", has_camera_audio=True):
-    return SimpleNamespace(conform_status=conform_status, has_camera_audio=has_camera_audio)
+def _entry(conform_status="ok", has_camera_audio=True, recovery_fidelity=None):
+    # Mirrors manifest.py's own derivation: "ok" -> decode-lossless, anything
+    # else ("transcode"/"hdr"/...) -> transcoded — unless a test overrides it
+    # explicitly (e.g. to simulate an "ok"-conform clip under a re-encoded
+    # compat baseline, where conform_status alone doesn't tell the whole story).
+    if recovery_fidelity is None:
+        recovery_fidelity = "decode-lossless" if conform_status == "ok" else "transcoded"
+    return SimpleNamespace(conform_status=conform_status, has_camera_audio=has_camera_audio,
+                           recovery_fidelity=recovery_fidelity)
 
 
 def _plan(video_stream=0, audio_stream=1, video_start=0.0):
@@ -46,6 +53,35 @@ def test_transcoded_with_own_archival_track_does_not_predict_video():
     predicted = predict_unverifiable(entry, plan, own_archival_track=True, safe_to_read_unbounded=True)
     assert "Video" not in predicted
     print("ok: test_transcoded_with_own_archival_track_does_not_predict_video")
+
+
+def test_hdr_clip_with_no_archival_track_predicts_video():
+    # Real bug (found via a real Pixel HDR clip during battle-testing): an
+    # "hdr"-status clip is routed through the exact same re-encode-into-the-
+    # shared-baseline path as a "transcode"-status one (see
+    # ffmpeg_cmd.py's is_conform = clip.status == "ok"), so its video is
+    # equally expected to differ from the original — but checking the
+    # literal string conform_status == "transcode" missed "hdr" entirely,
+    # producing a spurious "unexpected mismatch" report instead of a
+    # predicted, expected skip.
+    entry = _entry(conform_status="hdr")
+    plan = _plan(video_stream=0)
+    predicted = predict_unverifiable(entry, plan, own_archival_track=False, safe_to_read_unbounded=False)
+    assert "Video" in predicted
+    print("ok: test_hdr_clip_with_no_archival_track_predicts_video")
+
+
+def test_ok_conform_clip_under_compat_baseline_predicts_video():
+    # An "ok"-conform clip (matches the chosen spec, would normally
+    # stream-copy) still isn't byte-exact once the shared baseline ITSELF
+    # gets re-encoded (the Compatible-playback-master option) — recovery_
+    # fidelity already reflects this correctly even though conform_status
+    # alone still says "ok".
+    entry = _entry(conform_status="ok", recovery_fidelity="transcoded")
+    plan = _plan(video_stream=0)
+    predicted = predict_unverifiable(entry, plan, own_archival_track=False, safe_to_read_unbounded=False)
+    assert "Video" in predicted
+    print("ok: test_ok_conform_clip_under_compat_baseline_predicts_video")
 
 
 def test_first_clip_camera_audio_not_predicted_even_on_shared_track():

@@ -43,6 +43,22 @@ def test_recommend_none_for_empty():
     assert recommend_baseline([]) is None
 
 
+def test_enumerate_specs_carries_color_primaries_and_transfer_through_to_the_group():
+    # Real bug: color_primaries/color_transfer used to be dropped entirely
+    # between ClipSpec and SpecGroup (only color_space survived), which is
+    # part of why a BT.2020/HLG clip's group ended up with no way to build a
+    # correct -color_primaries/-color_trc pair (see test_ffmpeg_cmd.py's
+    # test_encoder_args_bt2020_uses_distinct_primaries_and_trc_not_the_matrix_value).
+    hdr_clip = ClipSpec("hevc", 3840, 2160, "30", "yuv420p10le", 10, "bt2020nc", 5.0,
+                        color_transfer="arib-std-b67", color_primaries="bt2020")
+    groups = enumerate_specs([hdr_clip])
+    assert len(groups) == 1
+    g = groups[0]
+    assert g.color_space == "bt2020nc"
+    assert g.color_primaries == "bt2020"
+    assert g.color_transfer == "arib-std-b67"
+
+
 def _real_folder_check():
     folder = Path(r"G:\Claude cowork\20260703 - multicam video archive test")
     if not folder.exists():

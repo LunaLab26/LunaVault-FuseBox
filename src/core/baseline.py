@@ -32,6 +32,8 @@ class ClipSpec:
     bit_depth: int = 8
     color_space: str = ""
     duration: float = 0.0
+    color_transfer: str = ""
+    color_primaries: str = ""
 
 
 @dataclass
@@ -47,6 +49,8 @@ class SpecGroup:
     color_space: str
     clip_count: int = 0
     total_duration: float = 0.0
+    color_transfer: str = ""
+    color_primaries: str = ""
 
     def key(self) -> tuple:
         return (self.codec.lower(), self.width, self.height, self.fps, self.pix_fmt.lower())
@@ -64,7 +68,8 @@ def enumerate_specs(clip_specs: list) -> list:
         g = groups.get(k)
         if g is None:
             g = SpecGroup(codec=cs.codec, width=cs.width, height=cs.height, fps=cs.fps,
-                          pix_fmt=cs.pix_fmt, bit_depth=cs.bit_depth, color_space=cs.color_space)
+                          pix_fmt=cs.pix_fmt, bit_depth=cs.bit_depth, color_space=cs.color_space,
+                          color_transfer=cs.color_transfer, color_primaries=cs.color_primaries)
             groups[k] = g
         g.clip_count += 1
         g.total_duration += max(0.0, cs.duration)

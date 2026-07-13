@@ -181,3 +181,56 @@ def analyze_merge(clips, plan: OutputPlan) -> MergeReport:
     rep.best_secs += concat_io
     rep.worst_secs += concat_io
     return rep
+
+
+# 4K reference bitrates (Mbps) for Apple ProRes 422 HQ/Standard/Proxy — rough
+# but well-known-ish ballpark figures, since ProRes is an edit-friendly
+# intermediate (high bitrate, low compression) rather than a delivery codec;
+# assuming its output is "about the same size as the source" (true for a
+# plain stream-copy concat) would badly under-estimate disk/time needs.
+_PRORES_MBPS = {"hq": 660, "standard": 440, "proxy": 115}
+
+
+def estimate_total_pipeline_bytes(clips, plan: OutputPlan, archival: bool = False,
+                                  compat_baseline: bool = False, compat_codec: str = "h264",
+                                  compat_prores_profile: str = "hq") -> int:
+    """Total DISK-WRITE volume the WHOLE merge pipeline is expected to perform
+    — every pass (per-clip mux, concat/compatible-playback re-encode, archival
+    mux, preserved WAV/LRV appends), not just "how big will the final file
+    be": concat/archival mux genuinely re-write roughly the same content
+    again (a real, measurable pass), and Compatible-playback-master replaces
+    that pass with an actual re-encode at a very different bitrate. Shared by
+    MergeWorker's live ETA denominator and the Merge tab's pre-flight/disk-
+    space estimates, so the two can never drift apart."""
+    report = analyze_merge(clips, plan)
+    total = report.total_bytes          # pass 1: per-clip mux
+    if compat_baseline and compat_codec == "prores":
+        bitrate_mbps = _PRORES_MBPS.get(compat_prores_profile, _PRORES_MBPS["hq"])
+        total_duration = sum(c.duration for c in clips)
+        total += int(total_duration * bitrate_mbps * 1_000_000 / 8)
+    elif compat_baseline:
+        total += int(report.total_bytes * 0.85)   # H.264 crf20 delivery re-encode
+    else:
+        total += report.total_bytes         # pass 2: concat (re-combines the same content)
+    if archival:
+        # pass 3: archival mux re-writes the baseline PLUS the odd-spec
+        # originals' own full bytes on top.
+        total += report.total_bytes
+        for c in clips:
+            if c.effective_status() != "ok":
+                try:
+                    total += c.path.stat().st_size
+                except Exception:
+                    pass
+    for c in clips:
+        if getattr(c, "preserve_wav_full", False) and c.has_wav():
+            try:
+                total += c.wav_path.stat().st_size
+            except Exception:
+                pass
+        if getattr(c, "preserve_lrv", False) and c.has_lrv():
+            try:
+                total += c.lrv_path.stat().st_size
+            except Exception:
+                pass
+    return max(1, total)

@@ -25,6 +25,7 @@ from core import manifest as manifest_mod
 from core import collection as collection_mod
 from core import cloudsync
 from core.progress import read_progress, parse_progress
+from core.eta import ConservativeEta
 from core.sync_advanced import analyze_sync
 from core.ffmpeg_cmd import (
     hms_to_seconds, MixSpec, OutputPlan, SLOWMO_RATIO,
@@ -132,7 +133,8 @@ class MergeWorker(QThread):
                  enable_preview: bool = True, scratch_override: str = "",
                  archival: bool = False, conform: ConformSpec = DEFAULT_CONFORM,
                  per_clip_archival: bool = False, verify_md5: bool = False,
-                 compat_baseline: bool = False, skip_predictable_verify: bool = True):
+                 compat_baseline: bool = False, skip_predictable_verify: bool = True,
+                 compat_codec: str = "h264", compat_prores_profile: str = "hq"):
         super().__init__()
         self._clips             = clips
         self._output            = output_path
@@ -152,12 +154,14 @@ class MergeWorker(QThread):
         # core.verify.predict_unverifiable). Off = the user's override for full,
         # exhaustive verification regardless of what's predictable.
         self._skip_predictable_verify = skip_predictable_verify
-        # Re-encode the concatenated baseline into ONE clean, continuous, 8-bit
-        # H.264 stream instead of stream-copy-splicing independently-encoded
-        # segments (which produces broken-reference playback — green frames /
-        # freezes / static, differently per player). The baseline is the WATCHABLE
-        # copy; lossless originals live in the archival tracks / kept clip files.
+        # Re-encode the concatenated baseline into ONE clean, continuous stream
+        # instead of stream-copy-splicing independently-encoded segments (which
+        # produces broken-reference playback — green frames / freezes / static,
+        # differently per player). The baseline is the WATCHABLE copy; lossless
+        # originals live in the archival tracks / kept clip files.
         self._compat_baseline   = compat_baseline
+        self._compat_codec      = compat_codec           # "h264" | "prores"
+        self._compat_prores_profile = compat_prores_profile   # "proxy" | "standard" | "hq"
         self._final_tmp         = None
         self._cancelled         = False
 
@@ -175,23 +179,39 @@ class MergeWorker(QThread):
     def cancel(self):
         self._cancelled = True
 
-    def _metrics(self, size: int, pct: float, stage_idx: int, stage_total: int) -> dict:
-        """Smoothed write speed (bytes/s) and an overall ETA (seconds)."""
-        now = time.time()
-        if stage_idx != self._last_stage:
-            self._last_stage = stage_idx
-            self._last_size = 0
-            self._last_t = now
-        if self._last_t is not None and now > self._last_t:
-            dsize = size - self._last_size
-            if dsize >= 0:
-                inst = dsize / (now - self._last_t)
-                self._rate_bps = inst if not self._rate_bps else 0.6 * self._rate_bps + 0.4 * inst
-        self._last_t, self._last_size = now, size
-        frac = ((stage_idx - 1) + pct / 100.0) / max(1, stage_total)
-        elapsed = now - self._t0
-        eta = elapsed * (1 - frac) / frac if frac > 0.02 else 0.0
-        return {"rate_bps": self._rate_bps, "eta_secs": eta, "elapsed_secs": elapsed}
+    def _metrics(self, size: int) -> dict:
+        """Byte-weighted, conservative progress/rate/ETA — see
+        core.eta.ConservativeEta. `size` is the CURRENT stage's own live
+        growing output size (from ffmpeg's -progress file); combined with
+        `self._produced_bytes_base` (every fully-completed prior stage's own
+        real final size, accumulated as run() proceeds) this gives total
+        bytes written across the whole pipeline so far, fed against
+        `self._expected_total_bytes` (the matching multi-pass estimate — see
+        _estimate_expected_total_bytes). Excludes the MD5-verify stage
+        entirely (it reads/decodes but writes no persistent, sized output —
+        see its own clip-count-based progress in _verify_md5_recovery)."""
+        produced = self._produced_bytes_base + max(0, size)
+        est = self._eta.estimate(produced, self._expected_total_bytes)
+        return {
+            "produced_bytes": produced,
+            "expected_total_bytes": self._expected_total_bytes,
+            "byte_pct": est["pct"],
+            "rate_bps": est["rate_bps"],
+            "eta_secs": est["eta_secs"],
+            "total_secs": est["total_secs"],
+            "elapsed_secs": est["elapsed_secs"],
+        }
+
+    def _estimate_expected_total_bytes(self, clips: list) -> int:
+        """The ETA/progress-readout denominator — see
+        core.plan_report.estimate_total_pipeline_bytes (shared with the Merge
+        tab's own pre-flight/disk-space estimate so the two can never drift
+        apart from each other)."""
+        from core.plan_report import estimate_total_pipeline_bytes
+        return estimate_total_pipeline_bytes(
+            clips, self._plan, archival=self._archival,
+            compat_baseline=self._compat_baseline, compat_codec=self._compat_codec,
+            compat_prores_profile=self._compat_prores_profile)
 
     def _make_scratch(self) -> Path:
         """A fast, writable, LOCAL scratch dir for the per-clip temp files.
@@ -302,7 +322,7 @@ class MergeWorker(QThread):
                 "pct": parsed["pct"], "size": parsed["size"],
                 "stage": "concat", "stage_label": label,
                 "stage_idx": stage_idx, "stage_total": stage_total,
-                **self._metrics(parsed["size"], parsed["pct"], stage_idx, stage_total),
+                **self._metrics(parsed["size"]),
             })
             time.sleep(0.4)
         _stop_thumb(thumb)
@@ -331,7 +351,7 @@ class MergeWorker(QThread):
                 "pct": parsed["pct"], "size": parsed["size"],
                 "stage": "mux", "stage_label": label,
                 "stage_idx": i + 1, "stage_total": stage_total,
-                **self._metrics(parsed["size"], parsed["pct"], i + 1, stage_total),
+                **self._metrics(parsed["size"]),
             })
             time.sleep(0.4)
         _stop_thumb(thumb)
@@ -532,15 +552,13 @@ class MergeWorker(QThread):
         progress_file = temp_dir / "progress.txt"
         progress_file.write_text("")
 
-        # live-metrics state
-        self._t0 = time.time()
-        self._rate_bps = 0.0
-        self._last_t = None
-        self._last_size = 0
-        self._last_stage = -1
-
         clips       = sorted(self._clips, key=lambda c: c.order_idx)
         stage_total = len(clips) + 1
+
+        # live-metrics state — see _metrics()/_estimate_expected_total_bytes()
+        self._eta = ConservativeEta()
+        self._expected_total_bytes = self._estimate_expected_total_bytes(clips)
+        self._produced_bytes_base = 0
 
         temp_clips: list[Path] = []
         cumulative_duration = 0.0
@@ -629,6 +647,10 @@ class MergeWorker(QThread):
 
             temp_clips.append(out_clip)
             cumulative_duration += clip.duration
+            try:
+                self._produced_bytes_base += out_clip.stat().st_size
+            except Exception:
+                pass
 
             # Measure this temp file's true concat footprint (local file, one
             # cheap ffprobe). A failed probe leaves this clip's fields unset AND
@@ -647,8 +669,11 @@ class MergeWorker(QThread):
         if self._cancelled:
             self._cleanup(temp_dir); self.finished.emit(False, "Cancelled"); return
 
-        merge_label = ("Re-encoding into one smooth, compatible take" if self._compat_baseline
-                       else "Merging clips into the baseline — stream copy, lossless")
+        if self._compat_baseline:
+            codec_label = "ProRes" if self._compat_codec == "prores" else "H.264"
+            merge_label = f"Re-encoding into one smooth, compatible take ({codec_label})"
+        else:
+            merge_label = "Merging clips into the baseline — stream copy, lossless"
         self.progress.emit({
             "pct": 0, "size": 0,
             "stage": "concat", "stage_label": merge_label,
@@ -702,10 +727,13 @@ class MergeWorker(QThread):
                 embed = None
 
         if self._compat_baseline:
-            # Watchable-master path: one clean continuous H.264 re-encode, so the
-            # baseline plays everywhere (no broken concat splices). See task #13.
+            # Watchable-master path: one clean continuous re-encode (H.264 or
+            # ProRes), so the baseline plays everywhere (no broken concat
+            # splices). See task #13.
             cmd = build_concat_reencode_cmd(ff, concat_file, chapters_file, baseline_target,
-                                            progress_file, extra_out_args=embed)
+                                            progress_file, extra_out_args=embed,
+                                            codec=self._compat_codec,
+                                            prores_profile=self._compat_prores_profile)
         else:
             cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target, progress_file,
                                    extra_out_args=embed)
@@ -719,24 +747,48 @@ class MergeWorker(QThread):
         if not self._run_stage(cmd, temp_dir, progress_file, merge_label,
                                stage_total, stage_total, cumulative_duration, thumb=thumb):
             return
+        try:
+            self._produced_bytes_base += baseline_target.stat().st_size
+        except Exception:
+            pass
 
         if self._archival:
             if not self._build_and_mux_archival(ff, clips, manifest, baseline_target, final_tmp,
                                                 temp_dir, progress_file, stage_total,
                                                 cumulative_duration):
                 return
+            try:
+                self._produced_bytes_base += final_tmp.stat().st_size
+            except Exception:
+                pass
 
+        try:
+            prev_size = final_tmp.stat().st_size if final_tmp.exists() else 0
+        except Exception:
+            prev_size = 0
         preserved = self._append_preserved_wavs(ff, fp, clips, manifest, final_tmp, temp_dir,
                                                 progress_file, stage_total, cumulative_duration)
         if preserved is None:
             return
         final_tmp = preserved
+        try:
+            self._produced_bytes_base += max(0, final_tmp.stat().st_size - prev_size)
+        except Exception:
+            pass
 
+        try:
+            prev_size = final_tmp.stat().st_size if final_tmp.exists() else 0
+        except Exception:
+            prev_size = 0
         preserved = self._append_preserved_lrvs(ff, fp, clips, manifest, final_tmp, temp_dir,
                                                 progress_file, stage_total, cumulative_duration)
         if preserved is None:
             return
         final_tmp = preserved
+        try:
+            self._produced_bytes_base += max(0, final_tmp.stat().st_size - prev_size)
+        except Exception:
+            pass
 
         # Move the finished file into place atomically (same volume → instant,
         # so a cloud-sync client only ever sees the complete master).
@@ -906,10 +958,19 @@ class MergeWorker(QThread):
         # gives this clip a byte-exact copy to fall back on. Distinguishing
         # this from a genuine surprise keeps the diagnosis honest rather than
         # alarming for something the current settings never promised to avoid.
-        expected_to_differ = entry.conform_status == "transcode" and plan.video_stream == 0
+        # Same criterion as core.verify.predict_unverifiable — recovery_fidelity
+        # (not the literal conform_status string) already correctly folds in
+        # "hdr" clips and the compat-baseline case, both of which the older
+        # `conform_status == "transcode"` check missed. VIDEO-specific: camera
+        # audio is typically stream-copied (-c:a copy) even when the video
+        # needs conforming, so it gets its OWN "expected to differ" question
+        # (entry.audio_lossless) at its own call site below — reusing this
+        # video-oriented flag for audio too would wrongly skip audio's decode-
+        # lossless fallback for a clip whose audio actually survived intact.
+        video_expected_to_differ = entry.recovery_fidelity == "transcoded" and plan.video_stream == 0
 
         def compare_adaptive(label, src_cmd, rec_cmd_strict, rec_cmd_relaxed, src_path, rec_path,
-                             decoded_pair=None, guard_ms=0):
+                             decoded_pair=None, guard_ms=0, expected_to_differ=video_expected_to_differ):
             """Byte-exact (raw elementary-stream) comparison first; on a mismatch,
             self-diagnoses through two fallbacks before concluding it's a real
             loss:
@@ -1010,7 +1071,7 @@ class MergeWorker(QThread):
                 # directly: assuming it crashed the annexb bitstream filter when
                 # an h264 original was re-encoded into an HEVC baseline).
                 rec_codec = (probe_video_codec(fp, str(self._output), video_stream_index=plan.video_stream, **kwargs)
-                            or entry.codec) if expected_to_differ else entry.codec
+                            or entry.codec) if video_expected_to_differ else entry.codec
                 # Measured windows (Task 87) take the SEEK_EPS guards: bitstream
                 # extraction (copy-mode, keyframe-snap-at-or-before) seeks a hair
                 # LATE so a boundary that rounds below this clip's own IDR can't
@@ -1055,7 +1116,7 @@ class MergeWorker(QThread):
             result.checks.append(StreamCheck(
                 "Video", skipped_reason=f"{_PREDICTED_PREFIX} — " + predicted_unverifiable["Video"]))
         elif (self._skip_predictable_verify and not own_archival_track
-              and plan.video_measured and not expected_to_differ):
+              and plan.video_measured and not video_expected_to_differ):
             # A measured-window mid-concat clip: real-world masters (the same
             # investigation that landed Task 87's measured windows) showed
             # this shape of comparison fails almost every time for one benign
@@ -1214,7 +1275,12 @@ class MergeWorker(QThread):
                         decoded_pair = None   # clip too short to carve a safe interior window
                     audio_check = compare_adaptive(
                         "Camera audio", src_cmd, rec_cmd, rec_cmd_relaxed, src_a, rec_a,
-                        decoded_pair=decoded_pair, guard_ms=GUARD_MS)
+                        decoded_pair=decoded_pair, guard_ms=GUARD_MS,
+                        # Audio's own "expected to differ" question — independent of
+                        # the video's (see video_expected_to_differ's comment above):
+                        # camera audio is lossy here only when audio_lossless is False
+                        # (non-AAC source with no archival track to fall back on).
+                        expected_to_differ=not entry.audio_lossless)
                     # A NON-FIRST clip on a shared/baseline concat track (video_start > 0,
                     # not its own lone track) seeks its audio by a VIDEO-based offset,
                     # but the audio boundary sits at the cumulative AUDIO durations — the

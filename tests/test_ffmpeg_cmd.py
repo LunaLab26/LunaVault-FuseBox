@@ -87,6 +87,41 @@ def test_encoder_args_switch_codec():
     assert "libx264" in h264 and "hvc1" not in h264 and "yuv420p" in h264
 
 
+def test_encoder_args_bt709_default_uses_same_value_for_all_three_color_args():
+    # Historical behaviour, still correct for bt709: colorspace/primaries/trc
+    # all legitimately share the identifier "bt709", unlike bt2020 variants.
+    args = _video_encoder_args(ConformSpec(codec="hevc"))
+    assert args.count("bt709") == 3
+    i = args.index("-colorspace")
+    assert args[i:i + 6] == ["-colorspace", "bt709", "-color_primaries", "bt709",
+                              "-color_trc", "bt709"]
+
+
+def test_encoder_args_bt2020_uses_distinct_primaries_and_trc_not_the_matrix_value():
+    # Real bug (found via a real Pixel HDR clip during battle-testing): ffprobe
+    # reports color_space="bt2020nc" (matrix coefficients), color_primaries=
+    # "bt2020", color_transfer="arib-std-b67" (HLG) as three DIFFERENT fields —
+    # feeding "bt2020nc" into -color_primaries/-color_trc makes libx265 reject
+    # the command outright ("Unable to parse "color_primaries" option value
+    # "bt2020nc""). Each ffmpeg arg must get its own probed value.
+    args = _video_encoder_args(ConformSpec(codec="hevc", color_space="bt2020nc",
+                                           color_primaries="bt2020",
+                                           color_transfer="arib-std-b67"))
+    i = args.index("-colorspace")
+    assert args[i:i + 6] == ["-colorspace", "bt2020nc", "-color_primaries", "bt2020",
+                              "-color_trc", "arib-std-b67"]
+
+
+def test_encoder_args_color_primaries_and_transfer_fall_back_to_color_space_when_unset():
+    # A caller that only sets color_space (e.g. an older code path, or a clip
+    # that only probed a matrix value) must not regress to an invalid pairing —
+    # falls back to the one shared value, matching pre-fix behaviour.
+    args = _video_encoder_args(ConformSpec(codec="h264", color_space="bt2020c"))
+    i = args.index("-colorspace")
+    assert args[i:i + 6] == ["-colorspace", "bt2020c", "-color_primaries", "bt2020c",
+                              "-color_trc", "bt2020c"]
+
+
 def test_encoder_args_hw_encoder_off_by_default_even_with_ff_given():
     # Default ConformSpec.hw_encoder == "off" — passing `ff` must not matter.
     args = _video_encoder_args(ConformSpec(codec="hevc"), ff="ffmpeg")
@@ -444,6 +479,35 @@ def test_plan_mix_first_is_default():
     assert "-disposition:a:0 default" in s
 
 
+def test_plan_primary_override_mix_plus_native_mix_track_uses_split_pads():
+    # Real bug (found via a real app crash on real footage — a "Failed" dialog
+    # with "Output with label 'mix' does not exist in any defined filter
+    # graph, or was already used elsewhere"): a clip's Primary-slot override
+    # AND a separately-enabled Mixed Audio track can BOTH resolve to "mix" for
+    # the same clip. ffmpeg filtergraph output labels are single-use — mapping
+    # the same [mix] pad twice crashed with exactly that error. Each mix
+    # consumer now gets its own asplit pad instead.
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
+    clip = _ok_clip(with_wav=True)
+    clip.primary_override = "mix"   # forces slot 0 (native "camera") to ALSO carry mix
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    s = " ".join(cmd)
+    assert "asplit=2" in s
+    assert "-map [mix0]" in s and "-map [mix1]" in s
+    assert "-map [mix]" not in s   # the old single-use label must not be referenced twice
+    assert "-c:a:0 aac" in s and "-c:a:2 aac" in s   # both mix-filled slots still encode correctly
+
+
+def test_plan_single_mix_consumer_still_uses_the_plain_mix_label():
+    # No override in play — exactly one slot resolves to "mix" — must NOT
+    # regress to the split form unnecessarily.
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
+    cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
+    s = " ".join(cmd)
+    assert "-map [mix]" in s
+    assert "asplit" not in s and "[mix0]" not in s
+
+
 def test_plan_video_disabled():
     plan = OutputPlan(include_video=False, tracks=[OutputTrack("wav")])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
@@ -680,6 +744,55 @@ def test_plan_video_override_lrv_maps_video_from_second_input():
     assert "-t" in cmd and cmd[cmd.index("-t") + 1] == f"{clip.duration:.3f}"
 
 
+def _last_t_value(cmd: list) -> str:
+    """The value following the LAST "-t" flag in the command — the final
+    per-clip OUTPUT cutoff always comes last (any earlier "-t" belongs to an
+    INPUT, e.g. the silence generator's own "-f lavfi -t {dur} -i anullsrc")."""
+    idx = len(cmd) - 1 - cmd[::-1].index("-t")
+    return cmd[idx + 1]
+
+
+def test_plan_normal_clip_with_wav_gets_duration_cutoff():
+    # A real, high-impact bug found this way: without an explicit -t on the
+    # per-clip mux output, ffmpeg has no -shortest either, so the per-clip
+    # temp file's container duration follows the LONGEST stream — not the
+    # video — whenever the paired WAV runs longer than the clip's own video
+    # (common: a WAV recorder often keeps rolling a beat past the camera
+    # stopping; a clip-split WAV that still carries the NEXT clip's audio can
+    # overrun by that clip's ENTIRE duration). The concat demuxer then
+    # advances by the inflated duration, drifting every later clip's
+    # presentation position and leaving the video decoder holding a frozen
+    # last frame for the difference — confirmed directly on a real merge
+    # (one clip's segment ran ~384s longer than its own video). This cutoff
+    # used to exist ONLY for the LRV-proxy-swap path; it must apply to the
+    # ordinary stream-copy case too.
+    clip = _ok_clip(with_wav=True)
+    clip.stream.duration = 60.0
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    assert "-c:v copy" in " ".join(cmd)   # the ordinary conforming stream-copy path
+    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.3f}"
+
+
+def test_plan_clip_without_wav_still_gets_duration_cutoff():
+    # No WAV at all (camera audio only) is the simplest case, but the cutoff
+    # must still be unconditional — nothing about this fix is WAV-specific.
+    clip = _ok_clip(with_wav=False)
+    clip.stream.duration = 60.0
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.3f}"
+
+
+def test_plan_transcoding_clip_with_wav_gets_duration_cutoff():
+    # Same fix, the TRANSCODE (non-conform) path — the cutoff must not be
+    # accidentally tied to the stream-copy branch either.
+    st = StreamInfo(status="transcode", width=1280, height=960, audio_codec="aac", duration=60.0)
+    clip = ClipInfo(path=Path("clip.mp4"), stream=st)
+    clip.wav_path = Path("clip.wav")
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
+    assert "-c:v copy" not in " ".join(cmd)   # genuinely transcoding
+    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.3f}"
+
+
 def test_plan_video_override_lrv_ignored_when_no_lrv_paired():
     clip = _ok_clip()
     clip.video_source_override = "lrv"   # no lrv_path set
@@ -799,9 +912,71 @@ def test_clip_sample_gpu_vendor_swaps_encoder():
     assert "h264_qsv" in " ".join(cmd2) and "ultrafast" not in " ".join(cmd2)
 
 
+def _integration_wav_overrun_is_trimmed() -> bool:
+    """Real ffmpeg, no mocking: build a clip whose paired WAV genuinely runs
+    longer than its own video (the exact real-world shape of the bug — a
+    clip-split WAV still carrying the next clip's audio, or simply a WAV
+    recorder rolling a beat past the camera stopping) and prove the per-clip
+    mux OUTPUT is bounded to the clip's own video duration, not the WAV's.
+    Before this fix: the container duration followed the longer WAV stream —
+    reproduced directly and confirmed as the root cause of a real "frozen
+    frame" report (see DEVELOPMENT.md)."""
+    import subprocess
+    import tempfile
+    from core.binaries import get_ffmpeg
+
+    ff, fp = get_ffmpeg()
+    if not Path(ff).exists():
+        print("  (skipped integration: ffmpeg not found)")
+        return True
+    d = Path(tempfile.mkdtemp())
+
+    video_secs, wav_secs = 3.0, 6.0   # WAV overruns the video by the full 3s difference
+    video_path = d / "clip.mp4"
+    wav_path = d / "clip.wav"
+    # Give the synthetic clip a real (short) camera-audio track too — the
+    # StreamInfo below declares audio_codec="aac" (has_camera_audio() ->
+    # True), so build_mux_cmd_plan maps 0:a:0 for it; a video-only file would
+    # make that map target nonexistent and fail for an unrelated reason.
+    subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi",
+                   "-i", f"testsrc=size=640x360:rate=30:duration={video_secs}",
+                   "-f", "lavfi", "-i", f"sine=frequency=220:duration={video_secs}",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                   str(video_path)], check=True)
+    subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi",
+                   "-i", f"sine=frequency=440:duration={wav_secs}",
+                   "-c:a", "pcm_s24le", str(wav_path)], check=True)
+
+    st = StreamInfo(status="ok", width=640, height=360, audio_codec="aac", duration=video_secs)
+    clip = ClipInfo(path=video_path, stream=st)
+    clip.wav_path = wav_path
+
+    out = d / "mux.mov"
+    cmd = build_mux_cmd_plan(str(ff), clip, out, Path(d / "progress.txt"), OutputPlan(), "crop")
+    subprocess.run(cmd, check=True, capture_output=True)
+
+    def _fmt_duration(path) -> float:
+        r = subprocess.run([fp, "-v", "error", "-show_entries", "format=duration",
+                           "-of", "default=nw=1:nk=1", str(path)],
+                          capture_output=True, text=True, check=True)
+        return float(r.stdout.strip())
+
+    got = _fmt_duration(out)
+    assert abs(got - video_secs) < 0.1, (
+        f"per-clip mux container duration was {got:.3f}s, expected ~{video_secs:.3f}s "
+        f"(the clip's own video duration) — the {wav_secs:.0f}s WAV must NOT be allowed "
+        f"to inflate it")
+    print(f"  real per-clip mux: {wav_secs:.0f}s WAV correctly trimmed to "
+         f"{video_secs:.0f}s video duration (got {got:.3f}s) — OK")
+    return True
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
         fn()
         print(f"  PASS  {fn.__name__}")
     print(f"\n{len(fns)} ffmpeg_cmd tests passed.")
+    print("running real ffmpeg integration...")
+    _integration_wav_overrun_is_trimmed()
+    print("test_ffmpeg_cmd: all tests passed")

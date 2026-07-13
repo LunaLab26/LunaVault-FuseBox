@@ -2905,3 +2905,432 @@ rather than pursued further this session.
   produces a real, appended failure entry, not a swallowed exception).
 
   42 test files green.
+
+### Task 99 — Extract-tab layout fix + conservative byte-weighted progress/ETA on both tabs (done)
+
+  Three real user reports: the Extract tab's rows visually overlapped at 150% display
+  scaling; the Extract tab's progress readout was clip-count-only (no GB/rate/ETA at
+  all, unlike Merge); and Merge's ETA has been "very optimistic and inaccurate."
+
+  **Extract-tab layout overlap (`extract_tab.py`).** The panel was a plain vertical
+  stack with the clip tree's own `setMinimumHeight(200)` plus every fixed-height row
+  below it (format, output folder, progress, buttons) — at higher scaling factors
+  their combined minimum height can exceed the window, and with nowhere for the
+  shortfall to go, rows visually collided instead of the window simply scrolling.
+  Fixed by wrapping the whole panel in a `QScrollArea` (`setWidgetResizable`,
+  `NoFrame`) — verified offscreen at window heights down to 300px: a vertical
+  scrollbar appears and every row stays cleanly stacked, no overlap at any size.
+
+  **New `core/eta.py` — shared conservative ETA, used by both tabs.** The old
+  formula (`elapsed*(100-pct)/pct`, extrapolated from the AVERAGE rate so far) runs
+  optimistic whenever slow work is back-loaded relative to fast work — stream
+  copies land first, transcodes/archival passes later, so the average rate looks
+  good early and the estimate undershoots right up until the slow part lands.
+  `ConservativeEta` fixes the INPUT to that same formula (byte-weighted percent,
+  not stage-count — transcode-heavy work already costs proportionally more bytes
+  in the existing size model) and takes the WORSE of the average-rate extrapolation
+  and a "continues at the slowest recently-observed rate" extrapolation, so the
+  estimate only ever surprises the user by finishing early. `format_hms`/
+  `format_completion` render "Total ~14h22m34s" / "completes ~21:23, Sunday 12 July
+  2026" per the requested format.
+
+  **Merge tab (`ffmpeg_runner.py`, `merge_tab.py`).** New `MergeWorker.
+  _estimate_expected_total_bytes` — the ETA denominator is total DISK-WRITE volume
+  across every pass (per-clip mux, concat, archival mux, preserved WAV/LRV
+  appends), not "how big will the final file be": concat and archival mux
+  genuinely re-write roughly the same content again, a real measurable pass that
+  predicts wall-clock time, which is what an ETA needs. `_produced_bytes_base`
+  accumulates each completed pass's REAL final size as `run()` proceeds;
+  `_metrics()` (now just `_metrics(size)`, the old stage-index/pct params dropped
+  entirely — byte-weighting replaces what they were for) feeds
+  `ConservativeEta.estimate()`. MD5 verify is deliberately EXCLUDED from this
+  model — it reads/decodes but writes no persistent sized output, so it keeps its
+  own honest clip-count-based progress with an explicit "no time estimate for this
+  pass" instead of a byte/ETA readout that would be meaningless there. UI: two-
+  decimal byte-weighted percent, "produced / expected-total GB", and the new
+  "Total ~… — completes ~…" line, each on its own full-width label instead of
+  squeezed beside the bar.
+
+  **Extract tab (`extract_workers.py`, `extract_tab.py`).** `ExtractWorker`/
+  `GenericExtractWorker` previously reported ONLY clip counts (`0/8`) — no bytes
+  at all, and `_run_cmd` blocked on `subprocess.communicate()` with no live
+  polling. Switched to a poll loop (mirroring Merge's pattern) tracking the
+  growing OUTPUT FILE's own size on disk — these are all stream copies or
+  constant-bitrate PCM decodes, so file size tracks completion closely without
+  needing to thread a `-progress` file through every one of the 7 command
+  builders. `stderr` now goes to `DEVNULL` rather than an unread `PIPE` (the old
+  code captured it via `communicate()` but never used it — polling `poll()`
+  instead of draining a PIPE risks a deadlock once the child's buffer fills, so
+  this is also a latent-bug fix, not just a refactor). Expected-total bytes: the
+  manifest-driven path sums each selected clip's `ClipEntry.size_bytes` (a direct
+  stream copy of the original, so its own stored size is exact) plus a WAV/
+  camera-audio-split decode estimate (48kHz/24-bit/stereo PCM × duration, this
+  app's own WAV-backup convention); the no-manifest (generic/chapter-based) path
+  has no per-clip size recorded anywhere, so it estimates each plan's share
+  proportionally to its duration against the master file's own total size and
+  duration. New `bytes_progress` signal alongside the existing clip-count
+  `progress` signal; the Extract tab's progress bar now reads the byte-weighted
+  percent (falling back to the clip-count percent only until the first byte
+  sample arrives), with the same two-line GB/rate/ETA readout as Merge.
+
+  Tests: `test_eta.py` (new, +7: no-estimate-yet guard, steady-rate math checked
+  against manual extrapolation, the conservative max() actually picks the slower
+  estimate once a real slowdown is the recent behaviour, pct clamping/
+  monotonicity, zero-total safety, hms/completion formatting incl. a fixed
+  reference date); `test_merge_progress.py` (new, +6: expected-total is exactly
+  2×report.total_bytes with nothing else on, +1× and the odd-spec originals' own
+  real file sizes with archival on, + preserved-WAV/LRV byte sizes, never zero on
+  an empty clip list, `_metrics` accumulates produced_bytes correctly and ignores
+  a negative size); `test_extract_workers_progress.py` (new, +8: manifest-path
+  expected-total from `size_bytes` alone / with a WAV estimate added / with a
+  split-camera-audio estimate added, never zero, an end-to-end real-subprocess
+  `_run_cmd` check — using the Python interpreter itself as a stand-in for
+  ffmpeg so it needs no ffmpeg dependency — proving a successful command's real
+  output size lands in `_produced_bytes_base` and a failed command adds nothing,
+  the generic/no-manifest path's proportional-duration split and WAV-role
+  estimate, and its fallback when even the master file's own size is unavailable).
+
+  45 test files green.
+
+### Task 100 — ProRes compat-baseline option, pre-flight diagnostics, UI feedback batch (done)
+
+  Four items from real usage feedback: a request to choose ProRes over H.264 for
+  the Compatible-playback-master re-encode (motivated by clip 026's diagnostics —
+  see below); the "Show me"-style diagram embedded in Pre-flight (Task 92-3)
+  reported as not helpful/not looking good; a request for pre-flight diagnostic
+  checks on suspect clips; and Select all/Select none parity with the Extract tab.
+
+  **Compatible playback master: H.264/ProRes toggle + ProRes profile
+  (`core/ffmpeg_cmd.py`, `ffmpeg_runner.py`, `merge_tab.py`, `core/plan_report.py`).**
+  `build_concat_reencode_cmd` gains `codec`/`prores_profile` params — `"h264"`
+  (unchanged default) or `"prores"` via `prores_ks` (`-vendor apl0 -pix_fmt
+  yuv422p10le`), profile 0/2/3 for proxy/standard/hq. UI: two radio buttons under
+  "Compatible playback master" (H.264/ProRes), and — only when ProRes is chosen —
+  a further Proxy/Standard/HQ row, both cascading-enabled the same way Optimize-
+  baseline's Quality target already is. New shared `core.plan_report.
+  estimate_total_pipeline_bytes` (used by BOTH `MergeWorker`'s live ETA
+  denominator and the Merge tab's pre-flight/disk-space estimate, so the two can
+  never drift apart): a plain stream-copy concat re-writes roughly the same
+  content again, but Compatible-playback-master instead RE-ENCODES at a bitrate
+  nothing like "the same size again" — H.264 delivery-grade lands near the
+  source's own order of magnitude; ProRes runs far higher (an edit-friendly
+  intermediate, not a delivery codec) — estimated from duration at each profile's
+  reference 4K bitrate instead of assuming a copy. Matters in practice: the old
+  assumption would have under-estimated a ProRes HQ 4K master's disk/time needs
+  by roughly an order of magnitude.
+
+  **Clip 026 diagnostic deep-dive (real investigation, not a build item) —
+  motivated the diagnostics feature below.** User reported clip 026 plays fine in
+  a media player and converts cleanly to ProRes, but stream-copy/YouTube/H.264
+  conversion has "often" failed or frozen. Investigated directly: full-clip
+  packet analysis (11,513 packets, perfectly even keyframe cadence, zero
+  anomalous packet sizes), clean stream-copy, clean HEVC annex-B bitstream-filter
+  test, and a full end-to-end H.264 re-encode reproduction (libx264 medium crf20,
+  matching the app's own Compatible-playback settings) with freezedetect running
+  throughout — completed cleanly: all 11,513 frames, zero freeze events, zero
+  decode errors. Clip 026 itself is not corrupt. The app-side "failed on
+  transcode" incident traced to a SEPARATE, NOT YET FIXED bug found during the
+  same investigation: `MergeWorker._make_scratch()` (ffmpeg_runner.py) always
+  resolves to one fixed, shared directory (`get_app_dir()/_temp`) with fixed
+  filenames — two app instances running concurrently (confirmed: the user had
+  one instance mid-transcode on unrelated footage while running this test in a
+  second) clobber each other's progress/error files and can delete each other's
+  in-progress temp files on cleanup. Real, reproducible, and worth its own fix
+  (unique per-run scratch subdir via e.g. `tempfile.mkdtemp`) — not built this
+  session, flagged for follow-up. The "freezes after upload" pattern is
+  consistent with 4K 10-bit HEVC being genuinely heavy to decode-then-re-encode
+  on a loaded/contended machine, not file damage.
+
+  **Pre-flight diagnostics (`core/diagnostics.py` new, `diagnostics_workers.py`
+  new, `preflight_dialog.py`).** Formalizes the clip-026 investigation above into
+  five selectable, on-demand checks, run from a new "Diagnostics" section in the
+  Pre-flight dialog: Container & stream structure, Timestamp & keyframe
+  integrity, Stream-copy compatibility (all three on by default, all fast),
+  Quick decode sample scan, and Full decode scan (both off by default — the
+  latter can take minutes per 4K clip). `core/diagnostics.py` is pure — command
+  builders + result parsers only, no subprocess calls, mirroring `core/
+  extract.py`'s own split between building commands and running them in a
+  worker — so `diagnostics_workers.py`'s `DiagnosticsWorker` (QThread, Popen-
+  based so `cancel()` can terminate a slow decode scan mid-run, same lifetime
+  discipline as `ExtractWorker`) is what actually executes them. Results attach
+  inline to each clip's own Pre-flight card (a "✓ clean" / "⚠ N findings" per
+  check, colour-coded) rather than a separate panel — informational only,
+  never blocking "Start merge" (the same way the disk-space warning today is a
+  heads-up, not a hard stop). A real bug caught by this work's OWN integration
+  test before shipping: the timestamp check initially used PTS (presentation
+  order), which legitimately reorders relative to packet/storage order on any
+  B-frame-containing stream (the overwhelming majority of real H.264/HEVC
+  footage) — flagged as "out-of-order timestamps" on a plain default-settings
+  libx264 test encode. Fixed to use DTS (decode order, guaranteed non-decreasing
+  regardless of B-frame reordering) instead.
+
+  **Reverted: the embedded "Show me" diagram in Pre-flight (Task 92-3).** User
+  feedback: didn't look good, wasn't particularly helpful. `preflight_dialog.py`
+  no longer imports `Story`/`ShowMeCanvas` or accepts a `story` param; back to
+  the summary band + per-clip cards only. The animated "✨ Show me" button
+  itself (a separate, on-demand feature) is untouched.
+
+  **Select all / Select none for the Merge tab's clips list (`merge_tab.py`).**
+  Matches the Extract tab's existing pair — added next to "Show sync details" in
+  the CLIPS section header; `_set_all_clips_selected(bool)` sets every clip's
+  `.selected` and repopulates the table, same pattern as the existing
+  `_reset_order`.
+
+  Tests: `test_diagnostics.py` (new, +25 pure-parser tests +1 real end-to-end
+  `DiagnosticsWorker` run against a synthetic ffmpeg-encoded clip — this is the
+  test that caught the PTS/DTS bug above); `test_preflight_dialog.py` (rewritten
+  — the Story/diagram tests are gone with the feature, replaced with coverage of
+  what remains: no diagram ever present, one card per clip, the disk-space
+  warning).
+
+  46 test files green.
+
+### Task 101 — real bug fix: per-clip WAV overrun was inflating the concat timeline (fixed)
+
+  Direct follow-up to Task 100's clip-026 investigation. User asked a sharper
+  question: does clip 025's WAV (which covers the original combined 025+026
+  camera recording) genuinely split into two parts, or could it still be
+  bleeding into 026 in a way that explains the reported freeze-frame symptom?
+  Investigated with real files and real numbers, not just re-reading the code.
+
+  **The evidence.** 025's WAV backup file on disk is UNTOUCHED since the
+  original camera recording (2183.09s — still the full combined take); 026's
+  WAV backup was created separately by this app's own clip-split feature
+  (dated 3 days later), extracted from 025's WAV starting within 0.3ms of
+  025's own reported video duration — the split itself is genuinely clean, a
+  real non-overlapping cut. But the actual manifest from a real completed
+  merge showed clip 025's measured concat-position advance was **2182.49s —
+  its WAV's length, not its 1798.55s video length**. Reproduced directly and
+  confirmed the mechanism in `core/ffmpeg_cmd.py`'s `build_mux_cmd_plan`: the
+  per-clip mux command had no `-shortest` and (outside one specific path) no
+  `-t` cutoff either, so whenever an audio input runs longer than the video —
+  common even in the ordinary case (a WAV recorder often keeps rolling a beat
+  past the camera stopping), and dramatic in a clip-split case where the WAV
+  still carries the NEXT clip's entire audio — the per-clip temp file's
+  CONTAINER duration follows the longer audio stream, not the video. The
+  concat demuxer then advances the following clip's position by that inflated
+  duration, and the video decoder is left holding the last frame for the
+  difference: exactly the "freeze frame" symptom reported, and it also drifts
+  every clip after the affected one later than it should be.
+
+  **The fix.** `build_mux_cmd_plan` already had an explicit `-t {duration}`
+  output cutoff for exactly this class of bug — but only on the LRV-proxy-swap
+  path (a proxy's own duration rarely matches its paired clip's to the
+  millisecond, per that code's own existing comment). Removed the `if
+  use_lrv:` guard so the cutoff applies unconditionally to every per-clip mux,
+  covering the WAV-overrun case (and, incidentally, any other audio-source
+  overrun — mix tracks derived from mismatched camera/WAV inputs were
+  susceptible to the identical mechanism).
+
+  **Verification.** A real, unmocked end-to-end test (not just asserting
+  argument presence): built an actual clip via bundled ffmpeg with a 3s video
+  and a 6s paired WAV (the literal shape of the bug), ran the real
+  `build_mux_cmd_plan` output through ffmpeg, and confirmed the resulting
+  per-clip file's container duration is 3.000s — not 6s. Deliberately reverted
+  the fix and re-ran to confirm both the new unit test AND this integration
+  test actually catch the regression (they do), then restored it.
+
+  Tests: `test_ffmpeg_cmd.py` (+4: the cutoff applies to an ordinary
+  stream-copy clip with a WAV, a clip with no WAV at all, and a genuinely
+  transcoding clip — none of these tied specifically to the LRV path; +1 real
+  ffmpeg integration test proving a real WAV overrun is actually trimmed).
+
+  46 test files green (existing file gained tests, no new file this time).
+
+### Task 102 — battle-test coverage for Task 100/101's new features (done)
+
+  User asked, after Task 101 shipped, to extend the ongoing Merge-tab
+  battle-test campaign to cover everything added/changed recently rather than
+  leave it at command-builder-level tests. Three gaps closed:
+
+  1. **Select all / Select none** — no test existed at all.
+     `test_merge_select_all.py` (new, 4 tests): `_set_all_clips_selected`
+     deselects/reselects/overrides a mixed state correctly, and the actual
+     toolbar buttons (found by label, not a stored attribute) are wired to it.
+
+  2. **ProRes/H.264 compatible-playback-master, through a real merge** — this
+     had only ever been exercised at the command-builder level
+     (`build_concat_reencode_cmd` unit tests). Extended
+     `md5_matrix_test.py`'s `MATRIX` from 5-tuples to 8-tuples, adding
+     `compat_h264`, `compat_prores_proxy`, `compat_prores_std`,
+     `compat_prores_hq` cells (each combined with archival + one-track-per-clip
+     so MD5 verify also proves the archival originals stay byte-exact
+     regardless of what the baseline itself gets re-encoded to). `run_one()`,
+     the CLI (`--compat-baseline`/`--compat-codec`/`--compat-prores-profile`),
+     and the summary writer all updated to match.
+
+  3. **The WAV-overrun fix (Task 101), through the real, full pipeline** — the
+     existing coverage was command-builder-level only (confirms the `ffmpeg`
+     command is built correctly) plus a standalone-ffmpeg integration test
+     (confirms one mux command trims one file correctly). Neither drove the
+     actual MergeTab → MergeWorker → manifest pipeline the way a real user
+     merge does. New `test_wav_overrun_real_merge.py`: builds two real clips
+     (clip A's WAV genuinely overruns 3s into where clip B's audio would be —
+     the literal shape of the clip-026 report), drives a real headless
+     MergeTab merge, then asserts against the produced manifest that clip B's
+     `concat_start` lands at clip A's own VIDEO duration (3.000s measured),
+     not its WAV's inflated duration (6.0s) — and that the master file's own
+     total duration matches the sum of video durations, not the sum
+     including the overrun. This is the test that most directly proves the
+     bug is fixed, since it reproduces the exact end-to-end mechanism a real
+     user would hit.
+
+  Also added one more gap while auditing: the diagnostics feature had unit
+  tests (`test_diagnostics.py`) and a test driving `DiagnosticsWorker`
+  directly, but nothing exercised `PreflightDialog`'s own wiring (the Run
+  button → worker → per-clip label). Added
+  `_integration_run_diagnostics_through_the_dialog` to `test_preflight_dialog.py`:
+  clicks the real "Run diagnostics" button against one real clip, waits for
+  `_on_diag_finished`, and confirms the clip's label is populated with a
+  color-coded verdict and the buttons reset to idle.
+
+  **A resource-contention lesson, not a product bug**: running the new
+  full-pipeline WAV-overrun test concurrently with the 8-cell ProRes matrix
+  smoke test (both doing real ffmpeg work at once) caused both to slow down
+  dramatically — the matrix's simplest cell (`baseline_only`, no archival, no
+  compat baseline) hit its 1200s timeout, and the WAV-overrun test itself
+  needed several retries with increasing timeouts before it got a CPU
+  timeslice. Confirmed via `tasklist`/`wmic` that this was genuine contention
+  (two real python+ffmpeg processes already running), not a hang — the
+  WAV-overrun test passed cleanly and quickly the one time it ran without
+  contention. Lesson: don't stack multiple real-ffmpeg test runs
+  concurrently on this machine; the matrix needs a clean re-run once other
+  heavy work has cleared.
+
+  Tests: `test_merge_select_all.py` (new, 4 tests), `test_wav_overrun_real_merge.py`
+  (new, 1 real-merge integration test), `test_preflight_dialog.py` (+1 real
+  integration test), `md5_matrix_test.py` (extended, not a test file count
+  change — 4 new matrix cells).
+
+  **Correction (see Task 103): the "resource-contention" explanation above
+  was only half right.** Re-running the matrix's `baseline_only` cell in
+  isolation still failed — not with a timeout, but with an immediate, real
+  ffmpeg crash. The matrix's 8/8 timeouts were genuinely caused by that crash
+  repeatedly hitting under heavy concurrent CPU load (which stretched a
+  normally-fast failure out past the 1200s cap), not a Qt hang. See Task 103
+  for the real bug and its fix.
+
+### Task 103 — two real bugs found chasing the Task 102 matrix "timeouts": invalid HDR color args, and an incomplete unverifiable-video prediction (fixed)
+
+  Following up on Task 102's matrix smoke test, which reported 8/8 timeouts.
+  Re-ran a single cell in isolation with diagnostics instead of accepting
+  "contention" — it failed FAST with a real ffmpeg error, not a hang.
+
+  **Bug A — invalid color metadata crashed every transcode of real HDR
+  footage.** `ffprobe` on the real Pixel test clip reports THREE distinct
+  color fields: `color_space=bt2020nc` (matrix coefficients), `color_primaries
+  =bt2020`, `color_transfer=arib-std-b67` (HLG). `probe.py` only ever captured
+  `color_space`, and `core/ffmpeg_cmd.py`'s `_video_encoder_args` fed that one
+  value into all three of `-colorspace`/`-color_primaries`/`-color_trc` —
+  valid only by coincidence for bt709. For BT.2020/HDR content (i.e. most
+  modern 4K/HDR phone footage) this fed the matrix-coefficient string
+  `bt2020nc` into `-color_primaries`, which libx265 rejected outright
+  ("Unable to parse "color_primaries" option value "bt2020nc""), hard-failing
+  the transcode. Fixed by probing `color_primaries` as its own field
+  (`probe.py`) and threading it plus the already-probed-but-unused
+  `color_transfer` through `core/baseline.py`'s `ClipSpec`/`SpecGroup` and
+  `merge_tab.py` into `ConformSpec`, each landing on its own correct ffmpeg
+  arg. Verified against the real Pixel clip: the merge now succeeds and the
+  resulting master's color tags (`bt2020nc`/`bt2020`/`arib-std-b67`) exactly
+  match the original.
+
+  **Bug B — an "hdr"-status clip's video was never predicted unverifiable,
+  producing a false "unexpected mismatch, worth a closer look" alarm.** Once
+  Bug A stopped crashing the merge, MD5 verification on that same real clip
+  reported a genuine-looking FAIL — `tools/diagnose_midtrack_decode.py`
+  confirmed total divergence, which turned out to be expected (the clip WAS
+  transcoded) but mis-reported as a surprise. Root cause: `core/verify.py`'s
+  `predict_unverifiable` and `ffmpeg_runner.py`'s `expected_to_differ` both
+  checked the literal string `conform_status == "transcode"` — missing `"hdr"`
+  entirely, even though `manifest.ClipEntry.recovery_fidelity`'s own docstring
+  already documents "hdr" as one of the "anything else" statuses that gets
+  routed through the exact same re-encode path (`ffmpeg_cmd.py`'s
+  `is_conform = clip.status == "ok"`). It also missed the Compatible-playback-
+  master (compat baseline) case, where even an `"ok"`-conform clip's video
+  stops being byte-exact once the shared baseline itself gets re-encoded.
+  Fixed both checks to read the already-correct `recovery_fidelity` field
+  instead of re-deriving the same logic incompletely.
+
+  **A second-order bug this fix exposed and also fixed**: `expected_to_differ`
+  was a single flag shared by both the Video and Camera-audio checks inside
+  `compare_adaptive`, but camera audio is typically still stream-copied even
+  when video needs conforming (`entry.audio_lossless`) — reusing the
+  video-oriented flag for audio too regressed a genuine decode-lossless audio
+  MATCH into a false "mismatch" the moment Bug B's fix correctly started
+  flagging the HDR clip's video as expected-to-differ. Split into
+  `video_expected_to_differ` (kept at its call site) and an explicit
+  `expected_to_differ` parameter on `compare_adaptive`, with the Camera-audio
+  call site passing its own `not entry.audio_lossless`.
+
+  **Verified three ways**: (1) real Pixel HDR clip re-verified against the
+  actual completed master via a manual `_verify_one_clip` invocation — Video
+  went from a false FAIL to a correct predicted-unverifiable PASS, Camera
+  audio went from a false MISMATCH back to a correct decode-lossless MATCH;
+  (2) a new real, full-pipeline integration test
+  (`test_hdr_verify_real_merge.py`) builds a synthetic HDR/HLG clip, merges
+  it for real, and asserts the same PASS/PASS shape; (3) new unit tests in
+  `test_ffmpeg_cmd.py` (3 tests: bt709-still-shared, bt2020-uses-distinct-
+  values, fallback-when-unset) and `test_verify.py` (2 tests: hdr-status
+  predicts video, ok-status-under-compat-baseline predicts video) and
+  `test_baseline.py` (1 test: color fields survive `enumerate_specs`).
+
+  While building the HDR integration test fixture, hit and diagnosed a THIRD,
+  separate anomaly — a ~23ms (exactly 1024/44100, one AAC frame) audio
+  duration mismatch — before concluding it was a fixture-construction
+  artifact (encoding audio in the same pass as video let ffmpeg write an
+  edit-list-based priming trim into the standalone test file that a later
+  `-c:a copy` remux doesn't reproduce), NOT a real bug: the real Pixel clip's
+  camera audio (recorded by real hardware, not ffmpeg's own encoder) never
+  showed this. Fixed by encoding the fixture's audio to AAC separately first,
+  then muxing it in via `-c:a copy` — matching how the app's own per-clip mux
+  already handles camera audio.
+
+  Tests: `test_ffmpeg_cmd.py` (+3), `test_verify.py` (+2), `test_baseline.py`
+  (+1), `test_hdr_verify_real_merge.py` (new, 1 real-merge integration test).
+  51 test files, all green.
+
+### Task 104 — real bug: a clip's Primary override + a separate Mixed Audio track both mapping the same single-use "[mix]" filtergraph pad (fixed)
+
+  User hit a real "Failed" dialog on a real merge (clip `VID_20260707_190203_026.mp4`,
+  output named "...(audio fix clip26).mov" — they were specifically working
+  around clip 26's audio via a Primary-slot override):
+
+  ```
+  [out#0/mov @ ...] Output with label 'mix' does not exist in any defined
+  filter graph, or was already used elsewhere.
+  Error opening output file ...\_temp\clip_05.mov.
+  Error opening output files: Invalid argument
+  ```
+
+  Unrelated to Task 103's fixes (different area of the codebase entirely —
+  the audio-mix filtergraph, not color metadata or verification). Root cause:
+  `core/ffmpeg_cmd.py`'s `_mix_filtergraph` always defines a single-use `[mix]`
+  output pad, but `build_mux_cmd_plan`'s mapping loop emits `-map "[mix]"`
+  once for EVERY enabled track slot whose fill resolves to `"mix"`/`"mix_alac"`
+  — and a clip's Primary-slot override (`ClipInfo.primary_override == "mix"`,
+  forcing the disposition-default slot to also carry mix content) and a
+  separately-enabled native "Mixed Audio" plan track can BOTH independently
+  resolve to `"mix"` for the same clip. ffmpeg filtergraph output labels are
+  single-consumption — the second `-map "[mix]"` legitimately fails with
+  exactly the observed error.
+
+  **The fix.** `_mix_filtergraph` now accepts `n_outputs`: when more than one
+  slot needs the identical derived mix, the combine filter writes to an
+  internal `[mixsrc]` label followed by `asplit=N` fanning it out into `N`
+  distinct single-use `[mix0]`..`[mixN-1]` pads; `build_mux_cmd_plan` counts
+  how many fills actually need mix and gives each one its own pad. The
+  overwhelmingly common single-consumer case is untouched — still emits the
+  plain `[mix]` label exactly as before.
+
+  **Verified two ways**: (1) unit tests confirming the split-pad command
+  shape when both a Primary override and a native mix track are present, and
+  that the single-consumer case doesn't regress to the split form
+  unnecessarily; (2) built two real synthetic clips (video + camera audio +
+  WAV) with a Primary override of "mix" AND an enabled Mixed Audio track, ran
+  the real generated command through real ffmpeg — reproduced the crash
+  first (to confirm the test was meaningful), then confirmed the fix
+  produces a valid 4-stream output (video, mix-override slot, WAV backup,
+  native mix track) with exit code 0.
+
+  Tests: `test_ffmpeg_cmd.py` (+2). 51 test files, all green (no new file —
+  existing file gained tests).

@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-07-11 09:44"
+LAST_UPDATED = "2026-07-13 16:15"
 
 
 @dataclass
@@ -25,6 +25,104 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-07-13",
+        title="Fixed a real audio-mix crash, HDR footage failing to merge, a freeze-frame cause, and more",
+        summary="Found and fixed three real bugs: merging a clip with BOTH a Primary-audio "
+                "override AND a separate Mixed Audio track could crash outright with an "
+                "ffmpeg filter-graph error (caught live from a real \"Failed\" dialog); "
+                "merging HDR/BT.2020 footage (common on modern phones) could also fail "
+                "outright with an ffmpeg error; and a transcoded HDR clip's verification "
+                "could report a false \"unexpected mismatch\" alarm even when everything "
+                "actually recovered correctly. Also: if a clip's WAV backup ran even "
+                "slightly longer than its own video — very common, and dramatic for a "
+                "camera's file-split clips — the merge let that extra audio silently "
+                "stretch the clip's segment in the master, holding the video on a frozen "
+                "last frame for the difference. Plus: Compatible playback master now offers "
+                "ProRes as an alternative to H.264, Pre-flight can run diagnostic checks on "
+                "your clips before merging, the pre-flight diagram that wasn't landing well "
+                "is reverted, and Select all/Select none was added to the Merge tab's clip "
+                "list.",
+        details=[
+            "Fixed: merging a clip with both a Primary-audio override AND a separate "
+            "Mixed Audio track enabled could fail outright with \"Output with label 'mix' "
+            "does not exist in any defined filter graph, or was already used elsewhere\" — "
+            "both settings tried to reuse the same internal audio-mix result, which ffmpeg "
+            "only allows to be used once. Each now gets its own copy.",
+            "Fixed: merging HDR video (common on modern phones — anything shot in HLG/HDR "
+            "mode) could fail outright with an ffmpeg error when that clip needed "
+            "re-encoding, because the app was feeding one probed color value into three "
+            "different settings that each need their own — found and fixed by testing "
+            "against real HDR phone footage.",
+            "Fixed: right after the above, verifying a merge that included an HDR clip "
+            "could wrongly report \"unexpected mismatch, worth a closer look\" for that "
+            "clip's video and audio — alarming, but not a real data problem, since that "
+            "footage was always going to be re-encoded rather than kept byte-for-byte. "
+            "Verification now correctly recognizes this as expected and reports a clean "
+            "pass with an honest explanation instead.",
+            "Fixed: a clip whose WAV backup runs longer than its own video (common — a "
+            "WAV recorder often keeps rolling a beat past the camera stopping; dramatic "
+            "for a camera's file-split clips, where the WAV can still carry the ENTIRE "
+            "next clip's audio) no longer stretches that clip's segment in the merged "
+            "master. Previously the extra audio silently extended the segment, holding "
+            "the video on its last frame for the difference and delaying every clip after "
+            "it by the same amount — found by investigating a real report of odd playback "
+            "around a camera file-split, and confirmed directly against the real numbers "
+            "from a real merge before being fixed.",
+            "New: Compatible playback master can now re-encode to ProRes (Proxy, Standard, "
+            "or HQ) instead of H.264 — useful when your footage is heavy to decode and "
+            "re-encode (e.g. 4K 10-bit) and you want an edit-friendly intermediate rather "
+            "than a delivery file.",
+            "New: Pre-flight can run diagnostic checks on your selected clips before you "
+            "merge — pick from container/stream structure, timestamp and keyframe "
+            "integrity, stream-copy compatibility, a quick decode sample scan, or a full "
+            "decode scan (the last one can take a few minutes per 4K clip, so it's off by "
+            "default). Results show up directly on each clip's card. These are purely "
+            "informational — a finding never stops you from starting the merge.",
+            "Investigated a real report of clip 026 (plays fine, converts to ProRes "
+            "cleanly, but was tricky to stream-copy or convert to H.264/upload to "
+            "YouTube) in full: packet structure, stream-copy compatibility, and a "
+            "complete H.264 re-encode with freeze detection all came back clean on the "
+            "clip itself — the freeze-frame cause turned out to be the merge-timeline bug "
+            "above, not damage in the file. A separate, not-yet-fixed issue (two copies "
+            "of the app sharing one fixed temp folder) was also found and is flagged for "
+            "its own fix.",
+            "Reverted the pre-flight \"big picture\" diagram (added recently) after feedback "
+            "that it wasn't helpful and didn't look good — pre-flight is back to the plain "
+            "summary and per-clip breakdown.",
+            "New: \"Select all\" / \"Select none\" buttons for the Merge tab's clip list, "
+            "matching the Extract tab.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-07-12",
+        title="Extract-tab layout fix + a genuinely accurate progress/time-remaining readout",
+        summary="The Extract tab's rows could visually overlap at higher display-scaling "
+                "settings — fixed. Both the Merge and Extract tabs now show a precise "
+                "percentage, the current and expected total data size in GB, and a total-"
+                "time-remaining estimate that's deliberately conservative (it would rather "
+                "finish early than run late) — including a plain-language \"completes by\" "
+                "clock time and date.",
+        details=[
+            "Fixed: the Extract tab's clip list, format picker, and output-folder rows "
+            "could overlap on screen at higher Windows display-scaling percentages. The "
+            "tab now scrolls instead of squeezing everything into a fixed height.",
+            "New: both tabs now show the percentage complete to two decimal places, plus "
+            "how much data has been produced so far against the expected total (e.g. "
+            "\"3.19 / 25.89 GB\") — previously only Merge showed a rough running total, "
+            "and Extract showed no size information at all.",
+            "New: a redesigned time-remaining estimate. The old one assumed every remaining "
+            "percent would cost the same time as the average percent so far — which runs "
+            "overly optimistic whenever the slow part of a job (like a transcode) comes "
+            "after the fast part (like a stream copy), which is the usual case. The new "
+            "estimate weighs work by its real size and deliberately leans toward the "
+            "slower, safer prediction, then shows it as a total duration and a plain \"will "
+            "complete by\" clock time and date.",
+            "New: the Extract tab now shows live transfer speed and a size estimate the "
+            "same way the Merge tab always has — previously it only showed \"clip 3 of 8\" "
+            "with no sense of how much data or time was left.",
+        ],
+    ),
     HistoryEntry(
         date="2026-07-11",
         title="Fixed audio-only exports (Advanced output → video unchecked)",
