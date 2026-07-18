@@ -32,7 +32,9 @@ from core import catalog as catalog_mod
 import theme
 
 APP_NAME    = "LunaVault FuseBox"
-APP_VERSION = "1.4.0"
+# Versioning: v1.4.NNN, incremented by one for every amendment/change (see
+# dev_history.py's running log and LAST_UPDATED stamp).
+APP_VERSION = "1.4.004"
 
 
 class _UpdateCheckThread(QThread):

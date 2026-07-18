@@ -531,3 +531,16 @@ def probe_chapters(ffprobe_bin: str, path: str) -> list:
     except Exception:
         return []
     return parse_chapters(raw)
+
+
+def probe_chapters_safe(ffprobe_bin: str, path: str) -> tuple:
+    """Like probe_chapters, but also reports *why* an empty list came back —
+    a crashed/non-zero-exit ffprobe (broken or truncated binary) looks
+    identical to "this file genuinely has no chapters" to a plain caller.
+    Callers that show the user a message (e.g. the Extract tab's no-manifest
+    fallback) need to tell those apart instead of just saying "no chapters"."""
+    try:
+        raw = _run_ffprobe(ffprobe_bin, path)
+    except Exception as e:
+        return [], str(e)
+    return parse_chapters(raw), None

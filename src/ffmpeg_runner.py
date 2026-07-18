@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
@@ -47,10 +48,27 @@ from core.verify import (
     build_decoded_video_md5_cmd, build_decoded_audio_md5_cmd, decoded_md5,
     predict_unverifiable, _PREDICTED_PREFIX,
     quick_video_rounding_check, quick_wav_rounding_check,
+    clip_has_audio_priming_gap,
 )
 
 # Re-exported for existing call sites (main.py, merge_tab.py, extract_tab.py).
 _no_window = no_window
+
+
+def _instance_scratch_name() -> str:
+    """A per-run-instance subfolder name (PID + a short random suffix) so two
+    concurrent merges/exports — two instances of the app, or a merge and a
+    WhatsApp export running at once — never share the same per-clip scratch
+    directory. Before this, every worker resolved to the exact same hardcoded
+    `_temp` path with no isolation at all: confirmed directly (battle-test
+    round 2) as a real collision between two independent, unrelated merge
+    processes running at the same time, each writing clip_NN.mov files into
+    the other's scratch dir — and each one's own cleanup then `rmtree`s that
+    ENTIRE shared directory afterward, deleting the other process's in-flight
+    files outright, not just risking a same-numbered overwrite. The PID alone
+    isn't quite enough (two merges could still overlap within one process
+    given the API); the random suffix covers that too."""
+    return f"run_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 
 
 def _tail_text(path: Path, max_chars: int = 600) -> str:
@@ -219,22 +237,29 @@ class MergeWorker(QThread):
         Deliberately NOT the output folder — if the output is a slow cloud-synced
         location (e.g. Jottacloud), writing every temp clip there cripples speed.
         Only the finished master is written to the output folder (once).
+
+        Each call gets its OWN uniquely-named subfolder under the chosen base
+        (see `_instance_scratch_name`) — two concurrent merges (two app
+        instances, or two overlapping runs in one process) never share a
+        scratch directory, and each one's cleanup only ever removes its own.
         """
         candidates = []
         if self._scratch_override:
             candidates.append(Path(self._scratch_override) / "_lvfb_temp")
         candidates.append(get_app_dir() / "_temp")
         candidates.append(Path(tempfile.gettempdir()) / "lunavault_fusebox")
+        name = _instance_scratch_name()
         for base in candidates:
             try:
-                base.mkdir(parents=True, exist_ok=True)
-                probe = base / ".write_test"
+                scratch = base / name
+                scratch.mkdir(parents=True, exist_ok=True)
+                probe = scratch / ".write_test"
                 probe.write_text("ok")
                 probe.unlink()
-                return base
+                return scratch
             except Exception:
                 continue
-        return get_app_dir() / "_temp"
+        return get_app_dir() / "_temp" / name
 
     # Cap on the embedded-manifest metadata value, well under the Windows
     # ~32 KB command-line limit; a shoot large enough to exceed it falls back to
@@ -360,7 +385,8 @@ class MergeWorker(QThread):
             return "failed", _tail_text(err_path)
         return "ok", ""
 
-    _ENCODER_LABELS = {"nvenc": "GPU: NVENC", "qsv": "GPU: Quick Sync", "amf": "GPU: AMD AMF"}
+    _ENCODER_LABELS = {"nvenc": "GPU: NVENC", "qsv": "GPU: Quick Sync", "amf": "GPU: AMD AMF",
+                       "vaapi": "GPU: VAAPI"}
 
     def _clip_stage_label(self, clip, hw_encoder: Optional[str] = None) -> str:
         """Plain-language description of what's about to happen to this clip —
@@ -573,13 +599,26 @@ class MergeWorker(QThread):
         concat_cursor = 0.0
         concat_measured = True   # one failed probe poisons every LATER position
 
+        # Resolve "auto" once, the same way _resolve_hw_extras/build_mux_cmd_plan
+        # will for the real command, so the per-clip progress label names the
+        # actual encoder in use rather than the raw setting. _ENCODER_LABELS
+        # only has entries for real vendor names ("nvenc"/"qsv"/"amf") — the
+        # literal string "auto" always missed that lookup and fell through to
+        # the "CPU: libx264" default, even while a real GPU encode was
+        # genuinely running (confirmed directly: a hardware-accelerated merge
+        # still showed "CPU: libx264" throughout).
+        hw_encoder_setting = getattr(self._conform, "hw_encoder", "off") or "off"
+        if hw_encoder_setting == "auto":
+            from core.gpu_encode import detect_best_hw
+            hw_encoder_setting = detect_best_hw(ff, getattr(self._conform, "codec", None) or "hevc") or "off"
+
         for i, clip in enumerate(clips):
             if self._cancelled:
                 self._cleanup(temp_dir)
                 self.finished.emit(False, "Cancelled")
                 return
 
-            label = self._clip_stage_label(clip)
+            label = self._clip_stage_label(clip, hw_encoder=hw_encoder_setting)
             self.progress.emit({
                 "pct": 0, "size": 0,
                 "stage": "mux", "stage_label": label,
@@ -733,7 +772,9 @@ class MergeWorker(QThread):
             cmd = build_concat_reencode_cmd(ff, concat_file, chapters_file, baseline_target,
                                             progress_file, extra_out_args=embed,
                                             codec=self._compat_codec,
-                                            prores_profile=self._compat_prores_profile)
+                                            prores_profile=self._compat_prores_profile,
+                                            hw_encoder=self._conform.hw_encoder,
+                                            hw_decode=self._conform.hw_decode)
         else:
             cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target, progress_file,
                                    extra_out_args=embed)
@@ -939,11 +980,20 @@ class MergeWorker(QThread):
         # unbounded retry against a genuinely shared track.
         own_archival_track = entry.archival_track is not None
         safe_to_read_unbounded = own_archival_track and plan.bit_exact
-        predicted_unverifiable = (
-            predict_unverifiable(entry, plan, own_archival_track, safe_to_read_unbounded)
-            if self._skip_predictable_verify else {})
-
         kwargs = no_window()
+        if self._skip_predictable_verify:
+            # Only worth the extra ffprobe call when it could actually change
+            # the prediction: a clip with its own archival track never hits
+            # this (its audio comes from a bit-exact standalone copy, not a
+            # cut), and neither does one with no camera audio to check at all.
+            priming_gap = (
+                not own_archival_track and entry.has_camera_audio and plan.audio_stream is not None
+                and clip_has_audio_priming_gap(fp, str(clip.path), **kwargs))
+            predicted_unverifiable = predict_unverifiable(
+                entry, plan, own_archival_track, safe_to_read_unbounded,
+                source_has_audio_priming_gap=priming_gap)
+        else:
+            predicted_unverifiable = {}
 
         def extract_and_hash(cmd, out_path) -> str:
             r = subprocess.run(cmd, capture_output=True, **kwargs)
@@ -1451,8 +1501,11 @@ class WhatsAppWorker(QThread):
 
     def run(self):
         ff, _ = get_ffmpeg()
-        temp_dir      = get_app_dir() / "_temp"
-        temp_dir.mkdir(exist_ok=True)
+        # Own subfolder, not the bare shared `_temp` — see MergeWorker
+        # ._make_scratch's docstring for why a shared path collides between
+        # concurrent workers (this one and a MergeWorker, or two of either).
+        temp_dir      = get_app_dir() / "_temp" / _instance_scratch_name()
+        temp_dir.mkdir(parents=True, exist_ok=True)
         progress_file = temp_dir / "progress.txt"
         progress_file.write_text("")
 

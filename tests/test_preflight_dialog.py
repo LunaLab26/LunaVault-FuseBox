@@ -139,10 +139,60 @@ def _integration_run_diagnostics_through_the_dialog() -> bool:
     return True
 
 
+def test_pipeline_section_absent_without_settings():
+    # No settings passed → no pipeline controls (back-compat for any caller that
+    # constructs the dialog report-only).
+    dlg = PreflightDialog(_empty_report())
+    assert not hasattr(dlg, "_pipe_recommended")
+    print("ok: test_pipeline_section_absent_without_settings")
+
+
+def test_pipeline_recommended_default_disables_custom_pickers():
+    s = Settings()
+    s.set("merge_pipeline_recommended", True)
+    dlg = PreflightDialog(_empty_report(), settings=s, gpu_available=True)
+    assert dlg._pipe_recommended.isChecked()
+    assert not dlg._pipe_custom.isEnabled(), "custom pickers must be disabled in recommended mode"
+    print("ok: test_pipeline_recommended_default_disables_custom_pickers")
+
+
+def test_pipeline_custom_choices_persist_to_settings():
+    s = Settings()
+    s.set("merge_pipeline_recommended", True)
+    dlg = PreflightDialog(_empty_report(), settings=s, gpu_available=True)
+    # Unticking recommended enables the pickers and persists the mode.
+    dlg._pipe_recommended.setChecked(False)
+    assert s.get("merge_pipeline_recommended") is False
+    assert dlg._pipe_custom.isEnabled()
+    # Choose hardware decode + software encode.
+    dlg._pipe_decode.setCurrentIndex(1)   # Hardware (GPU)
+    dlg._pipe_encode.setCurrentIndex(0)   # Software (CPU)
+    assert s.get("merge_decode_method") == "hardware"
+    assert s.get("merge_encode_method") == "software"
+    assert Settings().get("merge_decode_method") == "hardware", "must persist to disk"
+    print("ok: test_pipeline_custom_choices_persist_to_settings")
+
+
+def test_pipeline_hardware_disabled_when_no_gpu():
+    s = Settings()
+    s.set("merge_pipeline_recommended", False)
+    s.set("merge_encode_method", "hardware")
+    dlg = PreflightDialog(_empty_report(), settings=s, gpu_available=False)
+    # The hardware item exists but is disabled, and the combo can't show it selected.
+    hw_item = dlg._pipe_encode.model().item(1)
+    assert not hw_item.isEnabled(), "hardware option must be disabled with no GPU"
+    assert dlg._pipe_encode.currentData() == "software", "must fall back to software display"
+    print("ok: test_pipeline_hardware_disabled_when_no_gpu")
+
+
 if __name__ == "__main__":
     test_dialog_has_no_diagram_and_the_fixed_minimum_size()
     test_dialog_builds_one_card_per_clip()
     test_disk_space_warning_shown_when_low()
+    test_pipeline_section_absent_without_settings()
+    test_pipeline_recommended_default_disables_custom_pickers()
+    test_pipeline_custom_choices_persist_to_settings()
+    test_pipeline_hardware_disabled_when_no_gpu()
     print("test_preflight_dialog: all tests passed")
     print("running real ffmpeg integration...")
     _integration_run_diagnostics_through_the_dialog()

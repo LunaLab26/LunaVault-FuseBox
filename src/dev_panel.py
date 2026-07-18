@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, QPoint, Signal
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QCheckBox, QComboBox,
-    QDialog, QFrame, QScrollArea,
+    QDialog, QFrame, QScrollArea, QMessageBox,
 )
 
 import theme
@@ -29,6 +29,10 @@ class BoolOpt:
     key: str
     title: str
     desc: str
+    confirm: str = ""   # if set, a warning shown (with this text) that the user
+                        # must accept before the option can be turned ON — for a
+                        # switch whose downside is severe enough to warrant
+                        # informed consent, not just a description.
 
 
 @dataclass
@@ -85,10 +89,21 @@ SECTIONS = [
                   [(150, "Smoother (150ms)"), (300, "Balanced (300ms)"),
                    (500, "Lighter (500ms)")], 300),
         BoolOpt("dev_review_allow_risky_hw_decode", "Allow GPU decode for 4K 10-bit HEVC",
-                "This profile is normally forced to software decode because it has "
-                "crashed GPU drivers on some hardware. Turn on to experiment with GPU "
-                "decode for it — playback may freeze. Takes effect on the next master "
-                "you open in Review."),
+                "This profile is normally forced to software decode because GPU decode "
+                "of it has crashed the ENTIRE COMPUTER — not just this app — on very "
+                "different hardware (a Windows laptop and an AMD Steam Deck alike), by "
+                "overwhelming the graphics driver. Turning this on removes that safety "
+                "net and lets you uncheck \"Software decode\" for such a file; doing so "
+                "may hard-crash your whole system and lose unsaved work. Leave it off "
+                "unless you specifically mean to test that. Takes effect on the next "
+                "master you open in Review.",
+                confirm=("Turn OFF the crash safety net for 4K 10-bit HEVC?\n\n"
+                         "GPU-decoding this kind of video has crashed the whole computer "
+                         "(not just this app) on multiple different machines — the screen "
+                         "freezes and the system can go down, losing any unsaved work.\n\n"
+                         "Only enable this if you specifically intend to test GPU decode "
+                         "on this footage and have saved everything first.\n\n"
+                         "Enable it anyway?")),
     ]),
     ("Review tab — overview filmstrip", [
         ChoiceOpt("dev_review_thumb_count", "Thumbnail count",
@@ -159,13 +174,30 @@ class DeveloperOptionsDialog(QDialog):
         box, lay = self._card()
         cb = QCheckBox(opt.title)
         cb.setChecked(bool(self._settings.get(opt.key, False)))
-        cb.toggled.connect(lambda on, k=opt.key: self._set(k, bool(on)))
+        cb.toggled.connect(lambda on, o=opt, c=cb: self._on_bool_toggled(bool(on), o, c))
         d = QLabel(opt.desc)
         d.setWordWrap(True)
         lay.addWidget(cb)
         lay.addWidget(d)
         self._bool_rows.append((box, cb, d))
         return box
+
+    def _on_bool_toggled(self, on: bool, opt: BoolOpt, cb: QCheckBox):
+        """Persist the change, but for an option carrying a `confirm` message
+        require the user to accept a warning before it can be turned ON —
+        turning OFF is always allowed without a prompt (that's the safe
+        direction). Declining reverts the checkbox without persisting."""
+        if on and opt.confirm:
+            answer = QMessageBox.warning(
+                self, "Are you sure?", opt.confirm,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+                return
+        self._set(opt.key, on)
 
     def _choice_row(self, opt: ChoiceOpt) -> QFrame:
         box, lay = self._card()

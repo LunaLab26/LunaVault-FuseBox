@@ -1,12 +1,13 @@
 """merge_tab.py — Merge clips tab UI and logic (v1.4)."""
 
+import os
 import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtGui import QColor, QPixmap, QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -969,6 +970,15 @@ class MergeTab(QWidget):
         # Interactive so the user can drag-resize it (e.g. widen Clip for a long name) —
         # utility columns (#, preview, ↑/↓, hidden sync details) stay auto-sized, they're not worth dragging.
         self._table.header().setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Stretch)
+        # A Stretch section still shrinks to near-nothing once the other columns'
+        # own widths fill the viewport (confirmed directly at the app's own
+        # 1200x850 minimum: Status collapsed to 1-2 visible characters —
+        # "ti", "1s" — hiding the single most important thing a clip's row
+        # conveys, whether it'll stream-copy or transcode). A header-wide
+        # minimum section size protects Status the same as every other
+        # column; once nothing more fits, the table's own horizontal
+        # scrollbar takes over instead of squeezing text unreadable.
+        self._table.header().setMinimumSectionSize(130)
         for col in (COL_ORDER, COL_PREVIEW, COL_OFFSET, COL_DRIFT, COL_UP, COL_DOWN):
             self._table.header().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         for col, default_width in (
@@ -1121,6 +1131,7 @@ class MergeTab(QWidget):
         self._gpu_check = QCheckBox("GPU encode")
         self._gpu_check.setEnabled(False)
         self._gpu_check.setToolTip("Checking for a usable GPU encoder…")
+        self._gpu_check.toggled.connect(self._on_gpu_check_toggled)
         btn_row.addWidget(self._gpu_check)
 
         self._show_me_btn = QPushButton("✨ Show me…")
@@ -1797,6 +1808,29 @@ class MergeTab(QWidget):
                 f"QPushButton {{ background:{p.accent}; color:{p.on_accent()}; border-radius:6px; "
                 "font-weight:bold; padding:0 22px; }"
                 f"QPushButton:hover {{ background:{p.accent_hi}; }}")
+            # _empty_sub is word-wrapped at a max width of 420px — its correct
+            # height depends on how many lines that produces at its ACTUAL
+            # rendered width, which Qt resolves via heightForWidth(). The
+            # very first _restyle() call happens from __init__, before this
+            # widget has settled to any real size (its own width is still
+            # some transient construction-time value, well under 420) — a
+            # bounding-rect computed against that transient width comes out
+            # too short for the 420px-wide wrap the label ends up with once
+            # the window actually has room, so the wrapped text — vertically
+            # centered within that too-short cell — bled out both above
+            # (overlapping the title) and below (clipped by the button).
+            # Confirmed directly at default window size in both themes, and
+            # unmoved by updateGeometry()/layout invalidate+activate (both
+            # tried first) since neither changes what width is used for the
+            # calculation. Deferring one event-loop tick with QTimer lets
+            # Qt's own layout pass settle the real width first.
+            def _fix_empty_sub_height():
+                sub_metrics = self._empty_sub.fontMetrics()
+                w = self._empty_sub.width() or self._empty_sub.maximumWidth()
+                wrapped_rect = sub_metrics.boundingRect(
+                    0, 0, w, 0, Qt.TextFlag.TextWordWrap, self._empty_sub.text())
+                self._empty_sub.setMinimumHeight(wrapped_rect.height())
+            QTimer.singleShot(0, _fix_empty_sub_height)
         # Banners
         self._dst_banner.setStyleSheet(
             f"background:{p.banner_warn_bg}; color:{p.text}; border-radius:4px; padding:6px 10px;")
@@ -1987,20 +2021,37 @@ class MergeTab(QWidget):
         self._populate_table()
         self._update_estimate()
 
+    def _resolve_pipeline(self) -> tuple:
+        """(hw_decode, hw_encoder) strings for ConformSpec, derived from the
+        Pre-flight pipeline settings plus detected GPU availability.
+
+        Recommended mode picks the benchmarked-best hybrid for this machine —
+        hardware ENCODE when a GPU encoder is available, SOFTWARE decode (the
+        fastest wall-clock combination measured; full hardware decode frees the
+        CPU but is slightly slower). Custom mode honours the saved decode/encode
+        method choices. Any hardware selection silently falls back to software
+        when no GPU encoder was detected, so a machine without one still works."""
+        gpu = bool(self._gpu_vendors)
+        if self._settings.get("merge_pipeline_recommended", True):
+            return ("off", "auto" if gpu else "off")
+        dec = "auto" if (gpu and self._settings.get("merge_decode_method") == "hardware") else "off"
+        enc = "auto" if (gpu and self._settings.get("merge_encode_method") == "hardware") else "off"
+        return (dec, enc)
+
     def _current_conform(self) -> ConformSpec:
         g = self._chosen_group
-        hw = "auto" if (self._gpu_check.isEnabled() and self._gpu_check.isChecked()) else "off"
+        hw_decode, hw = self._resolve_pipeline()
         codec = g.codec if g is not None else DEFAULT_CONFORM.codec
         quality = (quality_for_preset(self._selected_quality_preset(), codec)
                   if self._effective_optimize_baseline() else 18)
         if g is None:
-            return replace(DEFAULT_CONFORM, hw_encoder=hw, quality=quality)
+            return replace(DEFAULT_CONFORM, hw_encoder=hw, hw_decode=hw_decode, quality=quality)
         fill = "blur" if self._fill_combo.currentIndex() == 1 else "black"
         return ConformSpec(width=g.width, height=g.height, fps=_fps_to_ffmpeg(g.fps),
                            codec=g.codec, pix_fmt=g.pix_fmt,
                            color_space=g.color_space or "bt709",
                            color_transfer=g.color_transfer, color_primaries=g.color_primaries,
-                           fill=fill, hw_encoder=hw, quality=quality)
+                           fill=fill, hw_encoder=hw, hw_decode=hw_decode, quality=quality)
 
     def _start_gpu_probe(self):
         ff, _ = get_ffmpeg()
@@ -2012,18 +2063,35 @@ class MergeTab(QWidget):
         self._gpu_vendors = vendors
         if vendors:
             self._gpu_check.setEnabled(True)
-            self._gpu_check.setChecked(True)
             self._gpu_check.setToolTip(
                 f"Detected working GPU encoder: {vendors[0].upper()}. Transcodes non-conforming "
                 "clips on the GPU (faster, frees up the CPU) instead of libx264/libx265.\n"
-                "If a GPU encode fails partway (driver hiccup, VRAM exhausted, etc.), that one "
-                "clip automatically retries in software rather than failing the whole merge.")
+                "Fuller decode + encode pipeline options are in Pre-flight; this box is a shortcut "
+                "for hardware vs software encode. If a GPU encode fails partway (driver hiccup, VRAM "
+                "exhausted, etc.), that one clip automatically retries in software.")
         else:
             self._gpu_check.setEnabled(False)
-            self._gpu_check.setChecked(False)
             self._gpu_check.setToolTip(
-                "No working GPU encoder (NVENC/QSV/AMF) was detected on this machine — "
+                "No working GPU encoder (NVENC/QSV/AMF/VAAPI) was detected on this machine — "
                 "transcoding will use the CPU (libx264/libx265).")
+        self._sync_gpu_check()
+
+    def _sync_gpu_check(self):
+        """Reflect the resolved encode method (from the Pre-flight pipeline
+        settings + GPU availability) in the merge-tab shortcut checkbox,
+        without emitting a toggle back into settings."""
+        _, enc = self._resolve_pipeline()
+        self._gpu_check.blockSignals(True)
+        self._gpu_check.setChecked(enc != "off")
+        self._gpu_check.blockSignals(False)
+
+    def _on_gpu_check_toggled(self, checked: bool):
+        """The merge-tab checkbox is a shortcut for the Pre-flight pipeline's
+        ENCODE method: ticking it means custom mode, hardware encode; unticking
+        means custom mode, software encode. Decode method is left untouched."""
+        self._settings.set("merge_pipeline_recommended", False)
+        self._settings.set("merge_encode_method", "hardware" if checked else "software")
+        self._update_estimate()
 
     # ── Transcode estimate ────────────────────────────────────────────────────
 
@@ -2272,9 +2340,14 @@ class MergeTab(QWidget):
             except Exception:
                 free = None
         dlg = PreflightDialog(report, self, free_bytes=free,
-                              need_bytes=self._estimated_need_bytes(), clips=ordered_clips)
+                              need_bytes=self._estimated_need_bytes(), clips=ordered_clips,
+                              settings=self._settings, gpu_available=bool(self._gpu_vendors))
         dlg.start_requested.connect(self._start_merge)
         dlg.exec()
+        # The pipeline section may have changed decode/encode settings — reflect
+        # them in the merge-tab shortcut checkbox and the time estimate.
+        self._sync_gpu_check()
+        self._update_estimate()
 
     # ── Table (grouped by camera) ────────────────────────────────────────────
 
@@ -2901,6 +2974,27 @@ class MergeTab(QWidget):
         except Exception:
             return 0
 
+    def _check_output_writable(self, out_dir: str) -> bool:
+        """Fail fast on a read-only/permission-denied output folder, rather
+        than letting the user wait through a full per-clip conform (which
+        writes to the scratch dir, not here, so it succeeds) only to hit
+        "Permission denied" at the very last step when the finished master
+        actually tries to land in `out_dir` — confirmed directly as a real,
+        if honestly-surfaced, wasted-encode scenario (battle-test round 2)."""
+        try:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, "Can't create output folder",
+                                f"{out_dir}\n\ncouldn't be created: {e}")
+            return False
+        if not os.access(out_dir, os.W_OK):
+            QMessageBox.warning(
+                self, "Output folder isn't writable",
+                f"{out_dir}\n\nisn't writable — check its permissions (or pick a "
+                "different output folder) before starting the merge.")
+            return False
+        return True
+
     def _check_disk_space(self, out_dir: str) -> bool:
         import shutil
         try:
@@ -2950,6 +3044,9 @@ class MergeTab(QWidget):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
+
+        if not self._check_output_writable(out_dir):
+            return
 
         # Warn if the output drive looks short on space (temp + final ≈ 2× output).
         if not self._check_disk_space(out_dir):

@@ -62,9 +62,12 @@ HOW_IT_WORKS = (
     "microphones as clean, separate streams — nothing is thrown away, and you can choose whichever "
     "sounds best when you edit. You can also add an optional combined track that carries both mics "
     "together.\n\n"
-    "The WhatsApp clip tab lets you take any video, trim a moment, optionally apply a cinematic "
-    "colour grade from the built-in library, and export a compressed MP4 ready to share on WhatsApp "
-    "or social media — all in a few clicks.\n\n"
+    "The Extract and Recover tab covers the other direction, in two halves. Share lets you take any "
+    "video, trim a moment, optionally apply a cinematic colour grade from the built-in library, and "
+    "export a compressed MP4 ready to share on WhatsApp or social media — all in a few clicks. Extract "
+    "recovers the original camera clips back out of a master you've already merged — bit-exact when "
+    "the master has an archival track, and still correct by filename and camera grouping even for an "
+    "older master or one merged without \"Archival master\" ticked.\n\n"
     "Your master files go wherever you point them: a cloud backup, an external drive, or a local "
     "folder. The app handles the technical side, so you can focus on capturing the moments that matter."
 )
@@ -129,8 +132,8 @@ class AboutTab(QWidget):
         left_col.addStretch()
         self._tagline = QLabel("Preserve every moment. Losslessly.")
         left_col.addWidget(self._tagline)
-        ver = QApplication.instance().applicationVersion() if QApplication.instance() else "1.4.0"
-        self._version_pill = QLabel(f"Version {ver or '1.4.0'}")
+        ver = QApplication.instance().applicationVersion() if QApplication.instance() else "1.4.004"
+        self._version_pill = QLabel(f"Version {ver or '1.4.004'}")
         self._version_pill.setFixedWidth(110)
         left_col.addWidget(self._version_pill)
         left_col.addStretch()

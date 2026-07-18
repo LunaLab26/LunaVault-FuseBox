@@ -28,6 +28,13 @@ DEFAULTS = {
     "auto_save_log_on_failure": True,
     "camera_labels": {},   # {camera_id: user-given label}, remembered across folder loads
     "extract_output_format": "native",   # "native" | "mov" | "mp4" — Extract tab recovery container
+    # Merge transcode pipeline (decode + encode method), chosen in Pre-flight.
+    # "recommended" auto-picks the benchmarked-best pipeline for this machine
+    # (hardware encode when a GPU encoder is available, software decode — the
+    # fastest wall-clock hybrid); when off, the two method choices below apply.
+    "merge_pipeline_recommended": True,
+    "merge_decode_method": "software",    # "software" (CPU) | "hardware" (GPU/VAAPI)
+    "merge_encode_method": "hardware",    # "software" (CPU) | "hardware" (GPU/VAAPI)
     "ui_mode": "friendly",   # "friendly" (Memories/Add + classic tabs) | "legacy" (pre-overhaul
                              # tab set only) — switched via a hidden toggle (triple-click the logo)
     # Developer options — experimental, off by default, exposed only via the hidden

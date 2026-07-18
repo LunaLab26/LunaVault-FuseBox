@@ -281,6 +281,16 @@ def test_concat_cmd_is_copy():
     assert "-f concat" in s and "-c copy" in s
 
 
+def test_concat_cmd_maps_video_audio_only_not_blanket_map0():
+    # Regression: a blanket `-map 0` copied camera clips' bin_data ("text")
+    # metadata track into the .mov, which the muxer rejects and the whole merge
+    # died. Must map v+a explicitly (drops data), like the archival concat.
+    cmd = build_concat_cmd("ffmpeg", Path("list.txt"), Path("ch.txt"), Path("out.mov"), PF)
+    s = " ".join(cmd)
+    assert "-map 0:v -map 0:a?" in s
+    assert "-map 0 " not in s + " " and not s.endswith("-map 0")   # no blanket map
+
+
 def test_concat_cmd_appends_extra_out_args_before_output():
     cmd = build_concat_cmd("ffmpeg", Path("l.txt"), Path("c.txt"), Path("out.mov"), PF,
                            extra_out_args=["-movflags", "use_metadata_tags", "-metadata", "k=v"])
@@ -306,6 +316,117 @@ def test_concat_reencode_cmd_rebuilds_a_clean_playable_baseline():
     assert "-c copy" not in s                       # crucially NOT a blanket stream copy
     assert "+faststart" in s                        # moov atom up front for streaming
     assert "-map_metadata 1" in s                   # chapters preserved
+    assert "-map 0:v -map 0:a?" in s               # v+a only — never blanket `-map 0` (bin_data trap)
+    assert not s.rstrip().endswith("-map 0") and "-map 0 -" not in s
+
+
+def test_concat_reencode_cmd_hw_encoder_off_by_default_even_with_ff_given():
+    # Default hw_encoder == "off" — must stay libx264 even though `ff` is a
+    # real-looking path (mirrors the per-clip path's equivalent test).
+    cmd = build_concat_reencode_cmd("ffmpeg", Path("list.txt"), Path("ch.txt"),
+                                    Path("out.mov"), PF, crf=20)
+    assert "-c:v libx264" in " ".join(cmd)
+
+
+def test_concat_reencode_cmd_prores_ignores_hw_encoder():
+    # There's no such thing as a hardware ProRes encoder — hw_encoder must be
+    # ignored entirely on the prores branch, not attempted and silently
+    # dropped only at the last second.
+    import core.gpu_encode as ge
+    real_detect = ge.detect_best_hw
+    ge.detect_best_hw = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("prores must never probe for a hw encoder"))
+    try:
+        cmd = build_concat_reencode_cmd("ffmpeg", Path("list.txt"), Path("ch.txt"),
+                                        Path("out.mov"), PF, codec="prores",
+                                        hw_encoder="auto")
+    finally:
+        ge.detect_best_hw = real_detect
+    assert "prores_ks" in " ".join(cmd)
+
+
+def test_concat_reencode_cmd_vaapi_swaps_binary_adds_device_and_hwupload():
+    # Same shape as the per-clip path's equivalent test — VAAPI needs a real
+    # ffmpeg binary, a global device arg, and a hwupload filter step, not
+    # just a trailing -c:v swap.
+    import core.gpu_encode as ge
+    real_plan_fn = ge.hw_encode_plan
+
+    def fake_plan(codec, vendor, pix_fmt, quality=18):
+        assert codec == "h264" and vendor == "vaapi"
+        return {
+            "ffmpeg_bin": "/usr/bin/ffmpeg",
+            "global_args": ["-vaapi_device", "/dev/dri/renderD128"],
+            "filter_suffix": "format=nv12,hwupload",
+            "encoder_args": ["-c:v", "h264_vaapi", "-qp", "20"],
+        }
+
+    ge.hw_encode_plan = fake_plan
+    try:
+        cmd = build_concat_reencode_cmd("ffmpeg_bundled_static", Path("list.txt"), Path("ch.txt"),
+                                        Path("out.mov"), PF, crf=20, codec="h264",
+                                        hw_encoder="vaapi")
+    finally:
+        ge.hw_encode_plan = real_plan_fn
+
+    assert cmd[0] == "/usr/bin/ffmpeg"
+    f_idx = cmd.index("-f")   # "-f concat" input marker — global args precede it
+    # -reinit_filter 0 must ride with the concat input: its segments are not
+    # parameter-uniform (stream-copied full-range camera clips mixed with
+    # limited-range transcodes), and a filter-graph reinit at the first
+    # mismatched seam kills a graph containing hwupload with -38/ENOSYS —
+    # confirmed on real mixed footage (the battle-test "eauto+compath264
+    # timeout" family, which was actually this fast failure).
+    assert cmd[1:f_idx] == ["-y", "-vaapi_device", "/dev/dri/renderD128",
+                            "-reinit_filter", "0"]
+    s = " ".join(cmd)
+    assert "h264_vaapi" in s and "-qp 20" in s
+    assert "libx264" not in s
+    # scale=out_range=tv pins the no-reinit graph's negotiated range to the
+    # same limited range the software path produces (else a full-range first
+    # segment skews the entire output), and the output is tagged to match.
+    assert "-vf scale=out_range=tv,format=nv12,hwupload" in s
+
+
+def test_concat_reencode_cmd_non_vaapi_vendors_keep_bundled_binary():
+    # NVENC/QSV/AMF (the only real hardware encoders on Windows) swap just
+    # the trailing -c:v on the CALLER's own bundled ffmpeg — hw_encode_plan()
+    # signals this with "ffmpeg_bin": None ("the caller's own bundled ffmpeg
+    # is fine"), a truthy dict with a None value, not a falsy result. Using
+    # that dict as `if hw_plan: cmd_ff = hw_plan["ffmpeg_bin"]` put a literal
+    # None in cmd[0] for every one of these vendors — subprocess.Popen can't
+    # stringify that, so this crashed EVERY "Compatible playback master" +
+    # GPU-encode merge on Windows outright (confirmed on real Windows
+    # hardware, QSV — VAAPI's ffmpeg_bin is never None, which is why this
+    # survived two rounds of Linux-only battle testing before a Windows
+    # assessment caught it). Covers all three vendors since they share
+    # hw_encode_plan's identical non-VAAPI branch, not just the one that
+    # happened to be reproducible on the machine that found this.
+    import core.gpu_encode as ge
+    real_plan_fn = ge.hw_encode_plan
+
+    for vendor, encoder_name in (("qsv", "h264_qsv"), ("nvenc", "h264_nvenc"), ("amf", "h264_amf")):
+        def fake_plan(codec, v, pix_fmt, quality=18, _encoder_name=encoder_name):
+            return {"ffmpeg_bin": None, "global_args": [], "filter_suffix": None,
+                   "encoder_args": ["-c:v", _encoder_name]}
+        ge.hw_encode_plan = fake_plan
+        try:
+            cmd = build_concat_reencode_cmd("ffmpeg_bundled_static", Path("list.txt"), Path("ch.txt"),
+                                            Path("out.mov"), PF, crf=20, codec="h264",
+                                            hw_encoder=vendor)
+        finally:
+            ge.hw_encode_plan = real_plan_fn
+
+        assert cmd[0] == "ffmpeg_bundled_static", (
+            f"{vendor}: cmd[0] was {cmd[0]!r} — must fall back to the caller's own "
+            "bundled ffmpeg when hw_plan['ffmpeg_bin'] is None, never stay None itself")
+        s = " ".join(cmd)
+        assert encoder_name in s
+        # The seam-crash fix (-reinit_filter 0 / range-pinning) is applied
+        # whenever hw_plan is set, regardless of vendor — must still hold
+        # for the non-VAAPI vendors this fix specifically targets.
+        assert "-reinit_filter 0" in s
+        assert "-color_range tv" in s
 
 
 def test_concat_reencode_cmd_appends_extra_out_args_before_output():
@@ -535,6 +656,147 @@ def test_plan_transcode_drops_mix_keeps_audio():
     assert "libx265" in s and "scale=3840:2160" in s
     assert "[mix]" not in s                  # mix dropped on transcode
     assert "-c:a:0 copy" in s and "-c:a:1 alac" in s
+
+
+def test_plan_transcode_vaapi_swaps_binary_adds_device_and_hwupload():
+    # VAAPI is the one hw vendor that can't just swap the trailing -c:v args
+    # (see core.gpu_encode's module docstring) — it needs a DIFFERENT ffmpeg
+    # binary (the bundled static one has no VAAPI support at all), a global
+    # -vaapi_device before the first -i, and format=...,hwupload as the last
+    # filter step. Fake hw_encode_plan() so this is deterministic regardless
+    # of whatever VAAPI support the machine running the test actually has.
+    import core.gpu_encode as ge
+    real_plan_fn = ge.hw_encode_plan
+
+    def fake_plan(codec, vendor, pix_fmt, quality=18):
+        assert vendor == "vaapi"
+        return {
+            "ffmpeg_bin": "/usr/bin/ffmpeg",
+            "global_args": ["-vaapi_device", "/dev/dri/renderD128"],
+            "filter_suffix": "format=nv12,hwupload",
+            "encoder_args": ["-c:v", "h264_vaapi", "-qp", "18"],
+        }
+
+    ge.hw_encode_plan = fake_plan
+    try:
+        clip = ClipInfo(path=Path("c.mp4"),
+                        stream=StreamInfo(status="transcode", width=1920, height=1080,
+                                          conflicts=["1920×1080"], audio_codec="aac"))
+        conform = ConformSpec(codec="h264", pix_fmt="yuv420p", hw_encoder="vaapi")
+        plan = OutputPlan(tracks=[OutputTrack("camera")])
+        cmd = build_mux_cmd_plan("ffmpeg_bundled_static", clip, Path("o.mov"), PF, plan, "crop",
+                                 conform=conform)
+    finally:
+        ge.hw_encode_plan = real_plan_fn
+
+    assert cmd[0] == "/usr/bin/ffmpeg"          # swapped from the bundled "ffmpeg_bundled_static"
+    i_idx = cmd.index("-i")
+    assert cmd[1:i_idx] == ["-y", "-vaapi_device", "/dev/dri/renderD128"]
+    s = " ".join(cmd)
+    assert "hwupload" in s
+    # hwupload must be the LAST step of whatever filter chain runs, after any
+    # scale/pad — not spliced in before it.
+    vf_str = None
+    if "-filter_complex" in cmd:
+        vf_str = cmd[cmd.index("-filter_complex") + 1]
+    elif "-vf" in cmd:
+        vf_str = cmd[cmd.index("-vf") + 1]
+    assert vf_str is not None and vf_str.rstrip("]").endswith("hwupload")
+    assert "h264_vaapi" in s and "-qp 18" in s
+
+
+def _with_fake_vaapi(codec_vendor, body):
+    """Make the VAAPI decode/encode plumbing deterministic regardless of the
+    test machine: fake system ffmpeg, render device, decode args, and the
+    encode-vendor resolution. `codec_vendor` is what detect_best_hw returns."""
+    import core.gpu_encode as ge
+    saved = (ge.system_vaapi_ffmpeg, ge.vaapi_render_device,
+             ge.vaapi_decode_global_args, ge.detect_best_hw)
+    ge.system_vaapi_ffmpeg = lambda: "/usr/bin/ffmpeg"
+    ge.vaapi_render_device = lambda: "/dev/dri/renderD128"
+    ge.vaapi_decode_global_args = lambda: ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"]
+    ge.detect_best_hw = lambda ff, codec: codec_vendor
+    try:
+        body()
+    finally:
+        (ge.system_vaapi_ffmpeg, ge.vaapi_render_device,
+         ge.vaapi_decode_global_args, ge.detect_best_hw) = saved
+
+
+def _transcode_clip():
+    return ClipInfo(path=Path("c.mp4"),
+                    stream=StreamInfo(status="transcode", width=1920, height=1080,
+                                      conflicts=["1920×1080"], audio_codec="aac"))
+
+
+def test_plan_hw_decode_only_adds_hwaccel_keeps_software_encode():
+    def body():
+        conform = ConformSpec(codec="h264", pix_fmt="yuv420p", hw_decode="vaapi", hw_encoder="off")
+        plan = OutputPlan(tracks=[OutputTrack("camera")])
+        cmd = build_mux_cmd_plan("BUNDLED", _transcode_clip(), Path("o.mov"), PF, plan, "crop",
+                                 conform=conform)
+        s = " ".join(cmd)
+        assert cmd[0] == "/usr/bin/ffmpeg"        # decode needs the system VAAPI ffmpeg
+        assert "-hwaccel vaapi -hwaccel_device /dev/dri/renderD128" in s
+        assert "libx264" in s                      # encode still software
+        assert "hwupload" not in s                 # no GPU-surface upload without VAAPI encode
+    _with_fake_vaapi("vaapi", body)
+
+
+def test_plan_hw_decode_plus_hw_encode_full_pipeline():
+    def body():
+        conform = ConformSpec(codec="h264", pix_fmt="yuv420p", hw_decode="vaapi", hw_encoder="vaapi")
+        plan = OutputPlan(tracks=[OutputTrack("camera")])
+        cmd = build_mux_cmd_plan("BUNDLED", _transcode_clip(), Path("o.mov"), PF, plan, "crop",
+                                 conform=conform)
+        s = " ".join(cmd)
+        assert cmd[0] == "/usr/bin/ffmpeg"
+        assert "-hwaccel vaapi -hwaccel_device /dev/dri/renderD128" in s   # hw decode
+        assert "-vaapi_device /dev/dri/renderD128" in s                     # hw encode device
+        assert "h264_vaapi" in s and "libx264" not in s
+        # hwupload is the LAST filter step (after scale/pad), before the encoder
+        vf = cmd[cmd.index("-vf") + 1] if "-vf" in cmd else cmd[cmd.index("-filter_complex") + 1]
+        assert vf.rstrip("]").endswith("hwupload")
+    _with_fake_vaapi("vaapi", body)
+
+
+def test_plan_default_conform_has_no_hwaccel():
+    # Default ConformSpec: hw_decode="off" — must never inject -hwaccel.
+    clip = _transcode_clip()
+    cmd = build_mux_cmd_plan("BUNDLED", clip, Path("o.mov"), PF,
+                             OutputPlan(tracks=[OutputTrack("camera")]), "crop",
+                             conform=ConformSpec(codec="h264", pix_fmt="yuv420p"))
+    assert "-hwaccel" not in cmd and cmd[0] == "BUNDLED"
+
+
+def test_concat_reencode_hw_decode_adds_hwaccel_and_system_binary():
+    def body():
+        cmd = build_concat_reencode_cmd("BUNDLED", Path("list.txt"), Path("ch.txt"),
+                                        Path("out.mov"), PF, crf=20, codec="h264",
+                                        hw_encoder="off", hw_decode="vaapi")
+        s = " ".join(cmd)
+        assert cmd[0] == "/usr/bin/ffmpeg"     # decode-only still needs the VAAPI system ffmpeg
+        assert "-hwaccel vaapi -hwaccel_device /dev/dri/renderD128" in s
+        assert "libx264" in s                   # software encode preserved
+    _with_fake_vaapi("vaapi", body)
+
+
+def test_plan_conform_clip_never_engages_vaapi_even_if_requested():
+    # An "ok" (stream-copy) clip must stay -c:v copy regardless of
+    # hw_encoder — hw_extras is only ever resolved for transcoding clips.
+    import core.gpu_encode as ge
+    real_plan_fn = ge.hw_encode_plan
+    ge.hw_encode_plan = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("hw_encode_plan should not be called for a conforming clip"))
+    try:
+        conform = ConformSpec(codec="h264", pix_fmt="yuv420p", hw_encoder="vaapi")
+        plan = OutputPlan(tracks=[OutputTrack("camera")])
+        cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(), Path("o.mov"), PF, plan, "crop",
+                                 conform=conform)
+    finally:
+        ge.hw_encode_plan = real_plan_fn
+    assert cmd[0] == "ffmpeg"
+    assert "-c:v" in cmd and "copy" in cmd
 
 
 def test_atempo_chain_slows_to_target():

@@ -23,7 +23,7 @@ from core.extract import (
     build_recover_lrv_archival_cmd,
 )
 from core.manifest import Manifest, read_manifest
-from probe import probe_audio_tracks, probe_video_tracks, probe_chapters
+from probe import probe_audio_tracks, probe_video_tracks, probe_chapters_safe
 
 # 48kHz/24-bit ("pcm_s24le", the default bit_depth every WAV-decode command
 # builder here uses)/stereo — this app's own WAV-backup convention. Used to
@@ -43,8 +43,11 @@ class ManifestLoadWorker(QThread):
     core.extract.build_generic_recovery_plans), and offer the Extract tab's
     manual audio-role/video-stream controls for a foreign (no-manifest)
     master, without a second round-trip."""
-    # Manifest|None, list[ChapterInfo], list[AudioTrackInfo], list[VideoTrackInfo]
-    manifest_ready = Signal(object, list, list, list)
+    # Manifest|None, list[ChapterInfo], list[AudioTrackInfo], list[VideoTrackInfo],
+    # chapters_error: str|None — set when the chapter probe itself failed
+    # (e.g. a crashed/broken ffprobe), distinct from a clean probe that found
+    # zero chapters.
+    manifest_ready = Signal(object, list, list, list, object)
 
     def __init__(self, ffprobe_bin: str, master_path: str, parent=None):
         super().__init__(parent)
@@ -53,10 +56,10 @@ class ManifestLoadWorker(QThread):
 
     def run(self):
         m = read_manifest(self._ffprobe, self._path)
-        chapters = probe_chapters(self._ffprobe, self._path)
+        chapters, chapters_error = probe_chapters_safe(self._ffprobe, self._path)
         audio_tracks = probe_audio_tracks(self._ffprobe, self._path)
         video_tracks = probe_video_tracks(self._ffprobe, self._path)
-        self.manifest_ready.emit(m, chapters, audio_tracks, video_tracks)
+        self.manifest_ready.emit(m, chapters, audio_tracks, video_tracks, chapters_error)
 
 
 class ExtractWorker(QThread):

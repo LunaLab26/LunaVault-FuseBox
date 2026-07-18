@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-07-13 16:15"
+LAST_UPDATED = "2026-07-18 22:59"
 
 
 @dataclass
@@ -25,6 +25,216 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-07-18",
+        title="v1.4.004 — Windows assessment: fixed a real crash on GPU-accelerated Compatible "
+              "playback master (Intel/NVIDIA/AMD), plus two smaller display fixes",
+        summary="A dedicated assessment on a real Windows laptop, using the round of fixes "
+                "from v1.4.003, turned up one genuine crash and confirmed two smaller gaps. "
+                "The crash: merging with \"Compatible playback master\" and GPU encoding "
+                "turned on failed outright on Windows whenever the graphics card was Intel "
+                "(Quick Sync), NVIDIA, or AMD — which, unlike the Linux/AMD hardware this app "
+                "was originally hardened against, covers virtually every Windows PC with a "
+                "dedicated or built-in GPU. Also fixed: the merge progress display could show "
+                "\"CPU: libx264\" even while genuinely running on the graphics card, and the "
+                "Extract tab's \"Create folder…\" button — already fixed once for a similar "
+                "Linux issue — was still clipping its own leading letter on Windows.",
+        details=[
+            "Fixed: \"Compatible playback master\" combined with GPU encoding crashed outright "
+            "on any Windows machine using Intel Quick Sync, NVIDIA NVENC, or AMD's encoder — "
+            "confirmed directly on real Quick Sync hardware. Root cause: this merge step was "
+            "given the wrong instruction for which copy of ffmpeg to actually run whenever the "
+            "graphics card didn't need a different one from usual (true for all three of those "
+            "vendors) — it ended up with no instruction at all instead of \"just use the normal "
+            "one,\" and the merge died before doing any work. The AMD graphics used during this "
+            "app's original hardening happened to always need that different copy, which is "
+            "exactly why this never showed up until a real Windows machine was tested.",
+            "Fixed: the merge progress display could say \"CPU: libx264\" for a clip that was "
+            "genuinely being transcoded on the graphics card the whole time — confirmed the "
+            "encode itself was always correct; only the on-screen label was wrong, for both the "
+            "Windows and the (already-fixed) Linux hardware paths. It now names the real "
+            "encoder in use.",
+            "Fixed: the Extract tab's \"Create folder…\" button clipped its own leading \"C\" on "
+            "Windows, at every display-scaling level tried — the same symptom as a Linux bug "
+            "fixed last version, but the earlier fix's width calculation still came up a few "
+            "pixels short against Windows' own font. The button now sizes itself the same way "
+            "every other button in the app already does, which can't come up short on any "
+            "platform or display scaling.",
+            "Added a permanent regression test for the GPU-encode crash, covering the exact "
+            "vendor family (Intel/NVIDIA/AMD) that was broken, alongside the existing AMD/Linux "
+            "test — so this specific mistake can't quietly return for either hardware family.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-07-17",
+        title="v1.4.003 — two-round battle test: fixed a square-clip crash, a hardware-encode "
+              "crash on mixed footage, a false verification alarm, and six other real bugs",
+        summary="A deliberate, no-holds-barred battle test of the whole app turned up ten real "
+                "issues, all fixed and re-verified against real footage. The two headline fixes: "
+                "merging any genuinely square (1:1) source clip with the default \"Crop to fill "
+                "16:9\" option crashed outright — the crop math was impossible by construction "
+                "for a square frame, no matter which baseline you'd picked. And \"Compatible "
+                "playback master\" with GPU encoding could crash partway through on real mixed "
+                "footage (camera originals mixed with re-encoded clips) — traced to an ffmpeg "
+                "limitation at the exact point two differently-encoded segments meet. Both are "
+                "genuine crashes on ordinary, common inputs, not edge cases. Also: a camera-audio "
+                "verification check that could wrongly cry \"unexpected mismatch\" now correctly "
+                "recognises the case ahead of time and explains it honestly; a leftover hidden "
+                "track from some cameras' chapter markers no longer rides along into your master; "
+                "two merges running at once (two copies of the app, or a merge alongside a "
+                "WhatsApp export) no longer share one scratch folder and risk stepping on each "
+                "other's temporary files; a permissions problem on your output folder is now "
+                "caught before a merge runs, not after; and four smaller display fixes (an "
+                "unreadable Status column at smaller window sizes, overlapping text on the empty "
+                "Merge tab, a clipped button label, and stale About-tab copy).",
+        details=[
+            "Fixed: any genuinely square (1:1) source clip — common on GoPro-style \"square "
+            "mode\" recordings — crashed the whole merge outright when \"Square clips\" was left "
+            "on its default \"Crop to fill 16:9\", for every baseline you could pick. The crop "
+            "math assumed the frame always needed to lose width to reach 16:9, which is "
+            "impossible for a source that's exactly as tall as it is wide (or for a square/"
+            "portrait baseline, where the assumption was wrong on a different axis) — ffmpeg "
+            "rejected the request and the merge silently produced nothing. The crop direction is "
+            "now worked out from the actual target shape, landscape, square, or portrait alike.",
+            "Fixed: \"Compatible playback master\" with GPU (hardware) encoding could crash "
+            "partway through — \"Function not implemented\" — on a real mix of camera-original "
+            "and re-encoded clips, which is the ordinary case for most real shoots. Root cause: "
+            "ffmpeg has to restart its internal video pipeline at the exact point where two "
+            "differently-encoded segments meet, and the hardware-encode pipeline can't be "
+            "restarted mid-stream. The merge now keeps one continuous pipeline across every seam "
+            "and corrects a resulting colour-brightness mismatch that would otherwise sneak in — "
+            "verified directly against a software re-encode of the same footage, matching to "
+            "within a fraction of a percent, at genuine hardware-encode speed (about 1.7x "
+            "realtime here, versus roughly 0.6x for the equivalent software encode).",
+            "Fixed: a camera-audio verification check could report an alarming \"unexpected "
+            "mismatch — nothing to explain it\" for a clip that was always going to fail that "
+            "particular check, for an ordinary and fairly common reason (the clip's own audio "
+            "carries a few encoder priming samples that a plain baseline copy can't preserve "
+            "the same way a dedicated archival track does — nothing to do with data loss). The "
+            "app now recognises this ahead of time and reports it as a clear, expected "
+            "explanation instead of a scary unexplained failure — confirmed against both "
+            "synthetic test footage and a real camera file that showed the same pattern.",
+            "Fixed: some cameras embed their own hidden chapter/marker track in their video "
+            "files. That track could ride along into your delivered master as a stray, unlabeled "
+            "extra stream. It's now correctly dropped at every step that touches the original "
+            "footage, so a delivered master only ever contains this app's own (correct, "
+            "clip-named) chapters, never a leftover from the source camera.",
+            "Fixed: two merges running at the same time — two copies of the app, or a merge "
+            "running alongside a WhatsApp/share export — used to share one single scratch "
+            "folder for their temporary per-clip files, with no separation between them. "
+            "Confirmed directly as a real collision, not just a theoretical one: each merge's "
+            "own cleanup step could delete the OTHER merge's in-progress files outright. Every "
+            "merge and export now gets its own private scratch folder.",
+            "New: the output folder is now checked for write access before a merge starts. "
+            "Previously a permissions problem there was only discovered after the entire merge "
+            "had already run, right at the final save — now it's caught instantly, before any "
+            "work begins.",
+            "Fixed: the Merge tab's clip-list Status column (the one place that shows whether a "
+            "clip will stream-copy or transcode) could shrink to one or two unreadable "
+            "characters at smaller window sizes, hiding the single most useful thing that "
+            "column tells you. It now keeps a sensible minimum width; the table scrolls "
+            "sideways instead of squeezing it away.",
+            "Fixed: the Merge tab's empty-state message (\"Select a folder of clips to begin…\") "
+            "could show its heading and its explanatory paragraph overlapping each other, in "
+            "both themes. The paragraph's height wasn't being recalculated once its real font "
+            "size took effect, so the layout reserved too little room for it.",
+            "Fixed: the Extract tab's \"Create folder…\" button clipped its own leading \"C\" at "
+            "default window size. Its width is now sized from the actual button text instead of "
+            "a fixed guess.",
+            "Updated the About tab's description of the Extract and Recover tab, which still "
+            "referred to it by its old name (\"The WhatsApp clip tab\") and didn't mention its "
+            "recovery half at all.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-07-16",
+        title="v1.4.002 — fixed a merge failure on camera clips with a hidden metadata track",
+        summary="Fixed a real crash: merging clips from cameras that embed a hidden metadata "
+                "track (e.g. Google Pixel motion-photo / telemetry data) could fail outright "
+                "when building the playable master — the merge died with an \"incorrect codec "
+                "parameters\" error while writing the file. The app now correctly ignores that "
+                "non-audio/video data track instead of trying to copy it into the master. "
+                "Affected both CPU and GPU encoding; found and fixed against the real footage "
+                "that triggered it.",
+        details=[
+            "Fixed: a merge could fail with \"Re-encoding into one smooth, compatible take "
+            "failed\" / \"Could not write header (incorrect codec parameters?)\" when any source "
+            "clip carried a data track that isn't video or audio — common on phones (Pixel "
+            "motion-photo/timed-metadata) and action cams (telemetry). The concatenation step "
+            "was copying that track blindly into the .mov master, which the format can't store, "
+            "so the whole write failed at the last stage.",
+            "The master-building steps now map only real video and audio (matching what the "
+            "archival-track step already did), so those hidden data tracks are dropped cleanly. "
+            "This affected both the \"Compatible playback master\" re-encode and an ordinary "
+            "stream-copy master, on software AND GPU encoding — it was never GPU-specific, it "
+            "was just first hit while testing the new GPU pipeline options.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-07-15",
+        title="v1.4.001 — choose your decode + encode pipeline in Pre-flight",
+        summary="Pre-flight now lets you pick how the merge does its heavy lifting: which "
+                "combination of video DECODE (CPU or GPU) and ENCODE (CPU or GPU) to use. "
+                "There's a recommended automatic default that picks the fastest combination "
+                "measured for your machine; untick it to choose your own. Also starts a new "
+                "version-numbering scheme — every change from here bumps the third number "
+                "(v1.4.001, v1.4.002, …).",
+        details=[
+            "New: a \"Processing pipeline\" section in Pre-flight. Leave \"Use recommended "
+            "settings\" ticked and the app picks the fastest decode+encode combination it "
+            "measured for this hardware (on a GPU-equipped machine: hardware encode with "
+            "software decode — the quickest overall; full hardware decode frees the CPU but "
+            "runs a little slower). Untick it to set video decode and video encode each to "
+            "Software (CPU) or Hardware (GPU) yourself.",
+            "Hardware options are offered only when a working GPU encoder is actually present; "
+            "on a machine without one they're shown greyed-out so you can see the option exists "
+            "and why it's unavailable, and any hardware choice safely falls back to the CPU.",
+            "Both merge stages honour the choice — the per-clip conversion AND the single "
+            "\"Compatible playback master\" re-encode — so the whole merge follows one pipeline.",
+            "The Merge tab's \"GPU encode\" tickbox still works as a quick shortcut for the "
+            "encode half; the fuller decode+encode control lives in Pre-flight.",
+            "Version numbers now increment by one on every change (this build is v1.4.001).",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-07-15",
+        title="Real GPU-accelerated transcoding on Linux (AMD/VAAPI), and a clearer error when ffprobe itself is broken",
+        summary="GPU encoding on Linux was silently falling back to the CPU on AMD hardware — "
+                "the detection only knew about NVENC/QSV/AMF (AMF is Windows-only; AMD's real "
+                "Linux path is VAAPI), so \"Use GPU\" never actually engaged on this machine's "
+                "Radeon iGPU, in either the per-clip transcode step or the \"Compatible playback "
+                "master\" re-encode pass. Both are now properly GPU-accelerated end to end, "
+                "verified with real hardware encodes against real footage. Also: if the bundled "
+                "ffmpeg/ffprobe binaries are ever corrupted or missing hardware support, the "
+                "Extract tab now says so directly instead of the misleading \"No chapter markers "
+                "found in this file.\"",
+        details=[
+            "Fixed: GPU-accelerated transcoding did nothing on AMD graphics on Linux — "
+            "detection only tried NVENC (NVIDIA), QSV (Intel), and AMF (AMD's Windows-only "
+            "driver API, with no Linux equivalent), so \"Use GPU\" silently fell back to a "
+            "slow CPU encode on any AMD Linux machine. VAAPI — the real way AMD (and Intel) "
+            "GPUs accelerate video on Linux — is now detected and used, confirmed with a real "
+            "hardware encode running noticeably faster than software on real footage.",
+            "Fixed: the same CPU-only fallback was also silently happening in the \"Compatible "
+            "playback master\" option's final re-encode pass, independent of the per-clip fix "
+            "above and easy to miss since it's a single long re-encode rather than several "
+            "short ones — that pass is now GPU-accelerated too when a working GPU encoder is "
+            "available.",
+            "Fixed: if the bundled ffmpeg/ffprobe binaries are ever corrupted, incompatible, or "
+            "otherwise fail to run, the Extract tab used to report the same message as a file "
+            "that genuinely has no chapters (\"No chapter markers found in this file\") — an "
+            "actual tool failure and an empty-but-valid result looked identical. It now tells "
+            "you plainly that the probe itself failed, rather than leaving you to guess the "
+            "file was the problem.",
+            "Safety: the hidden Developer option that lets you force GPU decode for 4K 10-bit "
+            "HEVC in Review now spells out the real risk and asks you to confirm before it "
+            "turns on — that content can hard-crash the whole computer (confirmed on very "
+            "different machines, a Windows laptop and a Steam Deck alike), not merely freeze "
+            "playback. If you do enable it, the Review tab's \"Software decode\" box now warns "
+            "you right there before you uncheck it. The automatic protection for everyone who "
+            "leaves that option alone is unchanged.",
+        ],
+    ),
     HistoryEntry(
         date="2026-07-13",
         title="Fixed a real audio-mix crash, HDR footage failing to merge, a freeze-frame cause, and more",

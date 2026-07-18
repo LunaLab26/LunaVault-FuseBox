@@ -47,6 +47,70 @@ def test_checkboxes_reflect_and_persist_settings():
     print("ok: test_checkboxes_reflect_and_persist_settings")
 
 
+def test_confirm_option_reverts_when_declined_and_persists_when_accepted():
+    import dev_panel
+    from PySide6.QtWidgets import QMessageBox
+
+    s = Settings()
+    s.set("dev_review_allow_risky_hw_decode", False)
+    dlg = DeveloperOptionsDialog(s)
+    box = {cb.text(): cb for _f, cb, _d in dlg._bool_rows}["Allow GPU decode for 4K 10-bit HEVC"]
+
+    real_warning = QMessageBox.warning
+    calls = []
+    try:
+        # Declining the warning must revert the tick and NOT persist.
+        dev_panel.QMessageBox.warning = staticmethod(
+            lambda *a, **k: calls.append(a) or QMessageBox.StandardButton.No)
+        box.setChecked(True)
+        assert calls, "a confirm option must prompt before turning on"
+        assert box.isChecked() is False, "declining must roll the checkbox back"
+        assert s.get("dev_review_allow_risky_hw_decode") is False
+        assert Settings().get("dev_review_allow_risky_hw_decode") is False
+
+        # Accepting persists it.
+        dev_panel.QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+        box.setChecked(True)
+        assert box.isChecked() is True
+        assert s.get("dev_review_allow_risky_hw_decode") is True
+        assert Settings().get("dev_review_allow_risky_hw_decode") is True
+    finally:
+        dev_panel.QMessageBox.warning = real_warning
+    print("ok: test_confirm_option_reverts_when_declined_and_persists_when_accepted")
+
+
+def test_confirm_option_turning_off_does_not_prompt():
+    import dev_panel
+    from PySide6.QtWidgets import QMessageBox
+
+    s = Settings()
+    s.set("dev_review_allow_risky_hw_decode", True)   # start ON
+    dlg = DeveloperOptionsDialog(s)
+    box = {cb.text(): cb for _f, cb, _d in dlg._bool_rows}["Allow GPU decode for 4K 10-bit HEVC"]
+    assert box.isChecked() is True
+
+    real_warning = QMessageBox.warning
+    try:
+        # Turning OFF (the safe direction) must NEVER prompt.
+        dev_panel.QMessageBox.warning = staticmethod(
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("turning off must not prompt")))
+        box.setChecked(False)
+        assert box.isChecked() is False
+        assert s.get("dev_review_allow_risky_hw_decode") is False
+    finally:
+        dev_panel.QMessageBox.warning = real_warning
+    print("ok: test_confirm_option_turning_off_does_not_prompt")
+
+
+def test_risky_hw_decode_option_carries_a_confirm_message():
+    # The one dangerous switch must actually carry a confirm prompt (a plain
+    # description is not enough for something that can crash the whole OS).
+    risky = next(o for _t, opts in SECTIONS for o in opts
+                 if getattr(o, "key", None) == "dev_review_allow_risky_hw_decode")
+    assert isinstance(risky, BoolOpt) and risky.confirm, "risky-hw-decode must require confirmation"
+    print("ok: test_risky_hw_decode_option_carries_a_confirm_message")
+
+
 def test_choice_reflects_and_persists():
     s = Settings()
     s.set("dev_preview_height", 240)
@@ -161,6 +225,9 @@ def test_review_thumbnail_settings_read():
 
 if __name__ == "__main__":
     test_checkboxes_reflect_and_persist_settings()
+    test_confirm_option_reverts_when_declined_and_persists_when_accepted()
+    test_confirm_option_turning_off_does_not_prompt()
+    test_risky_hw_decode_option_carries_a_confirm_message()
     test_choice_reflects_and_persists()
     test_options_cover_all_settings_keys()
     test_panel_toggles_window_open_and_closed()

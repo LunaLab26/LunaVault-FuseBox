@@ -61,6 +61,12 @@ _SOFTWARE_DECODE_FORCED_TOOLTIP = (
     "decoder to consume 14+ GB of memory and made the whole system unresponsive enough\n"
     "to drop an active remote-desktop session. Software decode is forced for this file\n"
     "to keep the app — and the rest of your system — stable.")
+_SOFTWARE_DECODE_RISKY_OVERRIDE_TOOLTIP = (
+    "⚠ You have turned off the automatic safety net (Developer options) for this\n"
+    "master's 4K+ 10-bit HEVC video. Unchecking this box hands that video to the GPU\n"
+    "decoder — a combination that has hard-crashed the WHOLE computer (not just this\n"
+    "app) on multiple different machines. Leave this checked unless you specifically\n"
+    "mean to test GPU decode and have saved your work.")
 _APPROX_SCOPE_MAX_DIM = 640   # shrink via Qt before touching numpy at all — see _update_approx_scope
 _SPEC_TILE_CACHE_MAX = 16
 _PROXY_HEIGHT = 480
@@ -642,7 +648,8 @@ class ReviewTab(QWidget):
         """
         # The Developer panel can override the automatic safety force so the user
         # can experiment with GPU decode on the very profile that was risky here.
-        risky = is_risky_hw_decode_profile(self._video_info) and not self._allow_risky_hw()
+        raw_risky = is_risky_hw_decode_profile(self._video_info)
+        risky = raw_risky and not self._allow_risky_hw()
         currently_software = isinstance(self._engine, HybridPlaybackEngine)
 
         if risky and not currently_software:
@@ -670,6 +677,16 @@ class ReviewTab(QWidget):
                 self._engine.shutdown()
                 self._engine = self._new_engine(saved_pref)
                 self._wire_engine()
+
+        # Override active on a genuinely dangerous file: the checkbox is LEFT
+        # live and enabled (that's the whole point of the Developer override),
+        # but the tooltip must say plainly, right at the control the user would
+        # click, that unchecking it here can hard-crash the whole system — the
+        # dev-panel description warns when enabling the override; this warns
+        # again at the point of action. (Only reached when the override is on,
+        # since otherwise `risky` above already forced software.)
+        if raw_risky and self._allow_risky_hw():
+            self._software_decode_check.setToolTip(_SOFTWARE_DECODE_RISKY_OVERRIDE_TOOLTIP)
 
     def _reapply_audio_after_swap(self):
         """After a live engine swap the new engine has no audio set — re-issue

@@ -70,6 +70,39 @@ def probe_rotation(ffprobe_bin: str, path: str, video_stream_index: int = 0, **k
     return 0
 
 
+def clip_has_audio_priming_gap(ffprobe_bin: str, path: str, audio_stream_index: int = 0,
+                               **kwargs) -> bool:
+    """Does this clip's OWN audio stream carry an edit-list-driven encoder
+    priming/discard packet at the very start — a negative-PTS packet flagged
+    'D' (discard), standard for AAC-LC encoder lookahead delay that a
+    correctly-written `elst` box tells a normal player to skip? Confirmed
+    directly (battle-test round 2) as the root cause of an "unexpected...
+    nothing to explain it" camera-audio MD5 mismatch for ANY clip recovered
+    via a concat-based cut (the shared baseline, or even a lone clip's own
+    segment of it) rather than a genuinely standalone archival copy: the
+    concat/cut process doesn't preserve this discard marking, so the
+    recovered audio keeps the priming samples un-discarded — a constant
+    ~1-AAC-frame (~21-23ms) time shift throughout the whole clip, which is
+    why the existing ~300ms boundary guard never resolves it (it isn't a
+    boundary artifact). Reproduced on both a synthetic ffmpeg-encoded clip
+    and real camera footage (a source with 43 consecutive discard packets,
+    ~917ms) — this is a real, standard MP4 muxing convention, not a fixture
+    quirk. Only the first couple of packets need checking; the discard
+    region is always right at the start."""
+    try:
+        r = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", f"a:{audio_stream_index}",
+             "-show_entries", "packet=pts_time,flags", "-read_intervals", "%+#3",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30, **kwargs)
+        packets = json.loads(r.stdout or "{}").get("packets", [])
+        return any(
+            "d" in (p.get("flags") or "").lower() and float(p.get("pts_time", 0) or 0) < 0
+            for p in packets)
+    except Exception:
+        return False
+
+
 def probe_video_codec(ffprobe_bin: str, path: str, video_stream_index: int = 0, **kwargs) -> str:
     """The ACTUAL codec of a given video stream, read directly rather than
     assumed — needed because a transcoded clip's compressed bitstream in the
@@ -316,7 +349,8 @@ _PREDICTED_PREFIX = "predicted unverifiable"
 
 
 def predict_unverifiable(entry, plan, own_archival_track: bool,
-                         safe_to_read_unbounded: bool) -> dict:
+                         safe_to_read_unbounded: bool,
+                         source_has_audio_priming_gap: bool = False) -> dict:
     """Which MD5 checks are known, ahead of any extraction, to be unable to
     produce a meaningful pass — from the SAME facts ffmpeg_runner.py's
     reactive diagnosis already uses when a comparison mismatches, just
@@ -328,17 +362,30 @@ def predict_unverifiable(entry, plan, own_archival_track: bool,
     `_PREDICTED_PREFIX` when actually used as a StreamCheck.skipped_reason
     (by the caller), so a verify log/summary can count real skips precisely.
 
-    Two categories, matched 1:1 to text already used after-the-fact in
+    Three categories, matched 1:1 to text already used after-the-fact in
     ffmpeg_runner.py's `compare_adaptive`:
       - Video: a transcoded clip with no archival track of its own was
         re-encoded straight into the shared baseline — nothing byte-exact
         survives to compare against, by design, every time.
-      - Camera audio: a NON-FIRST clip sharing a track (baseline or a
-        grouped archival track) has its audio seeked by a video-based
-        offset that drifts from the audio's own true cumulative position,
-        and AAC priming shifts at the concat seam — confirmed directly
-        (real multi-clip masters) that this fails for every clip meeting
-        this condition, not just some.
+      - Camera audio (non-first clip on a shared track): a NON-FIRST clip
+        sharing a track (baseline or a grouped archival track) has its audio
+        seeked by a video-based offset that drifts from the audio's own true
+        cumulative position, and AAC priming shifts at the concat seam —
+        confirmed directly (real multi-clip masters) that this fails for
+        every clip meeting this condition, not just some.
+      - Camera audio (edit-list priming gap): ANY clip recovered via a
+        concat-based cut rather than its own dedicated archival track — first
+        clip included — whose ORIGINAL audio carries an edit-list-driven
+        encoder priming/discard packet (see
+        `clip_has_audio_priming_gap`'s own docstring for the full mechanism)
+        loses that discard marking during the cut. This is a CONSTANT
+        time-base shift through the whole clip, not a boundary artifact, so
+        it fails regardless of position — confirmed directly on both a
+        synthetic ffmpeg-encoded clip and real camera footage (battle-test
+        round 2). Checked separately from the non-first-clip case above
+        since a first/lone clip on a shared track wouldn't otherwise be
+        predicted here at all, yet fails just the same when its source has
+        this gap.
     """
     predicted = {}
     # Any clip whose video isn't a byte-exact copy of its own archival track —
@@ -356,13 +403,21 @@ def predict_unverifiable(entry, plan, own_archival_track: bool,
             "to differ from the original after transcoding. Enable Archival master + "
             "\"One track per clip\" (or \"Optimize baseline for delivery\") if you need a "
             "byte-exact copy of this clip as well.")
-    if (entry.has_camera_audio and plan.audio_stream is not None
-            and plan.video_start > 0 and not safe_to_read_unbounded):
-        predicted["Camera audio"] = (
-            "this clip's audio sits mid-way in a shared archival track; its recovered "
-            "samples can't be aligned for exact verification here because AAC priming plus "
-            "audio/video boundary drift at the concat seam shift the window — use "
-            "One-track-per-clip archival for verifiable, byte-exact audio.")
+    if entry.has_camera_audio and plan.audio_stream is not None and not own_archival_track:
+        if plan.video_start > 0 and not safe_to_read_unbounded:
+            predicted["Camera audio"] = (
+                "this clip's audio sits mid-way in a shared archival track; its recovered "
+                "samples can't be aligned for exact verification here because AAC priming plus "
+                "audio/video boundary drift at the concat seam shift the window — use "
+                "One-track-per-clip archival for verifiable, byte-exact audio.")
+        elif source_has_audio_priming_gap:
+            predicted["Camera audio"] = (
+                "this clip's original audio has encoder priming samples (a standard AAC/MP4 "
+                "convention) that its container's edit list marks for a player to skip — cutting "
+                "this clip out of a shared baseline/archival track doesn't preserve that marking, "
+                "so the recovered audio keeps those samples and every sample after them shifts by "
+                "one AAC frame's worth of time (~20ms). Enable Archival master + \"One track per "
+                "clip\" for a byte-exact copy that avoids this cut entirely.")
     return predicted
 
 

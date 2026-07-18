@@ -218,7 +218,7 @@ def build_mux_cmd(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     if need_scale:
         if clip.stream and clip.stream.width == clip.stream.height:
             if square_mode == "crop":
-                vf_parts.append("crop=ih*16/9:ih:(iw-ih*16/9)/2:0,scale=3840:2160:flags=lanczos")
+                vf_parts.append(_square_crop_graph(3840, 2160))
             else:
                 vf_parts.append("scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos,pad=3840:2160:(ow-iw)/2:(oh-ih)/2")
         else:
@@ -336,7 +336,10 @@ class ConformSpec:
     color_transfer: str = ""
     color_primaries: str = ""
     fill: str = "black"           # aspect-mismatch pad fill: "black" | "blur"
-    hw_encoder: str = "off"       # "off" | "auto" | "nvenc" | "qsv" | "amf"
+    hw_encoder: str = "off"       # "off" | "auto" | "nvenc" | "qsv" | "amf" | "vaapi"
+    hw_decode: str = "off"        # "off" | "auto" | "vaapi" — GPU-decode the source (VAAPI only
+                                  # on Linux); independent of hw_encoder, so all four
+                                  # decode×encode pipeline combinations are expressible
     quality: int = 18             # CRF (software) / equivalent quality knob (GPU) — see QUALITY_PRESETS
 
 
@@ -396,6 +399,26 @@ def _blur_pad_graph(w: int, h: int) -> str:
             f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2")
 
 
+def _square_crop_graph(w: int, h: int) -> str:
+    """Crop a SQUARE source (iw == ih — only ever called for one) to fill the
+    w:h baseline aspect, then scale to w:h exactly. Direction depends on the
+    target's own aspect, not just 16:9 — the baseline can be landscape
+    (3840x2160), square (2160x2160), or portrait (1080x1920):
+      - target aspect >= 1 (landscape or square): crop the source's HEIGHT
+        down to iw*h/w, keep full width. (A square target makes this a
+        harmless no-op crop, since h/w == 1.)
+      - target aspect < 1 (portrait): crop the source's WIDTH down to
+        ih*w/h, keep full height.
+    Previously hardcoded to always crop WIDTH to a literal `ih*16/9` —
+    mathematically impossible for a square source (16/9 > 1 means the
+    requested crop width always exceeds the actual square width), which
+    made ffmpeg reject the filter outright and fail the merge for every
+    square-mode clip, regardless of which of these baselines was chosen."""
+    if w >= h:
+        return f"crop=iw:iw*{h}/{w}:0:(ih-iw*{h}/{w})/2,scale={w}:{h}:flags=lanczos"
+    return f"crop=ih*{w}/{h}:ih:(iw-ih*{w}/{h})/2:0,scale={w}:{h}:flags=lanczos"
+
+
 def _video_encoder_args(conform: "ConformSpec", ff: str = None) -> list:
     """Encoder args targeting the baseline codec/pixel-format/colour. Uses a
     GPU encoder (NVENC/QSV/AMF) when `conform.hw_encoder` requests one AND it
@@ -409,12 +432,11 @@ def _video_encoder_args(conform: "ConformSpec", ff: str = None) -> list:
     quality = getattr(conform, "quality", 18) or 18
     hw_choice = getattr(conform, "hw_encoder", "off") or "off"
     if hw_choice != "off" and ff:
-        from core.gpu_encode import detect_best_hw, hw_video_encoder_args
+        from core.gpu_encode import detect_best_hw, hw_encode_plan
         vendor = hw_choice if hw_choice != "auto" else detect_best_hw(ff, codec)
-        if vendor:
-            hw_args = hw_video_encoder_args(codec, vendor, conform.pix_fmt, quality)
-            if hw_args:
-                return hw_args + ["-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
+        plan = hw_encode_plan(codec, vendor, conform.pix_fmt, quality)
+        if plan:
+            return plan["encoder_args"] + ["-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
 
     args = ["-crf", str(quality), "-preset", "medium", "-pix_fmt", conform.pix_fmt]
     if codec in ("hevc", "h265"):
@@ -422,6 +444,65 @@ def _video_encoder_args(conform: "ConformSpec", ff: str = None) -> list:
                 "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
     return ["-c:v", "libx264"] + args + [
         "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
+
+
+def _resolve_hw_extras(conform: "ConformSpec", ff: str) -> "dict | None":
+    """Resolve hardware DECODE and/or ENCODE offload for a transcode command,
+    returning the pieces a caller must weave in that a plain trailing encoder-
+    args list can't express:
+      - ffmpeg_bin: the binary to actually run. VAAPI — decode OR encode —
+        needs a real system ffmpeg; the bundled static build has no hardware
+        acceleration at all (see core.gpu_encode's module docstring). None
+        means the caller's own bundled ff is fine.
+      - global_args: pre-input args — `-hwaccel vaapi -hwaccel_device <n>` for
+        hardware decode, and/or `-vaapi_device <n>` for VAAPI encode.
+      - filter_suffix: `format=<hwfmt>,hwupload` to append as the LAST video
+        filter step when encoding on VAAPI (uploads the CPU-side frame to a GPU
+        surface for the encoder); None otherwise.
+      - encoder_args: the VAAPI encoder args, for callers that don't build
+        their own via _video_encoder_args; None when encode isn't VAAPI.
+    Returns None when neither decode nor encode needs any of this — pure
+    software, or a GPU *encoder* like NVENC/QSV/AMF that just swaps -c:v on the
+    bundled binary with no device/upload/hwaccel of its own."""
+    if not ff:
+        return None
+    from core.gpu_encode import (detect_best_hw, hw_encode_plan, hw_pix_fmt,
+                                 vaapi_decode_global_args, system_vaapi_ffmpeg,
+                                 vaapi_render_device)
+    codec = (conform.codec or "hevc").lower()
+    quality = getattr(conform, "quality", 18) or 18
+
+    # Encode: does it resolve to VAAPI specifically? NVENC/QSV/AMF are "hardware"
+    # too but need none of this (they swap -c:v on the bundled binary), so they
+    # don't count here — _video_encoder_args handles them directly.
+    enc_choice = getattr(conform, "hw_encoder", "off") or "off"
+    enc_plan = None
+    if enc_choice != "off":
+        vendor = enc_choice if enc_choice != "auto" else detect_best_hw(ff, codec)
+        if vendor == "vaapi":
+            enc_plan = hw_encode_plan(codec, "vaapi", conform.pix_fmt, quality)
+
+    # Decode: hardware VAAPI requested and actually available on this machine?
+    dec_choice = getattr(conform, "hw_decode", "off") or "off"
+    dec_args = vaapi_decode_global_args() if dec_choice in ("auto", "vaapi") else None
+
+    if enc_plan is None and dec_args is None:
+        return None
+
+    system_ff = system_vaapi_ffmpeg()
+    device = vaapi_render_device()
+    if system_ff is None or device is None:
+        return None
+
+    global_args = list(dec_args) if dec_args else []
+    if enc_plan:
+        global_args += ["-vaapi_device", device]
+    return {
+        "ffmpeg_bin": system_ff,
+        "global_args": global_args,
+        "filter_suffix": (f"format={hw_pix_fmt(conform.pix_fmt)},hwupload") if enc_plan else None,
+        "encoder_args": enc_plan["encoder_args"] if enc_plan else None,
+    }
 
 
 def transcode_vf_parts(clip: ClipInfo, square_mode: str,
@@ -447,7 +528,7 @@ def transcode_vf_parts(clip: ClipInfo, square_mode: str,
         sh = src_height if src_height is not None else (st.height if st else 0)
         parts = []
         if sw == sh and square_mode == "crop":
-            parts.append(f"crop=ih*16/9:ih:(iw-ih*16/9)/2:0,scale={w}:{h}:flags=lanczos")
+            parts.append(_square_crop_graph(w, h))
         elif conform.fill == "blur":
             parts.append(_blur_pad_graph(w, h))
         else:
@@ -464,7 +545,7 @@ def transcode_vf_parts(clip: ClipInfo, square_mode: str,
     parts = []
     if need_scale:
         if st and st.width == st.height and square_mode == "crop":
-            parts.append(f"crop=ih*16/9:ih:(iw-ih*16/9)/2:0,scale={w}:{h}:flags=lanczos")
+            parts.append(_square_crop_graph(w, h))
         elif conform.fill == "blur":
             parts.append(_blur_pad_graph(w, h))
         else:
@@ -583,6 +664,10 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     if mix is None:
         mix = MixSpec(kind=plan.mix_kind, match_levels=plan.mix_match_levels)
 
+    # Only a transcoding (non-conform) clip ever touches an encoder at all —
+    # an "ok" clip stream-copies (-c:v copy below) regardless of hw_encoder.
+    hw_extras = None if is_conform else _resolve_hw_extras(conform, ff)
+
     # "Use the LRV proxy instead" (per-clip override): conform the low-res
     # proxy into the baseline in place of this clip's own footage, on its own
     # input — camera AUDIO still comes from the clip's own file (input 0)
@@ -609,7 +694,11 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         fills.append((kind,) + (overridden if overridden is not None else _slot_fill(kind, clip, mix)))
 
     # ── Inputs ────────────────────────────────────────────────────────────────
-    cmd = [ff, "-y", "-i", str(clip.path)]                 # input 0 = clip
+    # A VAAPI encode runs the WHOLE clip command through a different ffmpeg
+    # binary (system, not the bundled static one — see _resolve_hw_extras)
+    # with its device declared as a global arg before the first -i.
+    cmd_ff = hw_extras["ffmpeg_bin"] if hw_extras else ff
+    cmd = [cmd_ff, "-y"] + (hw_extras["global_args"] if hw_extras else []) + ["-i", str(clip.path)]
     next_idx = 1
     lrv_idx = None
     if use_lrv:
@@ -634,6 +723,10 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         clip, square_mode, conform,
         src_width=(clip.lrv_width or None) if use_lrv else None,
         src_height=(clip.lrv_height or None) if use_lrv else None)
+    if hw_extras and hw_extras.get("filter_suffix"):
+        # VAAPI needs the upload onto its hw surface as the LAST step, after
+        # every software scale/pad/crop step above has already run.
+        vf_parts = vf_parts + [hw_extras["filter_suffix"]]
     # A clip's Primary-slot override and a separately-enabled Mixed Audio
     # track can both independently resolve to "mix"/"mix_alac" for the same
     # clip — each needs its OWN single-use filtergraph pad (see
@@ -672,6 +765,19 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
             mix_slot_i += 1
         else:  # silence
             cmd += ["-map", f"{silence_idx}:a:0"]
+
+    # A source clip carrying a QuickTime chapter track (`tref` type 'chap' on
+    # its video/audio track, pointing at a small `text`-handler marker track —
+    # confirmed directly on real camera footage) gets that track auto-carried
+    # into the output by ffmpeg's MOV muxer REGARDLESS of the explicit -map
+    # list above, since dropping a chapter-referenced track silently would
+    # break chapter navigation for players that rely on it. That extra track
+    # (surfacing as a stray `bin_data`/"text"-tagged stream in the delivered
+    # master) isn't wanted here — this per-clip temp file gets its OWN
+    # chapters written fresh at the final concat step (see build_concat_cmd),
+    # so an inherited chapter track at this stage is never useful and no
+    # `-map`/`-dn`/negative-map combination suppresses it; only this flag does.
+    cmd += ["-map_chapters", "-1"]
 
     # ── Codecs ────────────────────────────────────────────────────────────────
     if plan.include_video:
@@ -747,11 +853,21 @@ def build_concat_cmd(ff: str, concat_file: Path, chapters_file: Path,
     `extra_out_args` (e.g. the archival manifest's `metadata_embed_args`) are
     inserted as output options just before the output filename — additive only,
     they don't touch the copied A/V streams.
+
+    Maps VIDEO + AUDIO explicitly rather than a blanket `-map 0`: a camera
+    clip's own footage can carry a `bin_data` metadata track (Pixel motion-
+    photo / telemetry, codec tag "text"), which survives into the per-clip
+    temp files even though those are built with explicit v/a maps — ffmpeg
+    auto-carries that data track. A blanket `-map 0` then tries to copy it
+    into the .mov output, which the muxer rejects outright ("Tag text
+    incompatible with output codec id", header write fails, whole merge dies).
+    Same lesson build_archival_concat_cmd already applies; `-map 0:a?` keeps
+    every audio track (0/1/2…) while the `?` tolerates a video-only clip.
     """
     cmd = [ff, "-y",
            "-f", "concat", "-safe", "0", "-i", str(concat_file),
            "-i", str(chapters_file),
-           "-map_metadata", "1", "-map", "0", "-c", "copy",
+           "-map_metadata", "1", "-map", "0:v", "-map", "0:a?", "-c", "copy",
            "-progress", str(progress_file), "-nostats"]
     if extra_out_args:
         cmd += list(extra_out_args)
@@ -767,7 +883,8 @@ PRORES_PROFILES = {"proxy": 0, "standard": 2, "hq": 3}
 def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
                               output: Path, progress_file: Path,
                               crf: int = 20, extra_out_args: Optional[list] = None,
-                              codec: str = "h264", prores_profile: str = "hq") -> list:
+                              codec: str = "h264", prores_profile: str = "hq",
+                              hw_encoder: str = "off", hw_decode: str = "off") -> list:
     """Concatenate the per-clip temp files but RE-ENCODE the video into ONE clean,
     continuous, widely-compatible stream — the fix for the broken-splice playback
     a stream-copy concat produces.
@@ -802,15 +919,103 @@ def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
     one clean h264/yuv420p stream that decodes end-to-end with ZERO errors,
     versus the hundreds of broken-reference errors a stream-copy concat of the
     same clips produced.
+
+    `hw_encoder` ("off"/"auto"/vendor name) offloads this pass's re-encode to
+    a GPU encoder the same way core.gpu_encode covers everywhere else —
+    "off" by default so no existing caller's behaviour changes. Only ever
+    applies to codec="h264" (ProRes is a software-only edit intermediate;
+    there's no such thing as a hardware ProRes encoder to offload to). This
+    is a SINGLE continuous re-encode of the whole master, not short per-clip
+    segments, so it's usually the single most expensive step in a
+    "Compatible playback master" merge — worth accelerating even though the
+    per-clip conform path already is.
     """
-    cmd = [ff, "-y",
+    hw_plan = None
+    if codec != "prores" and hw_encoder and hw_encoder != "off":
+        from core.gpu_encode import detect_best_hw, hw_encode_plan
+        vendor = hw_encoder if hw_encoder != "auto" else detect_best_hw(ff, "h264")
+        hw_plan = hw_encode_plan("h264", vendor, "yuv420p", crf)
+
+    # Hardware decode is independent of the encoder choice (works with ProRes and
+    # software H.264 too), but — like VAAPI encode — needs the system ffmpeg, so
+    # a decode-only request still forces cmd_ff to that binary.
+    dec_args = None
+    if hw_decode and hw_decode != "off":
+        from core.gpu_encode import vaapi_decode_global_args, system_vaapi_ffmpeg
+        dec_args = vaapi_decode_global_args()
+        if dec_args and hw_plan is None and system_vaapi_ffmpeg() is None:
+            dec_args = None   # can't hardware-decode without a VAAPI-capable ffmpeg
+
+    if hw_plan:
+        # hw_encode_plan()'s own contract: "ffmpeg_bin": None means "the
+        # caller's own bundled ffmpeg is fine" (true for NVENC/QSV/AMF, which
+        # swap the trailing -c:v on the SAME binary — only VAAPI needs a
+        # different one). `hw_plan` itself is a truthy dict either way, so
+        # using it as the binary directly (dropped here) put a literal
+        # `None` in cmd[0] for every non-VAAPI vendor — Windows' only real
+        # hardware encoders. subprocess.Popen can't stringify that, so this
+        # crashed EVERY "Compatible playback master" + GPU-encode merge on
+        # Windows outright (confirmed directly: cmd[0] was None). VAAPI
+        # never hit it since its ffmpeg_bin is always a real path, which is
+        # why this survived two rounds of Linux-only battle testing.
+        cmd_ff = hw_plan["ffmpeg_bin"] or ff
+    elif dec_args:
+        from core.gpu_encode import system_vaapi_ffmpeg
+        cmd_ff = system_vaapi_ffmpeg() or ff
+    else:
+        cmd_ff = ff
+    pre_args = list(dec_args) if dec_args else []
+    if hw_plan:
+        pre_args += hw_plan["global_args"]
+        # The concat demuxer's segments are NOT parameter-uniform: a
+        # stream-copied ("ok"-conform) clip keeps its camera's exact decoded
+        # parameters (e.g. yuvj420p FULL range), while a transcoded clip's
+        # segment carries the encoder's (limited range). At the first seam
+        # where they differ, ffmpeg reinitialises the filter graph — and a
+        # graph containing hwupload cannot be reinitialised: the whole encode
+        # dies with -38/ENOSYS ("Function not implemented") the moment the
+        # second segment starts. Confirmed directly on real mixed footage;
+        # never triggered by parameter-uniform segments, which is why a
+        # single-clip merge or an all-transcode merge worked. This is also
+        # why this exact combination (H.264 compat master + VAAPI encode)
+        # was the ONE cell family that "timed out" in battle-test rounds 1-2
+        # — a fast failure, not a slow encode; VAAPI here actually runs
+        # ~1.7x realtime vs software's ~0.6x once it survives the seam.
+        # `-reinit_filter 0` (input option, scoped to the concat input) keeps
+        # the ORIGINAL graph and instead converts mismatched frames to the
+        # graph's negotiated input format. The scale=out_range prefix below
+        # pins what that negotiation produces.
+        pre_args += ["-reinit_filter", "0"]
+    cmd = [cmd_ff, "-y"] + pre_args + [
            "-f", "concat", "-safe", "0", "-i", str(concat_file),
            "-i", str(chapters_file),
-           "-map_metadata", "1", "-map", "0"]
+           # VIDEO + AUDIO only, never a blanket `-map 0`: the concatenated temp
+           # clips can carry a camera `bin_data` metadata track (Pixel motion-
+           # photo / telemetry, codec tag "text") that ffmpeg auto-attached; the
+           # .mov muxer rejects it ("Tag text incompatible with output codec id
+           # '98314'", header write fails), which killed the whole merge — in
+           # BOTH software and hardware encode. See build_concat_cmd / the
+           # archival concat, which map v+a explicitly for the same reason.
+           "-map_metadata", "1", "-map", "0:v", "-map", "0:a?"]
     if codec == "prores":
         profile_num = PRORES_PROFILES.get(prores_profile, PRORES_PROFILES["hq"])
         cmd += ["-c:v", "prores_ks", "-profile:v", str(profile_num),
                "-vendor", "apl0", "-pix_fmt", "yuv422p10le"]
+    elif hw_plan:
+        if hw_plan.get("filter_suffix"):
+            # scale=out_range=tv BEFORE the hwupload suffix: with
+            # -reinit_filter 0 (above), every segment's frames are converted
+            # to whatever format the graph negotiated on the FIRST segment —
+            # left implicit, a full-range first segment makes the whole
+            # output full-range (a real ~5-point luma shift against the
+            # software path, measured directly) inside a tv-tagged stream.
+            # Forcing limited range in the chain pins the negotiation to the
+            # same range the software path produces, segment order be damned;
+            # -color_range tv below tags the output to match. Verified: luma
+            # stats agree with the libx264 reference to within 0.05 at both
+            # segment halves of a mixed-range concat.
+            cmd += ["-vf", "scale=out_range=tv," + hw_plan["filter_suffix"]]
+        cmd += hw_plan["encoder_args"] + ["-color_range", "tv"]
     else:
         cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
                "-pix_fmt", "yuv420p", "-profile:v", "high"]
@@ -841,10 +1046,20 @@ def build_archival_concat_cmd(ff: str, concat_file: Path, output: Path) -> list:
     phones embed a `mett` (motion-photo/telemetry) data track as stream #0:2,
     which the MOV muxer refuses to stream-copy ("Cannot map stream #0:2 -
     unsupported type"). We only want the archived video/audio anyway.
+
+    `-map_chapters -1`: a source clip whose video/audio track carries a
+    `tref` of type 'chap' (a QuickTime chapter/marker track — confirmed
+    directly on real camera footage, distinct from the Pixel `mett` case
+    above) gets that chapter track auto-carried by the MOV muxer regardless
+    of the explicit maps above, surfacing as a stray `bin_data`/"text"
+    stream in this archival intermediate — and then it self-propagates
+    below in `build_final_archival_mux_cmd`, which maps this file's own
+    `v`/`a` streams straight into the final master. Excluding chapters here,
+    where the archival originals are actually read, is what stops it.
     """
     return [ff, "-y", "-v", "error",
             "-f", "concat", "-safe", "0", "-i", str(concat_file),
-            "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", str(output)]
+            "-map", "0:v:0", "-map", "0:a:0?", "-map_chapters", "-1", "-c", "copy", str(output)]
 
 
 def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,

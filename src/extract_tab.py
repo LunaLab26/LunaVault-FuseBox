@@ -341,6 +341,8 @@ class ExtractTab(QWidget):
         self._extract_chapters: list = []          # list[ChapterInfo], probed at load time — kept
                                                     # around so toggling "ignore manifest" can build
                                                     # the generic path without a second probe
+        self._extract_chapters_error: Optional[str] = None   # set when the chapter probe itself
+                                                              # crashed/failed, not just found none
         self._ex_audio_role_combos: list = []      # one per detected audio track
         self._ex_video_track_combo = None          # only shown when >1 video stream
         self._ex_rotation_combo = None
@@ -717,7 +719,17 @@ class ExtractTab(QWidget):
         ex_out_btn.setFixedWidth(90)
         ex_out_btn.clicked.connect(self._browse_extract_out_dir)
         ex_create_btn = QPushButton("Create folder…")
-        ex_create_btn.setFixedWidth(110)
+        # Was a fixed 110px (clipped the leading "C" on Linux), then
+        # fontMetrics().horizontalAdvance() + a guessed padding constant
+        # (still clipped on Windows — confirmed directly at every scale
+        # tested: Segoe UI's real rendered/button-chrome width needs more
+        # room than a flat pixel guess accounts for, on either platform).
+        # No explicit width at all now: QPushButton already sizes itself
+        # from its own sizeHint(), which asks the CURRENT platform's style
+        # for the exact width its label plus chrome needs at whatever
+        # font/DPI is actually active — the same measurement Qt itself
+        # paints from, so it cannot land short the way a hand-picked
+        # constant (or a hand-picked fudge factor on top of one) repeatedly did.
         ex_create_btn.clicked.connect(self._create_extract_out_dir)
         out_row.addWidget(QLabel("Output folder:"))
         out_row.addWidget(self._ex_out_dir, 1)
@@ -841,6 +853,7 @@ class ExtractTab(QWidget):
         self._extract_audio_tracks = []
         self._extract_video_tracks = []
         self._extract_chapters = []
+        self._extract_chapters_error = None
         self._ex_tree.clear()
         self._extract_items = {}
         self._ex_extract_btn.setEnabled(False)
@@ -860,11 +873,13 @@ class ExtractTab(QWidget):
         self._manifest_load_worker = w
         w.start()
 
-    def _on_extract_manifest_ready(self, manifest, chapters: list, audio_tracks: list, video_tracks: list):
+    def _on_extract_manifest_ready(self, manifest, chapters: list, audio_tracks: list,
+                                    video_tracks: list, chapters_error: Optional[str] = None):
         self._extract_manifest = manifest
         self._extract_audio_tracks = audio_tracks
         self._extract_video_tracks = video_tracks
         self._extract_chapters = chapters
+        self._extract_chapters_error = chapters_error
         has_manifest = manifest is not None and bool(manifest.clips)
         self._ex_ignore_manifest_check.setVisible(has_manifest)
         self._apply_extract_mode()
@@ -914,6 +929,13 @@ class ExtractTab(QWidget):
                 "trims the master's own baseline track rather than an archival original. Check "
                 "the manual controls below — audio-track roles, rotation, and clip boundaries can "
                 "all be corrected there.")
+        elif self._extract_chapters_error:
+            self._extract_generic_plans = []
+            self._ex_status_label.setText(
+                f"Could not read this file's chapters — ffprobe failed ({self._extract_chapters_error}). "
+                "This usually means the bundled ffmpeg/ffprobe binaries are missing, corrupted, or the "
+                "wrong build for this platform; check bin/ before assuming the file has no chapters. "
+                "Manual controls are available below in the meantime.")
         else:
             self._extract_generic_plans = []
             self._ex_status_label.setText(

@@ -18,7 +18,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QWidget, QFrame, QCheckBox, QProgressBar,
+    QWidget, QFrame, QCheckBox, QProgressBar, QComboBox,
 )
 
 from core.plan_report import MergeReport
@@ -51,7 +51,7 @@ class PreflightDialog(QDialog):
     start_requested = Signal()
 
     def __init__(self, report: MergeReport, parent=None, free_bytes=None, need_bytes=0,
-                clips: Optional[list] = None):
+                clips: Optional[list] = None, settings=None, gpu_available: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Pre-flight — what this merge will do")
         self.setMinimumSize(560, 480)
@@ -60,6 +60,8 @@ class PreflightDialog(QDialog):
         self._free_bytes = free_bytes
         self._need_bytes = need_bytes
         self._clips = clips or []          # real ClipInfo objects, same order as report.clips
+        self._settings = settings          # persist pipeline choices here (None => hide the section)
+        self._gpu_available = bool(gpu_available)
         self._diag_worker: Optional[DiagnosticsWorker] = None
         self._clip_diag_labels: dict = {}   # 0-based clip index -> QLabel
         root = QVBoxLayout(self)
@@ -104,6 +106,10 @@ class PreflightDialog(QDialog):
             disk.setStyleSheet(f"color:{p.danger if low else p.text_dim}; font-size:11px;")
             root.addWidget(disk)
 
+        # ── Processing pipeline (decode + encode method) ─────────────────────
+        if self._settings is not None:
+            root.addWidget(self._build_pipeline_section())
+
         # ── Diagnostics ──────────────────────────────────────────────────────
         if self._clips:
             root.addWidget(self._build_diagnostics_section())
@@ -131,6 +137,102 @@ class PreflightDialog(QDialog):
         start.clicked.connect(self._on_start)
         btns.addWidget(close); btns.addWidget(start)
         root.addLayout(btns)
+
+    # ── Processing-pipeline section ───────────────────────────────────────────
+
+    def _build_pipeline_section(self) -> QFrame:
+        p = self._p
+        s = self._settings
+        frame = QFrame()
+        frame.setStyleSheet(f"QFrame {{ background:{p.surface2}; border:1px solid {p.border}; border-radius:8px; }}")
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(6)
+
+        title = QLabel("PROCESSING PIPELINE")
+        title.setStyleSheet(f"color:{p.text_mute}; font-size:10px; font-weight:bold; "
+                            "letter-spacing:1px; border:none;")
+        lay.addWidget(title)
+
+        self._pipe_recommended = QCheckBox("Use recommended settings (automatic)")
+        self._pipe_recommended.setChecked(bool(s.get("merge_pipeline_recommended", True)))
+        self._pipe_recommended.setStyleSheet(f"color:{p.text}; border:none;")
+        self._pipe_recommended.setToolTip(
+            "Let the app choose the best video decode + encode combination for this machine. "
+            "Untick to pick your own.")
+        self._pipe_recommended.toggled.connect(self._on_pipe_recommended_toggled)
+        lay.addWidget(self._pipe_recommended)
+
+        # Custom decode/encode method pickers (enabled only when not recommended).
+        self._pipe_custom = QWidget()
+        cl = QVBoxLayout(self._pipe_custom)
+        cl.setContentsMargins(18, 2, 0, 2)
+        cl.setSpacing(6)
+        self._pipe_decode = self._method_combo(
+            "Video decode", s.get("merge_decode_method", "software"), cl, "decode")
+        self._pipe_encode = self._method_combo(
+            "Video encode", s.get("merge_encode_method", "hardware"), cl, "encode")
+        lay.addWidget(self._pipe_custom)
+
+        self._pipe_reco_label = QLabel("")
+        self._pipe_reco_label.setWordWrap(True)
+        self._pipe_reco_label.setStyleSheet(f"color:{p.text_dim}; font-size:10.5px; border:none;")
+        lay.addWidget(self._pipe_reco_label)
+
+        self._refresh_pipeline_ui()
+        return frame
+
+    def _method_combo(self, label_text: str, current: str, parent_layout, which: str) -> QComboBox:
+        p = self._p
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label_text)
+        lbl.setStyleSheet(f"color:{p.text}; font-size:11.5px; border:none;")
+        combo = QComboBox()
+        combo.addItem("Software (CPU)", "software")
+        combo.addItem("Hardware (GPU)", "hardware")
+        if not self._gpu_available:
+            # No GPU encoder → hardware isn't selectable; keep it visible but disabled
+            # so the user sees the option exists and why it's greyed out.
+            combo.model().item(1).setEnabled(False)
+            combo.model().item(1).setToolTip("No GPU encoder detected on this machine")
+        want_hw = current == "hardware" and self._gpu_available
+        combo.setCurrentIndex(1 if want_hw else 0)
+        combo.currentIndexChanged.connect(
+            lambda _i, c=combo, w=which: self._on_method_changed(w, c.currentData()))
+        row.addWidget(lbl)
+        row.addStretch()
+        row.addWidget(combo)
+        parent_layout.addLayout(row)
+        return combo
+
+    def _on_pipe_recommended_toggled(self, on: bool):
+        self._settings.set("merge_pipeline_recommended", bool(on))
+        self._refresh_pipeline_ui()
+
+    def _on_method_changed(self, which: str, value):
+        key = "merge_decode_method" if which == "decode" else "merge_encode_method"
+        self._settings.set(key, value)
+        self._refresh_pipeline_ui()
+
+    def _refresh_pipeline_ui(self):
+        recommended = self._pipe_recommended.isChecked()
+        self._pipe_custom.setEnabled(not recommended)
+        self._pipe_reco_label.setText(self._pipeline_summary_text(recommended))
+
+    def _pipeline_summary_text(self, recommended: bool) -> str:
+        if recommended:
+            if self._gpu_available:
+                return ("→ GPU (hardware) encode + CPU (software) decode — the fastest combination "
+                        "measured on this class of hardware. Full hardware decode frees the CPU but "
+                        "runs slightly slower overall.")
+            return "→ CPU encode + CPU decode — no GPU encoder was detected on this machine."
+        dec = self._settings.get("merge_decode_method", "software")
+        enc = self._settings.get("merge_encode_method", "hardware")
+        if not self._gpu_available and (dec == "hardware" or enc == "hardware"):
+            return "No GPU encoder detected — hardware selections will fall back to the CPU."
+        return ("Hardware = your GPU's dedicated video engine (VAAPI); software = the CPU "
+                "(libx264/libx265). Both codecs work either way.")
 
     # ── Diagnostics section ───────────────────────────────────────────────────
 

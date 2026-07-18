@@ -1,32 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-# LunaVault FuseBox v1.4 — PyInstaller spec (onedir, for LGPL relinking)
+
 
 a = Analysis(
-    ['src\\main.py'],
+    ['src/main.py'],
     pathex=['src'],
     binaries=[],
-    datas=[
-        ('src\\assets', 'assets'),
-        ('luts',        'luts'),
-        ('licenses',    'licenses'),
-        ('LICENSE',     '.'),
-    ],
-    hiddenimports=[
-        'PySide6.QtXml',
-        'PySide6.QtNetwork',
-        'PySide6.QtSvg',
-        'PySide6.QtSvgWidgets',
-        'PySide6.QtMultimedia',
-        'numpy',
-    ],
-    excludes=[
-        'PyQt6',
-        'PyQt5',
-        'tkinter',
-    ],
+    datas=[('src/assets', 'assets'), ('luts', 'luts')],
+    hiddenimports=['PySide6.QtXml', 'PySide6.QtNetwork', 'PySide6.QtSvg', 'PySide6.QtSvgWidgets', 'PySide6.QtMultimedia', 'numpy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
+    excludes=['PyQt6', 'PyQt5', 'tkinter'],
     noarchive=False,
     optimize=0,
 )
@@ -48,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='src\\assets\\lunavault.ico',
+    icon=['src/assets/lunavault.png'],
 )
 coll = COLLECT(
     exe,
