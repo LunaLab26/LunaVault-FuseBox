@@ -42,26 +42,10 @@ echo "  $(bin/ffmpeg -version 2>&1 | head -1)"
 echo ""
 
 # 3. PyInstaller (onedir keeps Qt libs separate → satisfies LGPL relinking)
+# Built from LunaVaultFuseBox.spec (not raw CLI flags) so the spec's
+# glibc-family exclusion (see the spec file for why) actually takes effect.
 echo "  [3/5] Building with PyInstaller..."
-pyinstaller \
-  --noconfirm \
-  --onedir \
-  --windowed \
-  --name "$APP" \
-  --paths src \
-  --hidden-import PySide6.QtXml \
-  --hidden-import PySide6.QtNetwork \
-  --hidden-import PySide6.QtSvg \
-  --hidden-import PySide6.QtSvgWidgets \
-  --hidden-import PySide6.QtMultimedia \
-  --hidden-import numpy \
-  --exclude-module PyQt6 \
-  --exclude-module PyQt5 \
-  --exclude-module tkinter \
-  --add-data "src/assets:assets" \
-  --add-data "luts:luts" \
-  --icon src/assets/lunavault.png \
-  src/main.py
+pyinstaller --noconfirm LunaVaultFuseBox.spec
 
 # 4. Copy data the app reads from get_app_dir() (next to the executable)
 echo ""
