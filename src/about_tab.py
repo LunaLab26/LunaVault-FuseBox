@@ -7,8 +7,8 @@ Open-source licenses button. Theme-aware via the palette controller.
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication,
     QPushButton, QScrollArea, QFrame,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvgWidgets import QSvgWidget
 
 from logo_widget import make_logo_widget
+from open_external import open_url, open_path
 from core.binaries import get_app_dir
 from dev_history import HISTORY, LAST_UPDATED
 import theme
@@ -150,7 +151,7 @@ class AboutTab(QWidget):
         fb_row.addStretch()
         self._fb_btn = QPushButton("  Send feedback or a question  →")
         self._fb_btn.setFixedHeight(36)
-        self._fb_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(FEEDBACK_URL)))
+        self._fb_btn.clicked.connect(lambda: open_url(FEEDBACK_URL))
         fb_row.addWidget(self._fb_btn)
         fb_row.addStretch()
         root.addLayout(fb_row)
@@ -190,7 +191,7 @@ class AboutTab(QWidget):
             link_btn.setObjectName("linkBtn")
             link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             link_btn.setFixedWidth(200)
-            link_btn.clicked.connect(lambda checked, u=url: QDesktopServices.openUrl(QUrl(u)))
+            link_btn.clicked.connect(lambda checked, u=url: open_url(u))
             row.addWidget(name_lbl)
             row.addWidget(desc_lbl, 1)
             row.addWidget(link_btn)
@@ -236,7 +237,7 @@ class AboutTab(QWidget):
         self._bmc_btn = QPushButton("☕  Buy me a coffee")
         self._bmc_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._bmc_btn.setFixedHeight(46)
-        self._bmc_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(COFFEE_URL)))
+        self._bmc_btn.clicked.connect(lambda: open_url(COFFEE_URL))
         bmc_row = QHBoxLayout()
         bmc_row.addStretch(); bmc_row.addWidget(self._bmc_btn); bmc_row.addStretch()
         lay.addLayout(bmc_row)
@@ -395,7 +396,7 @@ class AboutTab(QWidget):
         target = get_app_dir() / "licenses" / "THIRD-PARTY-LICENSES.md"
         if not target.exists():
             target = get_app_dir() / "licenses"
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        open_path(target)
 
     # ── Builders / theming ──────────────────────────────────────────────────────
 

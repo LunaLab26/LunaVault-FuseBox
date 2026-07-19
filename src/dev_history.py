@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-07-18 22:59"
+LAST_UPDATED = "2026-07-19 22:10"
 
 
 @dataclass
@@ -25,6 +25,34 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-07-19",
+        title="v1.4.005 — Linux/Steam Deck build fixes: the app now starts on more machines, "
+              "and the links in the About tab work",
+        summary="Testing the packaged Linux build on a Steam Deck turned up two problems, both "
+                "specific to the downloadable build (running from source was never affected). "
+                "First, the app could fail to start at all on a machine whose system libraries "
+                "differed from the one it was built on — it was shipping a low-level system "
+                "library it should have borrowed from the host instead. Second, every clickable "
+                "link in the About tab — Buy me a coffee, the feedback form, the credit links, "
+                "and Open licenses — did nothing when clicked. Both are fixed.",
+        details=[
+            "Fixed: the packaged Linux build could refuse to start on a computer whose system "
+            "libraries were older or newer than the machine it was built on, failing before any "
+            "window appeared. It was bundling a handful of core system libraries (the maths and "
+            "C runtime libraries) that every Linux computer already provides and that must match "
+            "the rest of the system exactly. The build no longer ships those, so the app uses "
+            "each computer's own matching copies — which is what makes it start reliably across "
+            "different machines and Steam Deck updates.",
+            "Fixed: the links in the About tab (Buy me a coffee, the feedback form, the "
+            "open-source credit links, and Open licenses) did nothing when clicked in the "
+            "packaged build. Opening a link hands off to the desktop's own \"open this\" helper, "
+            "but the frozen app was passing it a setting that pointed the helper at the app's "
+            "private libraries instead of the system's, so the helper crashed before the browser "
+            "or file manager ever opened. The app now hands off cleanly, so links and \"reveal in "
+            "folder\" actions open as expected. Running from source was never affected.",
+        ],
+    ),
     HistoryEntry(
         date="2026-07-18",
         title="v1.4.004 — Windows assessment: fixed a real crash on GPU-accelerated Compatible "

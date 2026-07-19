@@ -5,8 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
-from PySide6.QtGui import QIcon, QDesktopServices
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget,
     QWidget, QVBoxLayout, QHBoxLayout, QStatusBar, QLabel,
@@ -26,6 +26,7 @@ from extract_tab import ExtractTab
 from review_tab import ReviewTab
 from log_tab import LogTab
 from about_tab import AboutTab
+from open_external import open_url, open_path
 from library_view import LibraryView
 from add_flow import AddFlow
 from core import catalog as catalog_mod
@@ -34,7 +35,7 @@ import theme
 APP_NAME    = "LunaVault FuseBox"
 # Versioning: v1.4.NNN, incremented by one for every amendment/change (see
 # dev_history.py's running log and LAST_UPDATED stamp).
-APP_VERSION = "1.4.004"
+APP_VERSION = "1.4.005"
 
 
 class _UpdateCheckThread(QThread):
@@ -144,7 +145,7 @@ class MainWindow(QMainWindow):
     def _on_update_found(self, info: dict):
         link = QLabel(f'<a href="{info["url"]}">Update available — {info["latest"]} ↗</a>')
         link.setOpenExternalLinks(False)
-        link.linkActivated.connect(lambda u: QDesktopServices.openUrl(QUrl(u)))
+        link.linkActivated.connect(lambda u: open_url(u))
         self._status.addPermanentWidget(link)
 
     def _on_tab_changed(self, idx: int):
@@ -256,7 +257,7 @@ class MainWindow(QMainWindow):
         pass can recover the single memory to a temp file and play just that."""
         _man, master = self._memory_master(folder)
         if master:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(master)))
+            open_path(master)
 
     def _make_portable(self, folder: str):
         """Write real clip files + album.html so the collection browses on any
