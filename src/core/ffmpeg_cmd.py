@@ -335,6 +335,13 @@ class ConformSpec:
     # bt709-everywhere behaviour for any caller that only sets color_space.
     color_transfer: str = ""
     color_primaries: str = ""
+    # "tv" (limited) matches ordinary camera output. See probe.BaselineSpec's
+    # color_range docstring for why this must be RESCALED (transcode_vf_parts'
+    # in_range/out_range) rather than only tagged (-color_range below) — tagging
+    # alone changes the label, not the pixel values, and a genuine full-range
+    # source forced to a limited-range label without rescaling crushes or blows
+    # out levels.
+    color_range: str = "tv"
     fill: str = "black"           # aspect-mismatch pad fill: "black" | "blur"
     hw_encoder: str = "off"       # "off" | "auto" | "nvenc" | "qsv" | "amf" | "vaapi"
     hw_decode: str = "off"        # "off" | "auto" | "vaapi" — GPU-decode the source (VAAPI only
@@ -419,34 +426,67 @@ def _square_crop_graph(w: int, h: int) -> str:
     return f"crop=ih*{w}/{h}:ih:(iw-ih*{w}/{h})/2:0,scale={w}:{h}:flags=lanczos"
 
 
-def _video_encoder_args(conform: "ConformSpec", ff: str = None) -> list:
+def _is_unsafe_vaapi_main10(codec: str, vendor: "str | None", pix_fmt: str) -> bool:
+    """True for the one hardware-encode combination confirmed to corrupt a
+    stream-copy splice regardless of any available encoder flag: AMD's VAAPI
+    HEVC Main10 (hevc_vaapi + a 10-bit pix_fmt). Standalone output from this
+    encoder is clean; it only breaks once its output is decoded immediately
+    after another segment's frames — exactly what every spliced/concatenated
+    deliverable does. Exhaustively tested against every exposed hevc_vaapi
+    option (qp, GOP/all-intra, AUD, SEI, rate-control mode, B-frames): all
+    still corrupted, including all-intra (rules out reference/DPB handling)
+    and an all-VAAPI concat with byte-identical parameter sets on every
+    segment (rules out a parameter-set mismatch too). Nothing ffmpeg exposes
+    for hevc_vaapi reaches the actual defect — it sits inside the Mesa/
+    radeonsi VAAPI Main10 encode path, not in any command-line flag this app
+    could set. Not scoped to AMD specifically (no reliable per-vendor signal
+    is available here), so this refuses hevc_vaapi Main10 for splice-bound
+    output on any GPU vendor VAAPI resolves to — the software fallback costs
+    seconds to low minutes per clip, not worth trading for an intermittent,
+    per-vendor-unverified splice-only defect."""
+    return (vendor == "vaapi" and (codec or "").lower() in ("hevc", "h265")
+            and "10" in (pix_fmt or ""))
+
+
+def _video_encoder_args(conform: "ConformSpec", ff: str = None, for_concat: bool = True) -> list:
     """Encoder args targeting the baseline codec/pixel-format/colour. Uses a
     GPU encoder (NVENC/QSV/AMF) when `conform.hw_encoder` requests one AND it
     actually probes as working on this machine; otherwise falls back to the
-    software encoder unchanged from before this option existed."""
+    software encoder unchanged from before this option existed.
+
+    `for_concat` (default True — a per-clip conform exists only to join a
+    concat group, so this is the safe default): when true, refuses a VAAPI
+    HEVC Main10 hardware plan (see _is_unsafe_vaapi_main10) and falls through
+    to software libx265 instead, even though the hardware encoder itself
+    reports success and the resulting file is individually clean."""
     cs = conform.color_space or "bt709"
     primaries = getattr(conform, "color_primaries", "") or cs
     trc = getattr(conform, "color_transfer", "") or cs
     codec = (conform.codec or "hevc").lower()
+    color_range = getattr(conform, "color_range", "") or "tv"
 
     quality = getattr(conform, "quality", 18) or 18
     hw_choice = getattr(conform, "hw_encoder", "off") or "off"
     if hw_choice != "off" and ff:
         from core.gpu_encode import detect_best_hw, hw_encode_plan
         vendor = hw_choice if hw_choice != "auto" else detect_best_hw(ff, codec)
-        plan = hw_encode_plan(codec, vendor, conform.pix_fmt, quality)
-        if plan:
-            return plan["encoder_args"] + ["-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
+        if not (for_concat and _is_unsafe_vaapi_main10(codec, vendor, conform.pix_fmt)):
+            plan = hw_encode_plan(codec, vendor, conform.pix_fmt, quality)
+            if plan:
+                return plan["encoder_args"] + ["-colorspace", cs, "-color_primaries", primaries,
+                        "-color_trc", trc, "-color_range", color_range]
 
     args = ["-crf", str(quality), "-preset", "medium", "-pix_fmt", conform.pix_fmt]
     if codec in ("hevc", "h265"):
         return ["-c:v", "libx265"] + args + ["-tag:v", "hvc1",
-                "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
+                "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc,
+                "-color_range", color_range]
     return ["-c:v", "libx264"] + args + [
-        "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc]
+        "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc,
+        "-color_range", color_range]
 
 
-def _resolve_hw_extras(conform: "ConformSpec", ff: str) -> "dict | None":
+def _resolve_hw_extras(conform: "ConformSpec", ff: str, for_concat: bool = True) -> "dict | None":
     """Resolve hardware DECODE and/or ENCODE offload for a transcode command,
     returning the pieces a caller must weave in that a plain trailing encoder-
     args list can't express:
@@ -463,7 +503,11 @@ def _resolve_hw_extras(conform: "ConformSpec", ff: str) -> "dict | None":
         their own via _video_encoder_args; None when encode isn't VAAPI.
     Returns None when neither decode nor encode needs any of this — pure
     software, or a GPU *encoder* like NVENC/QSV/AMF that just swaps -c:v on the
-    bundled binary with no device/upload/hwaccel of its own."""
+    bundled binary with no device/upload/hwaccel of its own.
+
+    `for_concat` (default True, matching _video_encoder_args): refuses a VAAPI
+    HEVC Main10 encode plan (see _is_unsafe_vaapi_main10) so the caller falls
+    back to software instead."""
     if not ff:
         return None
     from core.gpu_encode import (detect_best_hw, hw_encode_plan, hw_pix_fmt,
@@ -479,7 +523,7 @@ def _resolve_hw_extras(conform: "ConformSpec", ff: str) -> "dict | None":
     enc_plan = None
     if enc_choice != "off":
         vendor = enc_choice if enc_choice != "auto" else detect_best_hw(ff, codec)
-        if vendor == "vaapi":
+        if vendor == "vaapi" and not (for_concat and _is_unsafe_vaapi_main10(codec, vendor, conform.pix_fmt)):
             enc_plan = hw_encode_plan(codec, "vaapi", conform.pix_fmt, quality)
 
     # Decode: hardware VAAPI requested and actually available on this machine?
@@ -497,12 +541,39 @@ def _resolve_hw_extras(conform: "ConformSpec", ff: str) -> "dict | None":
     global_args = list(dec_args) if dec_args else []
     if enc_plan:
         global_args += ["-vaapi_device", device]
+    # Same fix build_concat_reencode_cmd's own VAAPI branch already carries
+    # (see its "scale=out_range=tv BEFORE the hwupload suffix" comment): pin
+    # the range explicitly ahead of the hardware upload rather than letting
+    # whatever the software filter chain happened to produce pass through
+    # untouched onto the GPU surface.
+    range_prefix = (f"scale=w=iw:h=ih:in_range=auto:out_range="
+                    f"{_SCALE_RANGE_ALIAS.get((getattr(conform, 'color_range', '') or 'tv').lower(), 'limited')},")
     return {
         "ffmpeg_bin": system_ff,
         "global_args": global_args,
-        "filter_suffix": (f"format={hw_pix_fmt(conform.pix_fmt)},hwupload") if enc_plan else None,
+        "filter_suffix": (range_prefix + f"format={hw_pix_fmt(conform.pix_fmt)},hwupload") if enc_plan else None,
         "encoder_args": enc_plan["encoder_args"] if enc_plan else None,
     }
+
+
+# scale filter's in_range/out_range option uses "full"/"limited" (the -color_range
+# OUTPUT flag uses "pc"/"tv" instead — two different vocabularies for the same two
+# values). See ConformSpec.color_range's docstring for why this must run at all:
+# tagging alone (-color_range) changes the label, not the pixel values.
+_SCALE_RANGE_ALIAS = {"tv": "limited", "pc": "full"}
+
+
+def _range_filter(src_range: str, target_range: str) -> str:
+    """A standalone, resize-free scale step that rescales pixel VALUES from
+    `src_range` to `target_range` (w=iw:h=ih keeps dimensions untouched — this
+    is meant to be chained after any real resize/pad step, or used alone when
+    a clip's only conflict is range). Caller guarantees both are non-empty and
+    differ; ffmpeg's own alias table (tv/pc/full/limited) is not used here
+    directly since the scale filter's in_range/out_range option only recognises
+    full/limited by name, confirmed against the artifact's own working command."""
+    a = _SCALE_RANGE_ALIAS.get(src_range.lower(), src_range.lower())
+    b = _SCALE_RANGE_ALIAS.get(target_range.lower(), target_range.lower())
+    return f"scale=w=iw:h=ih:in_range={a}:out_range={b}"
 
 
 def transcode_vf_parts(clip: ClipInfo, square_mode: str,
@@ -520,7 +591,13 @@ def transcode_vf_parts(clip: ClipInfo, square_mode: str,
     nothing about a proxy's, so scale/pad is applied unconditionally rather
     than gated on conflicts that don't describe this source. A harmless no-op
     when the override's dimensions already happen to match the baseline —
-    ffmpeg's scale filter is a cheap pass-through then."""
+    ffmpeg's scale filter is a cheap pass-through then.
+
+    Does NOT range-rescale in this branch: a proxy's own probed color_range
+    isn't tracked (ClipInfo has no lrv_color_range), so there's no reliable
+    signal to rescale FROM here — same-device proxies overwhelmingly share
+    their parent clip's range in practice, so this is a narrow, deliberate
+    gap rather than a guess."""
     w, h = conform.width, conform.height
     st = clip.stream
     if src_width is not None or src_height is not None:
@@ -542,6 +619,11 @@ def transcode_vf_parts(clip: ClipInfo, square_mode: str,
     # even when the stored resolution already matches the baseline.
     need_scale = any("×" in x for x in conflicts) or rotation in (90, 270)
     need_fps = any("fps" in x for x in conflicts)
+    # `apply_conformance()` only ever appends an "X range" conflict when the
+    # clip's OWN probed range (st.color_range) is both present and genuinely
+    # differs from the baseline — so reaching here with need_range true means
+    # st.color_range is safe to use as in_range below.
+    need_range = any(x.endswith("range") for x in conflicts) and bool(conform.color_range)
     parts = []
     if need_scale:
         if st and st.width == st.height and square_mode == "crop":
@@ -551,6 +633,14 @@ def transcode_vf_parts(clip: ClipInfo, square_mode: str,
         else:
             parts.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
                          f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+    if need_range:
+        # A separate, resize-free scale step rather than folding in_range/
+        # out_range into the resize step above: it applies identically whether
+        # or not need_scale also fired (a range-only mismatch is common — same
+        # resolution/codec/fps, different device), and doesn't require threading
+        # the range args through _square_crop_graph/_blur_pad_graph's own
+        # internal scale calls.
+        parts.append(_range_filter(st.color_range, conform.color_range))
     if need_fps:
         parts.append(f"fps={conform.fps}")
     return parts
@@ -648,7 +738,8 @@ def _override_fill(target: str, slot_codec: str, clip: ClipInfo) -> Optional[tup
 def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
                        plan: OutputPlan, square_mode: str,
                        mix: Optional[MixSpec] = None,
-                       conform: ConformSpec = DEFAULT_CONFORM) -> list:
+                       conform: ConformSpec = DEFAULT_CONFORM,
+                       for_concat: bool = True) -> list:
     """Build one clip's ffmpeg command from a custom OutputPlan.
 
     Produces a uniform audio-track layout: every enabled plan slot is emitted for
@@ -656,6 +747,13 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     files all share the same streams and the final concat is clean regardless of
     clip order. Slow-motion clips fill the primary slot with the pitch-corrected
     stretched WAV; clips with no camera audio fall back to the WAV (or silence).
+
+    `for_concat` (default True — this per-clip temp file exists to join a
+    concat group, which is what this function is FOR) is threaded straight
+    into _resolve_hw_extras/_video_encoder_args: it refuses a VAAPI HEVC
+    Main10 hardware encode plan for this clip and falls back to software
+    libx265 instead. Pass False only for a genuinely standalone conform that
+    will never be concatenated with anything else.
     """
     is_conform = clip.effective_status() == "ok"
     has_wav    = clip.has_wav()
@@ -666,7 +764,7 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
 
     # Only a transcoding (non-conform) clip ever touches an encoder at all —
     # an "ok" clip stream-copies (-c:v copy below) regardless of hw_encoder.
-    hw_extras = None if is_conform else _resolve_hw_extras(conform, ff)
+    hw_extras = None if is_conform else _resolve_hw_extras(conform, ff, for_concat=for_concat)
 
     # "Use the LRV proxy instead" (per-clip override): conform the low-res
     # proxy into the baseline in place of this clip's own footage, on its own
@@ -786,7 +884,7 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         else:
             if not uses_fc_video and vf_parts:
                 cmd += ["-vf", ",".join(vf_parts)]
-            cmd += _video_encoder_args(conform, ff)
+            cmd += _video_encoder_args(conform, ff, for_concat=for_concat)
     for i, (kind, fill, codec, title) in enumerate(fills):
         if fill == "copy":
             cmd += [f"-c:a:{i}", "copy"]
@@ -875,6 +973,103 @@ def build_concat_cmd(ff: str, concat_file: Path, chapters_file: Path,
     return cmd
 
 
+# ── MPEG-TS round-trip for stream-copy concatenation ─────────────────────────
+# Root cause this fixes: an MP4 track stores exactly ONE set of HEVC/H.264
+# parameter sets (VPS/SPS/PPS) per track. build_concat_cmd's plain -c copy
+# concat keeps only the FIRST segment's — a stream-copied camera-native clip
+# and a libx265-transcoded clip can differ in parameter sets (reference frame
+# counts, GOP/B-frame structure, tier details) even when every user-visible
+# property (resolution/fps/pix_fmt/color_space) matches, none of which shows
+# up in ffprobe's summary view. Once a decoder desyncs against the wrong
+# parameter set at a later segment's boundary, it typically never recovers
+# for the rest of the file — confirmed directly: a real master played fine
+# locally (players are often forgiving of a malformed bitstream) but
+# corrupted at the exact splice point once re-transcoded by a stricter
+# decoder (YouTube's ingest pipeline).
+#
+# MPEG-TS carries parameter sets IN-BAND, per segment, instead of once per
+# track — routing each segment through TS before the final concat forces
+# every segment to carry its own correct parameter sets all the way through,
+# still pure stream-copy, no re-encode. Verified on a real 39-minute mixed-
+# encoder master: 3,281 decoder errors via a direct MP4 concat → 0 via this
+# TS round-trip.
+_ANNEXB_BSF = {"hevc": "hevc_mp4toannexb", "h265": "hevc_mp4toannexb",
+              "h264": "h264_mp4toannexb"}
+
+
+def build_ts_remux_cmd(ff: str, segment: Path, out_ts: Path, codec: str) -> list:
+    """Step 1 of the TS round-trip: stream-copy one per-clip temp file into an
+    MPEG-TS container, converting HEVC/H.264 from MP4's length-prefixed NAL
+    format to the Annex-B start-code format TS requires (`_ANNEXB_BSF`) — not
+    optional, TS won't carry length-prefixed NALs correctly. A codec with no
+    known Annex-B filter (`_ANNEXB_BSF.get` returns None) still remuxes to TS
+    without the bitstream filter rather than failing outright — the parameter-
+    set fix doesn't apply to it, but neither does skipping the filter break
+    anything. `-map 0:v -map 0:a?` mirrors build_concat_cmd's own explicit
+    maps (never a blanket `-map 0` — a camera clip's bin_data/telemetry track
+    would otherwise ride along and the TS muxer would choke on it same as the
+    MOV muxer does)."""
+    cmd = [ff, "-y", "-v", "error", "-i", str(segment),
+           "-map", "0:v", "-map", "0:a?", "-c", "copy"]
+    bsf = _ANNEXB_BSF.get((codec or "").lower())
+    if bsf:
+        cmd += ["-bsf:v", bsf]
+    cmd += ["-f", "mpegts", str(out_ts)]
+    return cmd
+
+
+def build_ts_remux_progress_cmd(ff: str, segment: Path, out_ts: Path, codec: str,
+                                progress_file: Path) -> list:
+    """Same as build_ts_remux_cmd, with `-progress` wired in for callers that
+    poll it per-clip the same way build_mux_cmd_plan's own output does (see
+    ffmpeg_runner.py's `_run_clip_proc`)."""
+    cmd = [ff, "-y", "-i", str(segment), "-map", "0:v", "-map", "0:a?", "-c", "copy"]
+    bsf = _ANNEXB_BSF.get((codec or "").lower())
+    if bsf:
+        cmd += ["-bsf:v", bsf]
+    cmd += ["-f", "mpegts", "-progress", str(progress_file), "-nostats", str(out_ts)]
+    return cmd
+
+
+def build_ts_concat_cmd(ff: str, ts_segments: list, chapters_file: Path,
+                        output: Path, progress_file: Path,
+                        extra_out_args: Optional[list] = None,
+                        tag_v: str = "hvc1") -> list:
+    """Step 2: join the per-segment .ts files via ffmpeg's `concat:` protocol
+    (not the `-f concat` demuxer — a different mechanism, string-joining the
+    inputs rather than reading a list file) and remux straight to the final
+    MP4/MOV output — still `-c copy`, no re-encode. `-tag:v` restores the
+    proper MP4 codec tag (`hvc1` for HEVC, `avc1` for H.264) since raw TS
+    carries no such tag and ffmpeg's own default can pick the wrong one;
+    `+faststart` moves the moov atom forward for progressive playback. Keeps
+    the exact same `-i chapters_file -map_metadata 1` shape build_concat_cmd
+    uses (the `concat:` protocol is just another virtual input, so chapters
+    embedding is unaffected), and the same explicit v/a maps for the same
+    bin_data reason."""
+    concat_arg = "concat:" + "|".join(str(p) for p in ts_segments)
+    cmd = [ff, "-y",
+           "-i", concat_arg,
+           "-i", str(chapters_file),
+           "-map_metadata", "1", "-map", "0:v", "-map", "0:a?", "-c", "copy",
+           "-tag:v", tag_v, "-movflags", "+faststart",
+           "-progress", str(progress_file), "-nostats"]
+    if extra_out_args:
+        cmd += list(extra_out_args)
+    cmd += [str(output)]
+    return cmd
+
+
+def build_ts_archival_concat_cmd(ff: str, ts_segments: list, output: Path,
+                                 tag_v: str = "hvc1") -> list:
+    """Archival-track counterpart of build_ts_concat_cmd — same TS round-trip,
+    no chapters (matches build_archival_concat_cmd, which this replaces for a
+    multi-clip archival group)."""
+    concat_arg = "concat:" + "|".join(str(p) for p in ts_segments)
+    return [ff, "-y", "-v", "error", "-i", concat_arg,
+            "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+            "-tag:v", tag_v, str(output)]
+
+
 # ProRes profile numbers for prores_ks's -profile:v, keyed by the Compatible-
 # playback-master UI's own quality names.
 PRORES_PROFILES = {"proxy": 0, "standard": 2, "hq": 3}
@@ -884,7 +1079,8 @@ def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
                               output: Path, progress_file: Path,
                               crf: int = 20, extra_out_args: Optional[list] = None,
                               codec: str = "h264", prores_profile: str = "hq",
-                              hw_encoder: str = "off", hw_decode: str = "off") -> list:
+                              hw_encoder: str = "off", hw_decode: str = "off",
+                              color_range: str = "tv") -> list:
     """Concatenate the per-clip temp files but RE-ENCODE the video into ONE clean,
     continuous, widely-compatible stream — the fix for the broken-splice playback
     a stream-copy concat produces.
@@ -929,6 +1125,23 @@ def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
     segments, so it's usually the single most expensive step in a
     "Compatible playback master" merge — worth accelerating even though the
     per-clip conform path already is.
+
+    `color_range` (default "tv"): the concat DEMUXER'S segments are not
+    range-uniform even when this whole pass re-encodes them into one stream -
+    a stream-copied ("ok"-conform) clip keeps its camera's own decoded range
+    (a genuine full-range phone source, say), while a transcoded clip's
+    segment carries whatever _video_encoder_args wrote. Previously only the
+    VAAPI branch below pinned this explicitly (-reinit_filter 0 +
+    scale=out_range=tv, added for an unrelated hwupload-reinit crash); the
+    far more common software/ProRes branches had no equivalent at all, so
+    their output range was whatever ffmpeg's implicit per-segment filter
+    renegotiation happened to produce - confirmed as a real splice-boundary
+    corruption source (green fill + noise for the first few frames after a
+    cut), invisible to both ffprobe's summary view and a silent decode-test.
+    in_range=auto (not a fixed source value) is deliberate here: unlike a
+    single per-clip conform, this ONE pass decodes many different segments in
+    turn, each potentially carrying its own real range - auto detects each
+    frame's own flagged range and rescales it to the fixed out_range.
     """
     hw_plan = None
     if codec != "prores" and hw_encoder and hw_encoder != "off":
@@ -997,13 +1210,19 @@ def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
            # BOTH software and hardware encode. See build_concat_cmd / the
            # archival concat, which map v+a explicitly for the same reason.
            "-map_metadata", "1", "-map", "0:v", "-map", "0:a?"]
+    range_alias = _SCALE_RANGE_ALIAS.get((color_range or "tv").lower(), "limited")
     if codec == "prores":
         profile_num = PRORES_PROFILES.get(prores_profile, PRORES_PROFILES["hq"])
-        cmd += ["-c:v", "prores_ks", "-profile:v", str(profile_num),
+        # Same range renegotiation problem as the software branch below (this
+        # concat's segments are not range-uniform) — pin it explicitly here too
+        # rather than leaving it to whatever ffmpeg's implicit per-segment
+        # reinit produces.
+        cmd += ["-vf", f"scale=w=iw:h=ih:in_range=auto:out_range={range_alias}",
+               "-c:v", "prores_ks", "-profile:v", str(profile_num),
                "-vendor", "apl0", "-pix_fmt", "yuv422p10le"]
     elif hw_plan:
         if hw_plan.get("filter_suffix"):
-            # scale=out_range=tv BEFORE the hwupload suffix: with
+            # scale=out_range=<target> BEFORE the hwupload suffix: with
             # -reinit_filter 0 (above), every segment's frames are converted
             # to whatever format the graph negotiated on the FIRST segment —
             # left implicit, a full-range first segment makes the whole
@@ -1011,15 +1230,22 @@ def build_concat_reencode_cmd(ff: str, concat_file: Path, chapters_file: Path,
             # software path, measured directly) inside a tv-tagged stream.
             # Forcing limited range in the chain pins the negotiation to the
             # same range the software path produces, segment order be damned;
-            # -color_range tv below tags the output to match. Verified: luma
+            # -color_range below tags the output to match. Verified: luma
             # stats agree with the libx264 reference to within 0.05 at both
             # segment halves of a mixed-range concat.
-            cmd += ["-vf", "scale=out_range=tv," + hw_plan["filter_suffix"]]
-        cmd += hw_plan["encoder_args"] + ["-color_range", "tv"]
+            cmd += ["-vf", f"scale=out_range={range_alias}," + hw_plan["filter_suffix"]]
+        else:
+            # NVENC/QSV/AMF: no hwupload filter step to prefix onto (they take
+            # plain software frames directly), but the same per-segment range
+            # renegotiation problem still applies — pin it the same way.
+            cmd += ["-vf", f"scale=w=iw:h=ih:in_range=auto:out_range={range_alias}"]
+        cmd += hw_plan["encoder_args"]
     else:
-        cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+        cmd += ["-vf", f"scale=w=iw:h=ih:in_range=auto:out_range={range_alias}",
+               "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
                "-pix_fmt", "yuv420p", "-profile:v", "high"]
     cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+           "-color_range", (color_range or "tv"),
            "-c:a", "copy",
            "-movflags", "+faststart",
            "-progress", str(progress_file), "-nostats"]

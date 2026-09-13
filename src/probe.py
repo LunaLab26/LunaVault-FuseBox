@@ -55,6 +55,17 @@ class BaselineSpec:
     fps_float: float = TARGET_FPS_FLOAT
     pix_fmt: str = "yuv420p10le"
     color_space: str = "bt709"
+    # "tv" (limited, 16-235) matches ordinary camera output; a genuine full-range
+    # source (phone cameras commonly probe as yuvj420p/"pc" — see
+    # PIX_FMT_LABELS) needs its PIXELS rescaled, not just relabeled, before it
+    # can share a track with limited-range footage. See apply_conformance() and
+    # core.ffmpeg_cmd.transcode_vf_parts() for why: two clips matching on every
+    # other field but this one used to both classify "ok" (stream-copy) and
+    # land, unrescaled, on the same concat track — confirmed as a real splice-
+    # boundary corruption source (green fill + noise at the first few frames
+    # after the cut), invisible to ffprobe's summary view and to a silent
+    # decode-test alike.
+    color_range: str = "tv"
 
 
 DEFAULT_BASELINE = BaselineSpec()
@@ -111,6 +122,7 @@ class StreamInfo:
     color_space: str = ""
     color_transfer: str = ""
     color_primaries: str = ""
+    color_range: str = ""      # "tv" (limited) | "pc" (full) | "" (unreported)
     audio_codec: str = ""
     audio_sample_rate: int = 0
     audio_channels: int = 0
@@ -262,6 +274,13 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
             info.color_space   = s.get("color_space", "")
             info.color_transfer = s.get("color_transfer", "")
             info.color_primaries = s.get("color_primaries", "")
+            # "unknown" is ffprobe's own value when a container doesn't carry
+            # range at all — normalise it to "" so `apply_conformance()`'s
+            # comparison below treats "no data" the same as "no data", rather
+            # than a probe-side string literal that happens to differ from a
+            # baseline's real "tv"/"pc" value.
+            raw_range = s.get("color_range", "")
+            info.color_range = "" if raw_range in ("", "unknown") else raw_range
             # r_frame_rate is the clean, stable nominal rate; avg_frame_rate is the
             # measured average and drifts slightly per clip. Detect VFR from a large
             # r-vs-avg gap, then pick the nominal rate (see _nominal_fps) — using r
@@ -330,6 +349,16 @@ def apply_conformance(info: StreamInfo, baseline: "BaselineSpec" = DEFAULT_BASEL
     if (info.color_space and baseline.color_space
             and info.color_space.lower() not in (baseline.color_space.lower(), "unknown", "")):
         conflicts.append(info.color_space)
+    # Full vs. limited range: NOT visible in ffprobe's summary view (color_space/
+    # transfer/primaries can all match while this differs), and a plain -c copy
+    # concat bakes both ranges into the same track unrescaled — confirmed as a
+    # real splice-boundary corruption source (see BaselineSpec.color_range's
+    # docstring). Only compare when the clip actually reports a range — an
+    # unreported range isn't a real mismatch, just missing metadata, and forcing
+    # a conform over it would be a false positive on otherwise-fine footage.
+    if (info.color_range and baseline.color_range
+            and info.color_range.lower() != baseline.color_range.lower()):
+        conflicts.append(f"{info.color_range} range")
     # A rotated clip (270°/180°/90°) can numerically match the baseline's own
     # codec/resolution/fps/pix_fmt while still needing its picture corrected —
     # and a plain stream-copy into a shared concat track does NOT reliably

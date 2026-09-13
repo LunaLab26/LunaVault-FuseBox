@@ -567,3 +567,90 @@ def write_verify_log(path: Path, master_name: str, results: list):
                 lines.append(f"           diagnosis: {c.diagnosis}")
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# ── Splice integrity — full decode-test + per-boundary frame check ─────────
+# Everything above proves a RECOVERED clip matches its original. This checks
+# the finished, PLAYABLE master itself for splice-boundary corruption — the
+# class of bug the MPEG-TS concat fix (core.ffmpeg_cmd.build_ts_concat_cmd)
+# addresses. A clean decode-test is necessary but NOT sufficient: on one
+# investigated pipeline, a genuinely corrupted splice produced zero decoder
+# log output even at -v warning — only looking at the actual frames caught
+# it. So this always does both: a full LINEAR decode (never a windowed
+# sample — a per-clip/windowed decode-test can pass clean while a splice
+# further into the file is still broken) and a frame dump at every chapter
+# boundary for a human to look at directly.
+
+def build_full_decode_test_cmd(ff: str, path: str) -> list:
+    """Decode the WHOLE file start to finish, not a sample window — see this
+    section's module comment for why a sample isn't enough here. Same
+    err_detect flags as core.diagnostics.build_decode_scan_cmd (that module's
+    per-clip pre-flight version of this same idea)."""
+    return [ff, "-v", "warning", "-err_detect", "+crccheck+bitstream+buffer",
+           "-i", str(path), "-map", "0:v:0", "-f", "null", "-"]
+
+
+def run_full_decode_test(ff: str, path: str, **kwargs) -> "tuple[int, str]":
+    """Runs build_full_decode_test_cmd and returns (error_line_count,
+    first-20-lines-of-stderr). 0 is necessary but not sufficient — pair with
+    a splice frame check (build_splice_frame_cmd) before trusting a master."""
+    proc = subprocess.run(build_full_decode_test_cmd(ff, path),
+                          capture_output=True, text=True, **kwargs)
+    lines = [ln for ln in (proc.stderr or "").splitlines() if ln.strip()]
+    return len(lines), "\n".join(lines[:20])
+
+
+def build_splice_frame_cmd(ff: str, path: str, frame_n: int, out_dir: Path,
+                           window: int = 5) -> list:
+    """Dump the frames around ONE splice boundary as JPEGs. Deliberately NO
+    `-ss` before `-i`: seeking can reach the splice via a different decode
+    code path than real playback does — confirmed directly as the reason a
+    seek-based version of this check missed corruption a full linear decode
+    caught. `frame_n` is the boundary's frame number (secs * fps, rounded);
+    `window` frames are dumped on each side."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lo, hi = max(0, frame_n - window), frame_n + window
+    return [ff, "-v", "error", "-i", str(path),
+           "-vf", f"select='between(n\\,{lo}\\,{hi})'", "-vsync", "0",
+           str(out_dir / f"splice_{frame_n:06d}_%03d.jpg")]
+
+
+@dataclass
+class SpliceCheckResult:
+    passed: bool
+    decode_error_count: int = 0
+    decode_error_detail: str = ""
+    boundaries_checked: int = 0
+    boundary_frames_dir: str = ""
+    detail: str = ""
+
+
+def verify_master_splice_integrity(ff: str, master_path: str,
+                                   chapter_boundary_secs: list, fps: float,
+                                   out_dir: Path, frame_window: int = 5,
+                                   **kwargs) -> SpliceCheckResult:
+    """Run both checks this section's module comment describes against the
+    finished master: a full linear decode-test, and a frame dump at every
+    concat splice (`chapter_boundary_secs` — the finished master's own
+    chapter starts, one per clip after the first; the very first clip has no
+    preceding splice to check). `passed` reflects the decode-test only — no
+    reliable pass/fail signature exists for the frame images themselves
+    (confirmed directly: flat-noise corruption compresses LARGER than clean
+    footage, ruling out a file-size heuristic in either direction), so
+    `boundary_frames_dir` is surfaced for a human — or a future Review-tab
+    viewer — to actually look at rather than judged automatically here."""
+    n_errs, err_detail = run_full_decode_test(ff, master_path, **kwargs)
+    frames_dir = Path(out_dir) / "splice_frames"
+    for secs in chapter_boundary_secs:
+        frame_n = max(0, int(round(secs * fps)))
+        subprocess.run(build_splice_frame_cmd(ff, master_path, frame_n, frames_dir, frame_window),
+                      capture_output=True, text=True, **kwargs)
+    detail = (f"{n_errs} decode error line(s) over a full linear decode of the master."
+             if n_errs else "Full linear decode of the master: 0 errors.")
+    detail += (f" Frames saved for {len(chapter_boundary_secs)} splice boundary(ies) "
+              f"under {frames_dir} — a clean decode-test alone is not proof; look at them.")
+    return SpliceCheckResult(passed=(n_errs == 0), decode_error_count=n_errs,
+                             decode_error_detail=err_detail,
+                             boundaries_checked=len(chapter_boundary_secs),
+                             boundary_frames_dir=str(frames_dir), detail=detail)

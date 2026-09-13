@@ -18,7 +18,9 @@ from core.ffmpeg_cmd import (
     build_archival_concat_cmd, build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
     build_lrv_archival_mux_cmd,
     transcode_vf_parts, ConformSpec, _video_encoder_args, build_clip_sample_cmd,
-    _override_fill,
+    _override_fill, _resolve_hw_extras, _is_unsafe_vaapi_main10, _range_filter,
+    build_ts_remux_cmd, build_ts_remux_progress_cmd, build_ts_concat_cmd,
+    build_ts_archival_concat_cmd,
 )
 
 PF = Path("progress.txt")
@@ -81,10 +83,105 @@ def test_transcode_vf_parts_no_override_unaffected():
     assert transcode_vf_parts(clip, "pad") == []
 
 
+# ── Color-range rescale (artifact §06A: tag alone is not enough) ────────────
+
+def test_range_filter_maps_tv_pc_to_ffmpeg_scale_vocabulary():
+    # The scale filter's in_range/out_range option only recognises full/limited
+    # by name — "tv"/"pc" is the OUTPUT (-color_range) flag's vocabulary, a
+    # different one for the same two values.
+    assert _range_filter("pc", "tv") == "scale=w=iw:h=ih:in_range=full:out_range=limited"
+    assert _range_filter("tv", "pc") == "scale=w=iw:h=ih:in_range=limited:out_range=full"
+
+
+def test_transcode_vf_parts_range_only_mismatch_adds_bare_range_filter():
+    # Same resolution/fps as baseline — the ONLY conflict is range. Must still
+    # get a range-rescale step even though no resize/pad is needed at all.
+    clip = _clip(["pc range"], w=3840, h=2160)
+    clip.stream.color_range = "pc"
+    parts = transcode_vf_parts(clip, "pad", ConformSpec(color_range="tv"))
+    assert parts == ["scale=w=iw:h=ih:in_range=full:out_range=limited"]
+
+
+def test_transcode_vf_parts_range_and_resize_both_needed():
+    # A clip needing BOTH a resize and a range conversion gets both steps —
+    # the range step doesn't replace or get swallowed by the resize step.
+    clip = _clip(["1280×960", "pc range"], w=1280, h=960)
+    clip.stream.color_range = "pc"
+    parts = transcode_vf_parts(clip, "pad", ConformSpec(color_range="tv"))
+    assert any("force_original_aspect_ratio=decrease" in p for p in parts)
+    assert "scale=w=iw:h=ih:in_range=full:out_range=limited" in parts
+
+
+def test_transcode_vf_parts_matching_range_adds_no_range_filter():
+    clip = _clip([], w=3840, h=2160)
+    clip.stream.color_range = "tv"
+    parts = transcode_vf_parts(clip, "pad", ConformSpec(color_range="tv"))
+    assert parts == []
+
+
 def test_encoder_args_switch_codec():
     assert "libx265" in _video_encoder_args(ConformSpec(codec="hevc"))
     h264 = _video_encoder_args(ConformSpec(codec="h264", pix_fmt="yuv420p"))
     assert "libx264" in h264 and "hvc1" not in h264 and "yuv420p" in h264
+
+
+def test_encoder_args_tags_color_range():
+    # Previously absent entirely — see the artifact's §06A: two clips could
+    # "match" on every OTHER tracked field yet differ in range, and a plain
+    # tag (without this) never got written on the conform output either.
+    args = _video_encoder_args(ConformSpec(codec="hevc", color_range="tv"))
+    assert "-color_range" in args and args[args.index("-color_range") + 1] == "tv"
+
+
+# ── Splice-safe hardware encoding (artifact §06B/§07: hevc_vaapi Main10) ────
+
+def test_is_unsafe_vaapi_main10_flags_only_the_exact_combination():
+    assert _is_unsafe_vaapi_main10("hevc", "vaapi", "yuv420p10le") is True
+    assert _is_unsafe_vaapi_main10("hevc", "vaapi", "yuv420p") is False   # 8-bit — fine
+    assert _is_unsafe_vaapi_main10("h264", "vaapi", "yuv420p10le") is False  # not HEVC
+    assert _is_unsafe_vaapi_main10("hevc", "nvenc", "yuv420p10le") is False  # not vaapi
+
+
+def test_video_encoder_args_refuses_vaapi_main10_when_for_concat():
+    import core.gpu_encode as ge
+    real_plan_fn = ge.hw_encode_plan
+
+    def fake_plan(codec, vendor, pix_fmt, quality=18):
+        return {"ffmpeg_bin": None, "global_args": [], "filter_suffix": None,
+               "encoder_args": ["-c:v", "hevc_vaapi", "-qp", str(quality)]}
+    ge.hw_encode_plan = fake_plan
+    try:
+        conform = ConformSpec(codec="hevc", pix_fmt="yuv420p10le", hw_encoder="vaapi")
+        concat_args = _video_encoder_args(conform, "ffmpeg", for_concat=True)
+        standalone_args = _video_encoder_args(conform, "ffmpeg", for_concat=False)
+    finally:
+        ge.hw_encode_plan = real_plan_fn
+
+    assert "libx265" in concat_args and "hevc_vaapi" not in concat_args
+    assert "hevc_vaapi" in standalone_args   # unaffected — genuinely standalone output
+
+
+def test_resolve_hw_extras_refuses_vaapi_main10_when_for_concat():
+    import core.gpu_encode as ge
+    real_detect, real_plan, real_ff, real_dev = (
+        ge.detect_best_hw, ge.hw_encode_plan, ge.system_vaapi_ffmpeg, ge.vaapi_render_device)
+    ge.detect_best_hw = lambda ff, codec: "vaapi"
+    ge.hw_encode_plan = lambda codec, vendor, pix_fmt, quality=18: (
+        {"ffmpeg_bin": "/usr/bin/ffmpeg", "global_args": ["-vaapi_device", "/dev/dri/renderD128"],
+         "filter_suffix": "format=p010le,hwupload", "encoder_args": ["-c:v", "hevc_vaapi"]}
+        if vendor == "vaapi" else None)
+    ge.system_vaapi_ffmpeg = lambda: "/usr/bin/ffmpeg"
+    ge.vaapi_render_device = lambda: "/dev/dri/renderD128"
+    try:
+        conform = ConformSpec(codec="hevc", pix_fmt="yuv420p10le", hw_encoder="auto")
+        concat_extras = _resolve_hw_extras(conform, "ffmpeg_bundled", for_concat=True)
+        standalone_extras = _resolve_hw_extras(conform, "ffmpeg_bundled", for_concat=False)
+    finally:
+        (ge.detect_best_hw, ge.hw_encode_plan, ge.system_vaapi_ffmpeg,
+         ge.vaapi_render_device) = (real_detect, real_plan, real_ff, real_dev)
+
+    assert concat_extras is None   # no encode AND no decode requested → nothing to weave in
+    assert standalone_extras is not None and standalone_extras["encoder_args"] == ["-c:v", "hevc_vaapi"]
 
 
 def test_encoder_args_bt709_default_uses_same_value_for_all_three_color_args():
@@ -382,10 +479,12 @@ def test_concat_reencode_cmd_vaapi_swaps_binary_adds_device_and_hwupload():
     s = " ".join(cmd)
     assert "h264_vaapi" in s and "-qp 20" in s
     assert "libx264" not in s
-    # scale=out_range=tv pins the no-reinit graph's negotiated range to the
-    # same limited range the software path produces (else a full-range first
-    # segment skews the entire output), and the output is tagged to match.
-    assert "-vf scale=out_range=tv,format=nv12,hwupload" in s
+    # scale=out_range=limited pins the no-reinit graph's negotiated range to
+    # the same limited range the software path produces (else a full-range
+    # first segment skews the entire output), and the output is tagged to
+    # match ("limited" is the scale filter's own vocabulary for what
+    # -color_range tv means as an output tag — see _SCALE_RANGE_ALIAS).
+    assert "-vf scale=out_range=limited,format=nv12,hwupload" in s
 
 
 def test_concat_reencode_cmd_non_vaapi_vendors_keep_bundled_binary():
@@ -1231,6 +1330,122 @@ def _integration_wav_overrun_is_trimmed() -> bool:
     print(f"  real per-clip mux: {wav_secs:.0f}s WAV correctly trimmed to "
          f"{video_secs:.0f}s video duration (got {got:.3f}s) — OK")
     return True
+
+
+# ── MPEG-TS round-trip concat (artifact §03: parameter-set loss fix) ────────
+
+def test_ts_remux_cmd_hevc_uses_annexb_bsf_and_mpegts_container():
+    cmd = build_ts_remux_cmd("ffmpeg", Path("clip_01.mov"), Path("clip_01.ts"), "hevc")
+    s = " ".join(str(x) for x in cmd)
+    assert "-bsf:v hevc_mp4toannexb" in s
+    assert "-f mpegts" in s and cmd[-1] == "clip_01.ts"
+    assert "-c" in cmd and "copy" in cmd
+    # Explicit v/a maps, never a blanket -map 0 — see build_concat_cmd's own
+    # docstring for the bin_data/telemetry-track muxer crash this avoids.
+    assert "-map" in cmd and "0:v" in cmd and "0:a?" in cmd
+
+
+def test_ts_remux_cmd_h264_uses_h264_annexb_bsf():
+    cmd = build_ts_remux_cmd("ffmpeg", Path("c.mov"), Path("c.ts"), "h264")
+    assert "-bsf:v" in cmd and cmd[cmd.index("-bsf:v") + 1] == "h264_mp4toannexb"
+
+
+def test_ts_remux_cmd_unknown_codec_skips_bsf_but_still_remuxes():
+    cmd = build_ts_remux_cmd("ffmpeg", Path("c.mov"), Path("c.ts"), "vp9")
+    assert "-bsf:v" not in cmd
+    assert "-f" in cmd and "mpegts" in cmd
+
+
+def test_ts_remux_progress_cmd_adds_progress_file():
+    cmd = build_ts_remux_progress_cmd("ffmpeg", Path("c.mov"), Path("c.ts"), "hevc", Path("p.txt"))
+    assert "-progress" in cmd and cmd[cmd.index("-progress") + 1] == "p.txt"
+
+
+def test_ts_concat_cmd_uses_concat_protocol_not_demuxer():
+    cmd = build_ts_concat_cmd("ffmpeg", [Path("a.ts"), Path("b.ts"), Path("c.ts")],
+                              Path("ch.txt"), Path("out.mov"), Path("p.txt"))
+    i = cmd.index("-i")
+    assert cmd[i + 1] == "concat:a.ts|b.ts|c.ts"
+    assert "-f" not in cmd[:i]           # NOT the -f concat demuxer
+    assert "-safe" not in cmd
+    # Chapters still attached the same way build_concat_cmd does.
+    assert "-map_metadata" in cmd and "1" in cmd
+    assert cmd[-1] == "out.mov"
+
+
+def test_ts_concat_cmd_tags_and_faststart():
+    cmd = build_ts_concat_cmd("ffmpeg", [Path("a.ts")], Path("ch.txt"), Path("out.mov"),
+                              Path("p.txt"), tag_v="avc1")
+    s = " ".join(str(x) for x in cmd)
+    assert "-tag:v avc1" in s
+    assert "-movflags +faststart" in s
+    assert "-c copy" in s
+
+
+def test_ts_concat_cmd_appends_extra_out_args_before_output():
+    cmd = build_ts_concat_cmd("ffmpeg", [Path("a.ts")], Path("ch.txt"), Path("out.mov"),
+                              Path("p.txt"), extra_out_args=["-metadata", "k=v"])
+    assert cmd[-1] == "out.mov"
+    assert cmd[-3:-1] == ["-metadata", "k=v"]
+
+
+def test_ts_archival_concat_cmd_no_chapters_maps_first_streams_only():
+    cmd = build_ts_archival_concat_cmd("ffmpeg", [Path("a.ts"), Path("b.ts")], Path("arch.mov"))
+    s = " ".join(str(x) for x in cmd)
+    assert "concat:a.ts|b.ts" in s
+    assert "0:v:0" in cmd and "0:a:0?" in cmd
+    assert cmd.count("-i") == 1   # no second (chapters) input, unlike build_ts_concat_cmd
+
+
+def test_ts_remux_and_concat_round_trip_real_mixed_encoder_footage():
+    """Real ffmpeg integration: build two segments with genuinely different
+    HEVC parameter sets (camera-shaped libx265 defaults vs. a deliberately
+    different GOP/tune), stream-copy concat them directly (the OLD path) vs.
+    via the TS round-trip (the fix), and confirm the fix's output decodes
+    clean while at least demonstrating the round-trip completes and produces
+    a playable file — the definitive corruption repro needs a real camera
+    file's actual encoder, which isn't available in a synthetic unit test,
+    so this checks the mechanism runs correctly end-to-end rather than
+    re-proving the artifact's own before/after numbers."""
+    import subprocess as sp
+    import tempfile
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    if not Path(ff).exists():
+        print("  (skipped integration: ffmpeg not found)")
+        return
+    d = Path(tempfile.mkdtemp())
+    seg_a = d / "a.mov"
+    seg_b = d / "b.mov"
+    # Two segments, deliberately different libx265 tunes/GOP so their SPS/PPS
+    # genuinely differ, mirroring "camera encoder" vs. "this app's own conform".
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30:duration=1",
+           "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "keyint=15",
+           "-pix_fmt", "yuv420p", "-tag:v", "hvc1", str(seg_a)], check=True)
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=1",
+           "-c:v", "libx265", "-preset", "medium", "-x265-params", "keyint=60:bframes=4",
+           "-pix_fmt", "yuv420p", "-tag:v", "hvc1", str(seg_b)], check=True)
+
+    ts_a, ts_b = d / "a.ts", d / "b.ts"
+    sp.run(build_ts_remux_cmd(ff, seg_a, ts_a, "hevc"), check=True)
+    sp.run(build_ts_remux_cmd(ff, seg_b, ts_b, "hevc"), check=True)
+    out = d / "joined.mov"
+    chapters = d / "ch.txt"
+    chapters.write_text(";FFMETADATA1\n")
+    sp.run(build_ts_concat_cmd(ff, [ts_a, ts_b], chapters, out, d / "p.txt"), check=True)
+    assert out.exists() and out.stat().st_size > 0
+
+    decode = sp.run([fp, "-v", "error", "-i", str(out), "-show_entries",
+                     "format=duration", "-of", "default=nw=1:nk=1"],
+                    capture_output=True, text=True)
+    got_dur = float(decode.stdout.strip() or 0)
+    assert abs(got_dur - 2.0) < 0.2, f"expected ~2s joined duration, got {got_dur}"
+
+    from core.verify import run_full_decode_test
+    n_errs, detail = run_full_decode_test(ff, str(out))
+    assert n_errs == 0, f"TS-routed join produced decode errors: {detail}"
+    print("  real TS round-trip: two differently-encoded HEVC segments joined "
+         "and decode clean end-to-end — OK")
 
 
 if __name__ == "__main__":

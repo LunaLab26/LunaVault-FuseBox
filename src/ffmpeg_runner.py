@@ -30,11 +30,12 @@ from core.eta import ConservativeEta
 from core.sync_advanced import analyze_sync
 from core.ffmpeg_cmd import (
     hms_to_seconds, MixSpec, OutputPlan, SLOWMO_RATIO,
-    build_mux_cmd, build_mux_cmd_plan, build_concat_cmd, build_concat_reencode_cmd,
+    build_mux_cmd, build_mux_cmd_plan, build_concat_reencode_cmd,
     build_whatsapp_cmd,
     build_preview_cmd, build_thumbnail_cmd,
-    build_archival_concat_cmd, build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
+    build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
     build_lrv_archival_mux_cmd,
+    build_ts_remux_progress_cmd, build_ts_concat_cmd, build_ts_archival_concat_cmd,
     ConformSpec, DEFAULT_CONFORM,
 )
 from core.extract import (build_recovery_plan, build_recover_clip_cmd,
@@ -48,6 +49,7 @@ from core.verify import (
     build_decoded_video_md5_cmd, build_decoded_audio_md5_cmd, decoded_md5,
     predict_unverifiable, _PREDICTED_PREFIX,
     quick_video_rounding_check, quick_wav_rounding_check,
+    verify_master_splice_integrity,
     clip_has_audio_priming_gap,
 )
 
@@ -443,13 +445,28 @@ class MergeWorker(QThread):
                 archival_files.append(Path(pairs[0][0].path))
                 entries_in_group[0].recovery_fidelity = "byte-exact"
             else:
-                lst = temp_dir / f"arch_list_{gi}.txt"
-                with open(lst, "w", encoding="utf-8") as f:
-                    for clip, _ in pairs:
-                        safe = str(clip.path.resolve()).replace("\\", "/").replace("'", r"'\''")
-                        f.write(f"file '{safe}'\n")
+                # Same TS-round-trip reasoning as the baseline concat (see
+                # ffmpeg_runner.run()'s comment and build_ts_remux_cmd's
+                # docstring): "same spec_group" only means these originals
+                # PROBE alike — codec/res/fps/pix_fmt — not that they share one
+                # encoder's actual parameter sets. Two odd-spec clips grouped
+                # here for archival could still be a plain -c copy concat away
+                # from the exact splice corruption this fixes elsewhere.
                 interm = temp_dir / f"archive_{gi}.mov"
-                if not self._run_stage(build_archival_concat_cmd(ff, lst, interm),
+                ts_originals: list[Path] = []
+                for j, (clip, _) in enumerate(pairs):
+                    out_ts = temp_dir / f"arch_{gi}_{j}.ts"
+                    codec = clip.stream.codec if clip.stream else "hevc"
+                    ts_cmd = build_ts_remux_progress_cmd(ff, clip.path, out_ts, codec, progress_file)
+                    if not self._run_stage(ts_cmd, temp_dir, progress_file,
+                                           f"Archiving original files, group {gi + 1}/{len(groups)} "
+                                           f"({j + 1}/{len(pairs)}) — lossless copy for recovery",
+                                           stage_total, stage_total, total_dur):
+                        return False
+                    ts_originals.append(out_ts)
+                first_codec = pairs[0][0].stream.codec if pairs[0][0].stream else "hevc"
+                tag_v = "hvc1" if (first_codec or "hevc").lower() in ("hevc", "h265") else "avc1"
+                if not self._run_stage(build_ts_archival_concat_cmd(ff, ts_originals, interm, tag_v=tag_v),
                                        temp_dir, progress_file,
                                        f"Archiving original files, group {gi + 1}/{len(groups)} "
                                        "— lossless copy for recovery",
@@ -587,6 +604,11 @@ class MergeWorker(QThread):
         self._produced_bytes_base = 0
 
         temp_clips: list[Path] = []
+        # Parallel to temp_clips — the ACTUAL video codec written into each per-
+        # clip temp file (the clip's own, stream-copied, when it conforms; the
+        # conform target's, when transcoded) — needed by the TS-remux step below
+        # to pick the right Annex-B bitstream filter per segment.
+        temp_clip_codecs: list[str] = []
         cumulative_duration = 0.0
         # Measured concat positions (see manifest.ClipEntry.concat_start): the
         # concat demuxer advances each segment by the temp FILE's container
@@ -685,6 +707,9 @@ class MergeWorker(QThread):
                 return
 
             temp_clips.append(out_clip)
+            temp_clip_codecs.append(
+                clip.stream.codec if (clip.effective_status() == "ok" and clip.stream)
+                else (getattr(self._conform, "codec", "hevc") or "hevc"))
             cumulative_duration += clip.duration
             try:
                 self._produced_bytes_base += out_clip.stat().st_size
@@ -768,16 +793,42 @@ class MergeWorker(QThread):
         if self._compat_baseline:
             # Watchable-master path: one clean continuous re-encode (H.264 or
             # ProRes), so the baseline plays everywhere (no broken concat
-            # splices). See task #13.
+            # splices). See task #13. Re-encoding already produces one coherent
+            # stream end to end, so the TS round-trip below (which exists to
+            # preserve independently-encoded segments' OWN parameter sets
+            # through a stream-copy concat) doesn't apply here.
             cmd = build_concat_reencode_cmd(ff, concat_file, chapters_file, baseline_target,
                                             progress_file, extra_out_args=embed,
                                             codec=self._compat_codec,
                                             prores_profile=self._compat_prores_profile,
                                             hw_encoder=self._conform.hw_encoder,
-                                            hw_decode=self._conform.hw_decode)
+                                            hw_decode=self._conform.hw_decode,
+                                            color_range=getattr(self._conform, "color_range", "tv"))
         else:
-            cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target, progress_file,
-                                   extra_out_args=embed)
+            # Lossless stream-copy path — route each segment through MPEG-TS
+            # first (build_ts_remux_cmd's docstring has the full root-cause
+            # writeup): a plain MP4 -c copy concat (build_concat_cmd, still kept
+            # for callers that explicitly want it) keeps only the FIRST
+            # segment's HEVC/H.264 parameter sets for the whole track, so a
+            # later segment written by a different encoder — the camera vs.
+            # this app's own libx265 conform, or even two units of the same
+            # camera model — can decode wrong from that point on, invisibly to
+            # ffprobe and often to local playback. TS carries parameter sets
+            # per segment, so this costs nothing in quality and little in time
+            # (still pure stream-copy) while closing that off unconditionally,
+            # not just when a mismatch is detected in advance.
+            ts_clips: list[Path] = []
+            for i, (p, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
+                out_ts = temp_dir / f"clip_{i+1:02d}.ts"
+                ts_cmd = build_ts_remux_progress_cmd(ff, p, out_ts, codec, progress_file)
+                if not self._run_stage(ts_cmd, temp_dir, progress_file,
+                                       f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
+                                       stage_total, stage_total, clips[i].duration):
+                    return
+                ts_clips.append(out_ts)
+            tag_v = "hvc1" if (getattr(self._conform, "codec", "hevc") or "hevc").lower() in ("hevc", "h265") else "avc1"
+            cmd = build_ts_concat_cmd(ff, ts_clips, chapters_file, baseline_target, progress_file,
+                                      extra_out_args=embed, tag_v=tag_v)
 
         thumb = None
         if self._enable_preview:
@@ -928,9 +979,38 @@ class MergeWorker(QThread):
         finally:
             shutil.rmtree(verify_dir, ignore_errors=True)
 
+        # Splice integrity on the finished, PLAYABLE master itself — distinct
+        # from the per-clip recovery checks above, which only prove a clip
+        # EXTRACTED back out matches its original. Full linear decode-test +
+        # a frame dump at every concat boundary (see core.verify's module
+        # comment for why both, not just the decode-test — a silent decode
+        # scan is necessary but not sufficient). Boundaries are the same
+        # cumulative clip durations chapters.txt was built from; the first
+        # clip has no preceding splice so it's excluded.
+        splice_result = None
+        if not self._cancelled:
+            try:
+                boundaries = []
+                cum = 0.0
+                for clip in clips[:-1]:
+                    cum += clip.duration
+                    boundaries.append(cum)
+                fps = (clips[0].stream.fps_float if clips and clips[0].stream else 0) or (30000 / 1001)
+                frames_dir = self._output.parent / (self._output.stem + ".splice_check")
+                splice_result = verify_master_splice_integrity(
+                    ff, str(self._output), boundaries, fps, frames_dir, **no_window())
+            except Exception:
+                splice_result = None
+
         report_path = self._output.parent / (self._output.stem + ".verify.log")
         try:
             write_verify_log(report_path, self._output.name, results)
+            if splice_result is not None:
+                with open(report_path, "a", encoding="utf-8") as f:
+                    f.write("\nSplice integrity (finished master):\n")
+                    f.write(f"{'PASS' if splice_result.passed else 'FAIL'}  {splice_result.detail}\n")
+                    if not splice_result.passed:
+                        f.write(f"       {splice_result.decode_error_detail}\n")
         except Exception:
             pass
 
@@ -941,16 +1021,24 @@ class MergeWorker(QThread):
             if c.skipped_reason.startswith(_PREDICTED_PREFIX))
         self._verify_passed = passed          # picked up by _emit_collection
         self._verify_total = total_checked
-        all_passed = total_checked > 0 and passed == total_checked
+        # A splice-corrupted master can still have every clip individually
+        # MD5-recoverable (recovery re-decodes the ORIGINAL bytes at each
+        # clip's own offset — it never plays through a splice) — so this
+        # check is independent, not redundant, and a failure here must not
+        # be masked by an all-clips-passed per-clip result.
+        splice_ok = splice_result is None or splice_result.passed
+        all_passed = total_checked > 0 and passed == total_checked and splice_ok
         skip_note = (f" ({n_predicted_skips} check{'s' if n_predicted_skips != 1 else ''} "
                      "predicted unverifiable, skipped)") if n_predicted_skips else ""
-        if all_passed:
+        if total_checked > 0 and passed == total_checked:
             summary = (f"Verified {passed}/{total_checked} clips byte-identical to their "
                       f"originals.{skip_note}")
         else:
             failed_names = ", ".join(r.name for r in results if not r.passed)
             summary = (f"⚠ {total_checked - passed} of {total_checked} clips did NOT verify: "
                       f"{failed_names}{skip_note}")
+        if splice_result is not None and not splice_result.passed:
+            summary += f" ⚠ Splice check failed: {splice_result.detail}"
         self.verification_done.emit(all_passed, summary, str(report_path))
 
     def _verify_one_clip(self, ff: str, fp: str, clip, entry, manifest, verify_dir: Path) -> ClipVerifyResult:
