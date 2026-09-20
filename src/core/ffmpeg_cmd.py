@@ -997,6 +997,44 @@ _ANNEXB_BSF = {"hevc": "hevc_mp4toannexb", "h265": "hevc_mp4toannexb",
               "h264": "h264_mp4toannexb"}
 
 
+# Which codecs an MPEG-TS container can actually CARRY. This gate is not
+# cosmetic: ffmpeg's mpegts muxer does not reject a codec it has no stream
+# type for — it writes the packets as a private `bin_data` stream and exits 0.
+# The round-trip back out to MP4 then drops that stream entirely, so a PCM or
+# FLAC audio track disappears from the finished master with no error anywhere
+# (measured directly: pcm_s16le in -> `bin_data` in the .ts -> no audio stream
+# at all in the joined output, ffmpeg exit 0 throughout). ProRes/DNxHD/VP9/AV1
+# video fails the same way, except the missing video stream then breaks the
+# join itself with a misleading "Stream map '0:v' matches no streams".
+#
+# Measured against this ffmpeg's own mpegts muxer rather than assumed from the
+# spec. Anything not on these lists takes the plain-MP4 concat path instead
+# (see ts_route_supported) — that path cannot fix parameter-set loss, but
+# parameter-set loss is an H.264/HEVC phenomenon in the first place, and
+# silently losing the audio track is strictly worse than the bug being fixed.
+_TS_SAFE_VIDEO = {"hevc", "h265", "h264", "avc", "mpeg2video"}
+_TS_SAFE_AUDIO = {"aac", "ac3", "eac3", "mp3", "mp2", "opus"}
+
+
+def ts_route_supported(video_codec: str, audio_codec: str = "") -> tuple:
+    """Can these streams survive the MPEG-TS round-trip intact?
+
+    Returns `(ok, reason)` — `reason` is "" when ok, otherwise a short
+    human-readable explanation suitable for the merge log, so a fallback to
+    the plain concat path is visible to the user rather than silent.
+
+    An empty `audio_codec` means "no audio track", which is always fine.
+    """
+    v = (video_codec or "").strip().lower()
+    a = (audio_codec or "").strip().lower()
+    if v not in _TS_SAFE_VIDEO:
+        return (False, f"video codec {v or 'unknown'} cannot be carried in MPEG-TS")
+    if a and a not in _TS_SAFE_AUDIO:
+        return (False, f"audio codec {a} cannot be carried in MPEG-TS "
+                       "(it would be silently dropped from the join)")
+    return (True, "")
+
+
 def build_ts_remux_cmd(ff: str, segment: Path, out_ts: Path, codec: str) -> list:
     """Step 1 of the TS round-trip: stream-copy one per-clip temp file into an
     MPEG-TS container, converting HEVC/H.264 from MP4's length-prefixed NAL
@@ -1031,24 +1069,38 @@ def build_ts_remux_progress_cmd(ff: str, segment: Path, out_ts: Path, codec: str
     return cmd
 
 
-def build_ts_concat_cmd(ff: str, ts_segments: list, chapters_file: Path,
+def build_ts_concat_cmd(ff: str, ts_list_file: Path, chapters_file: Path,
                         output: Path, progress_file: Path,
                         extra_out_args: Optional[list] = None,
                         tag_v: str = "hvc1") -> list:
-    """Step 2: join the per-segment .ts files via ffmpeg's `concat:` protocol
-    (not the `-f concat` demuxer — a different mechanism, string-joining the
-    inputs rather than reading a list file) and remux straight to the final
-    MP4/MOV output — still `-c copy`, no re-encode. `-tag:v` restores the
-    proper MP4 codec tag (`hvc1` for HEVC, `avc1` for H.264) since raw TS
-    carries no such tag and ffmpeg's own default can pick the wrong one;
-    `+faststart` moves the moov atom forward for progressive playback. Keeps
-    the exact same `-i chapters_file -map_metadata 1` shape build_concat_cmd
-    uses (the `concat:` protocol is just another virtual input, so chapters
-    embedding is unaffected), and the same explicit v/a maps for the same
-    bin_data reason."""
-    concat_arg = "concat:" + "|".join(str(p) for p in ts_segments)
+    """Step 2: join the per-segment .ts files and remux straight to the final
+    MP4/MOV output — still `-c copy`, no re-encode.
+
+    Uses the concat DEMUXER (`-f concat -safe 0` over a list file, the same
+    shape build_concat_cmd uses) and NOT ffmpeg's `concat:` protocol. The
+    difference is not stylistic. The mpegts muxer starts every segment's
+    timestamps at its own small offset (~1.4s by default), so each .ts here
+    runs roughly 1.4 -> 5.4s on its own clock. The `concat:` protocol joins
+    the byte streams without touching timestamps, which hands the demuxer a
+    BACKWARDS PTS jump at each splice; what it then infers for the output
+    duration depends on the codec. Measured on two 4.0s segments: with AAC
+    audio the joined file came out 8.08s (plausible enough to pass unnoticed),
+    with AC-3 audio the same join reported 11.94s — a 49% overrun, with the
+    video stream stretched to match. The concat demuxer instead offsets each
+    segment onto the previous one's end, giving 8.01s in both cases. Both
+    routes fix the parameter-set corruption equally (0 decode errors vs. 11
+    for a plain MP4 concat of the same pair); only this one also keeps the
+    running time honest.
+
+    `-tag:v` restores the proper MP4 codec tag (`hvc1` for HEVC, `avc1` for
+    H.264) since raw TS carries no such tag and ffmpeg's own default can pick
+    the wrong one; `+faststart` moves the moov atom forward for progressive
+    playback. Keeps the `-i chapters_file -map_metadata 1` shape
+    build_concat_cmd uses, and the same explicit v/a maps for the same
+    bin_data reason.
+    """
     cmd = [ff, "-y",
-           "-i", concat_arg,
+           "-f", "concat", "-safe", "0", "-i", str(ts_list_file),
            "-i", str(chapters_file),
            "-map_metadata", "1", "-map", "0:v", "-map", "0:a?", "-c", "copy",
            "-tag:v", tag_v, "-movflags", "+faststart",
@@ -1059,13 +1111,14 @@ def build_ts_concat_cmd(ff: str, ts_segments: list, chapters_file: Path,
     return cmd
 
 
-def build_ts_archival_concat_cmd(ff: str, ts_segments: list, output: Path,
+def build_ts_archival_concat_cmd(ff: str, ts_list_file: Path, output: Path,
                                  tag_v: str = "hvc1") -> list:
-    """Archival-track counterpart of build_ts_concat_cmd — same TS round-trip,
-    no chapters (matches build_archival_concat_cmd, which this replaces for a
-    multi-clip archival group)."""
-    concat_arg = "concat:" + "|".join(str(p) for p in ts_segments)
-    return [ff, "-y", "-v", "error", "-i", concat_arg,
+    """Archival-track counterpart of build_ts_concat_cmd — same TS round-trip
+    over the same concat-demuxer list file, no chapters (matches
+    build_archival_concat_cmd, which this replaces for a multi-clip archival
+    group)."""
+    return [ff, "-y", "-v", "error",
+            "-f", "concat", "-safe", "0", "-i", str(ts_list_file),
             "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
             "-tag:v", tag_v, str(output)]
 

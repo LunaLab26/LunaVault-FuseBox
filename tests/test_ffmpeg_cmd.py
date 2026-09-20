@@ -1361,20 +1361,27 @@ def test_ts_remux_progress_cmd_adds_progress_file():
     assert "-progress" in cmd and cmd[cmd.index("-progress") + 1] == "p.txt"
 
 
-def test_ts_concat_cmd_uses_concat_protocol_not_demuxer():
-    cmd = build_ts_concat_cmd("ffmpeg", [Path("a.ts"), Path("b.ts"), Path("c.ts")],
+def test_ts_concat_cmd_uses_concat_demuxer_not_protocol():
+    """The `concat:` protocol byte-joins TS without touching timestamps, and
+    each .ts starts on its own ~1.4s mpegts muxer offset — so the protocol
+    hands the demuxer a BACKWARDS PTS jump at every splice and the inferred
+    duration goes wrong (measured: two 4.0s AC-3 segments joined to 11.94s
+    instead of 8.0s). The concat demuxer offsets each segment onto the
+    previous one's end instead. See build_ts_concat_cmd's docstring."""
+    cmd = build_ts_concat_cmd("ffmpeg", Path("ts_list.txt"),
                               Path("ch.txt"), Path("out.mov"), Path("p.txt"))
     i = cmd.index("-i")
-    assert cmd[i + 1] == "concat:a.ts|b.ts|c.ts"
-    assert "-f" not in cmd[:i]           # NOT the -f concat demuxer
-    assert "-safe" not in cmd
+    assert cmd[i + 1] == "ts_list.txt"
+    assert cmd[i - 3:i] == ["-f", "concat", "-safe"] or "-f" in cmd[:i]
+    assert "-safe" in cmd and "0" in cmd
+    assert not any(str(x).startswith("concat:") for x in cmd)
     # Chapters still attached the same way build_concat_cmd does.
     assert "-map_metadata" in cmd and "1" in cmd
     assert cmd[-1] == "out.mov"
 
 
 def test_ts_concat_cmd_tags_and_faststart():
-    cmd = build_ts_concat_cmd("ffmpeg", [Path("a.ts")], Path("ch.txt"), Path("out.mov"),
+    cmd = build_ts_concat_cmd("ffmpeg", Path("ts_list.txt"), Path("ch.txt"), Path("out.mov"),
                               Path("p.txt"), tag_v="avc1")
     s = " ".join(str(x) for x in cmd)
     assert "-tag:v avc1" in s
@@ -1383,16 +1390,17 @@ def test_ts_concat_cmd_tags_and_faststart():
 
 
 def test_ts_concat_cmd_appends_extra_out_args_before_output():
-    cmd = build_ts_concat_cmd("ffmpeg", [Path("a.ts")], Path("ch.txt"), Path("out.mov"),
+    cmd = build_ts_concat_cmd("ffmpeg", Path("ts_list.txt"), Path("ch.txt"), Path("out.mov"),
                               Path("p.txt"), extra_out_args=["-metadata", "k=v"])
     assert cmd[-1] == "out.mov"
     assert cmd[-3:-1] == ["-metadata", "k=v"]
 
 
 def test_ts_archival_concat_cmd_no_chapters_maps_first_streams_only():
-    cmd = build_ts_archival_concat_cmd("ffmpeg", [Path("a.ts"), Path("b.ts")], Path("arch.mov"))
-    s = " ".join(str(x) for x in cmd)
-    assert "concat:a.ts|b.ts" in s
+    cmd = build_ts_archival_concat_cmd("ffmpeg", Path("arch_list.txt"), Path("arch.mov"))
+    assert "-f" in cmd and "concat" in cmd and "-safe" in cmd
+    assert "arch_list.txt" in [str(x) for x in cmd]
+    assert not any(str(x).startswith("concat:") for x in cmd)
     assert "0:v:0" in cmd and "0:a:0?" in cmd
     assert cmd.count("-i") == 1   # no second (chapters) input, unlike build_ts_concat_cmd
 
@@ -1432,7 +1440,9 @@ def test_ts_remux_and_concat_round_trip_real_mixed_encoder_footage():
     out = d / "joined.mov"
     chapters = d / "ch.txt"
     chapters.write_text(";FFMETADATA1\n")
-    sp.run(build_ts_concat_cmd(ff, [ts_a, ts_b], chapters, out, d / "p.txt"), check=True)
+    ts_list = d / "ts_list.txt"
+    ts_list.write_text("".join(f"file '{p}'\n" for p in (ts_a, ts_b)))
+    sp.run(build_ts_concat_cmd(ff, ts_list, chapters, out, d / "p.txt"), check=True)
     assert out.exists() and out.stat().st_size > 0
 
     decode = sp.run([fp, "-v", "error", "-i", str(out), "-show_entries",
@@ -1457,3 +1467,101 @@ if __name__ == "__main__":
     print("running real ffmpeg integration...")
     _integration_wav_overrun_is_trimmed()
     print("test_ffmpeg_cmd: all tests passed")
+
+
+# ── MPEG-TS carriage gate ────────────────────────────────────────────────────
+
+def test_ts_route_supported_accepts_the_codecs_ts_can_carry():
+    from core.ffmpeg_cmd import ts_route_supported
+    for v in ("hevc", "h265", "h264", "HEVC", "mpeg2video"):
+        ok, why = ts_route_supported(v, "aac")
+        assert ok, f"{v} should be TS-routable: {why}"
+    for a in ("aac", "ac3", "eac3", "mp3", "opus", ""):
+        ok, why = ts_route_supported("hevc", a)
+        assert ok, f"audio {a!r} should be TS-routable: {why}"
+
+
+def test_ts_route_supported_refuses_codecs_ts_silently_drops():
+    """The failure being prevented is silent: ffmpeg's mpegts muxer writes a
+    codec it has no stream type for as `bin_data` and exits 0, so the track
+    vanishes on the way back out to MP4 with no error anywhere."""
+    from core.ffmpeg_cmd import ts_route_supported
+    for a in ("pcm_s16le", "pcm_s24le", "flac", "alac"):
+        ok, why = ts_route_supported("hevc", a)
+        assert not ok and a in why, f"audio {a} must be refused"
+    for v in ("prores", "dnxhd", "vp9", "av1"):
+        ok, why = ts_route_supported(v, "aac")
+        assert not ok and v in why, f"video {v} must be refused"
+
+
+def test_verify_ts_remux_catches_a_silently_dropped_audio_track():
+    """Backstop behind the static allowlist, exercised against real ffmpeg:
+    a PCM audio track becomes `bin_data` in the .ts and is gone from the
+    round-trip output, with ffmpeg exiting 0 the whole way."""
+    import subprocess as sp, tempfile
+    from core.binaries import get_ffmpeg
+    from probe import verify_ts_remux
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    src = d / "pcm.mov"
+    sp.run([ff, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            "-c:a", "pcm_s16le", str(src)], check=True, capture_output=True)
+    assert src.exists()
+    ts = d / "pcm.ts"
+    r = sp.run(build_ts_remux_cmd(ff, src, ts, "hevc"), capture_output=True)
+    assert r.returncode == 0, "ffmpeg exits 0 — that is precisely the problem"
+    ok, why = verify_ts_remux(fp, str(src), str(ts))
+    assert not ok and "audio" in why.lower(), f"lost audio should be caught, got {(ok, why)}"
+
+    # ...and a normal AAC clip must NOT trip the check.
+    src2, ts2 = d / "aac.mp4", d / "aac.ts"
+    sp.run([ff, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", str(src2)], check=True, capture_output=True)
+    sp.run(build_ts_remux_cmd(ff, src2, ts2, "hevc"), check=True, capture_output=True)
+    assert verify_ts_remux(fp, str(src2), str(ts2)) == (True, "")
+
+
+def test_ts_join_keeps_duration_honest_with_audio():
+    """Regression for the concat-PROTOCOL timestamp bug. The original
+    integration test used video-only segments, which is exactly why it never
+    caught this: the overrun needs an audio stream to show up. Two 4.0s
+    AC-3 segments joined via the protocol measured 11.94s; via the demuxer,
+    8.01s."""
+    import subprocess as sp, tempfile
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    segs, tss = [], []
+    for i, (freq, keyint) in enumerate(((440, 25), (880, 10))):
+        seg = d / f"s{i}.mp4"
+        sp.run([ff, "-y", "-v", "error",
+                "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=25:duration=4",
+                "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=4",
+                "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+                "-x265-params", f"keyint={keyint}:log-level=none",
+                "-c:a", "ac3", str(seg)], check=True, capture_output=True)
+        ts = d / f"s{i}.ts"
+        sp.run(build_ts_remux_cmd(ff, seg, ts, "hevc"), check=True, capture_output=True)
+        segs.append(seg); tss.append(ts)
+
+    ts_list = d / "list.txt"
+    ts_list.write_text("".join(f"file '{p}'\n" for p in tss))
+    out = d / "joined.mp4"
+    chapters = d / "ch.txt"; chapters.write_text(";FFMETADATA1\n")
+    sp.run(build_ts_concat_cmd(ff, ts_list, chapters, out, d / "p.txt"),
+           check=True, capture_output=True)
+
+    r = sp.run([fp, "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1", str(out)], capture_output=True, text=True)
+    dur = float(r.stdout.strip() or 0)
+    assert abs(dur - 8.0) < 0.3, f"expected ~8.0s, got {dur} (concat-protocol bug?)"
+    astreams = sp.run([fp, "-v", "error", "-select_streams", "a",
+                       "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(out)],
+                      capture_output=True, text=True).stdout.strip()
+    assert "ac3" in astreams, f"audio must survive the join, got {astreams!r}"

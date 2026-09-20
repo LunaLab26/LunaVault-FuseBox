@@ -19,7 +19,7 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from grade_manager import Grade
-from probe import probe_duration, probe_concat_segment, pix_fmt_info
+from probe import probe_duration, probe_concat_segment, pix_fmt_info, verify_ts_remux
 
 from core.binaries import get_app_dir, get_ffmpeg, no_window
 from core import manifest as manifest_mod
@@ -36,6 +36,7 @@ from core.ffmpeg_cmd import (
     build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
     build_lrv_archival_mux_cmd,
     build_ts_remux_progress_cmd, build_ts_concat_cmd, build_ts_archival_concat_cmd,
+    build_concat_cmd, build_archival_concat_cmd, ts_route_supported,
     ConformSpec, DEFAULT_CONFORM,
 )
 from core.extract import (build_recovery_plan, build_recover_clip_cmd,
@@ -167,6 +168,13 @@ class MergeWorker(QThread):
         self._conform           = conform    # baseline the transcode conforms non-matching clips to
         self._per_clip_archival = per_clip_archival   # one archival track per clip (bit-exact) vs concat by spec
         self._verify_md5        = verify_md5   # post-merge: MD5-check every clip's recovery against its original
+        # Non-fatal decisions the merge made on the user's behalf that change
+        # HOW the output was produced (currently: falling back off the MPEG-TS
+        # join because a codec can't survive it). Surfaced live as a stage
+        # label and recorded in the verify log — this bug class is precisely
+        # the one where the pipeline quietly did something else and nothing
+        # said so.
+        self._merge_notices: list = []
         # Skip the extraction+hash pass ENTIRELY for a check the app already
         # knows (from the manifest, before touching ffmpeg) can't produce a
         # meaningful pass — a transcoded clip with no archival track of its
@@ -453,20 +461,56 @@ class MergeWorker(QThread):
                 # here for archival could still be a plain -c copy concat away
                 # from the exact splice corruption this fixes elsewhere.
                 interm = temp_dir / f"archive_{gi}.mov"
+                # Same MPEG-TS carriage gate as the baseline join (see
+                # core.ffmpeg_cmd.ts_route_supported). It matters MORE here:
+                # this path exists precisely because these clips are
+                # odd-spec, so they are the likeliest in the whole app to be
+                # something TS cannot carry — and an archival track that
+                # silently lost its audio would defeat the entire point of
+                # keeping the originals for recovery.
+                _, fp_arch = get_ffmpeg()
                 ts_originals: list[Path] = []
+                ts_ok, ts_skip_reason = True, ""
                 for j, (clip, _) in enumerate(pairs):
-                    out_ts = temp_dir / f"arch_{gi}_{j}.ts"
                     codec = clip.stream.codec if clip.stream else "hevc"
+                    supported, reason = ts_route_supported(codec)
+                    if not supported:
+                        ts_ok, ts_skip_reason = False, reason
+                        break
+                    out_ts = temp_dir / f"arch_{gi}_{j}.ts"
                     ts_cmd = build_ts_remux_progress_cmd(ff, clip.path, out_ts, codec, progress_file)
                     if not self._run_stage(ts_cmd, temp_dir, progress_file,
                                            f"Archiving original files, group {gi + 1}/{len(groups)} "
                                            f"({j + 1}/{len(pairs)}) — lossless copy for recovery",
                                            stage_total, stage_total, total_dur):
                         return False
+                    remux_ok, remux_reason = verify_ts_remux(fp_arch, str(clip.path), str(out_ts))
+                    if not remux_ok:
+                        ts_ok, ts_skip_reason = False, remux_reason
+                        break
                     ts_originals.append(out_ts)
+
                 first_codec = pairs[0][0].stream.codec if pairs[0][0].stream else "hevc"
                 tag_v = "hvc1" if (first_codec or "hevc").lower() in ("hevc", "h265") else "avc1"
-                if not self._run_stage(build_ts_archival_concat_cmd(ff, ts_originals, interm, tag_v=tag_v),
+                arch_list = temp_dir / f"archive_{gi}_list.txt"
+                if ts_ok:
+                    sources = ts_originals
+                    arch_cmd_builder = lambda lf: build_ts_archival_concat_cmd(ff, lf, interm, tag_v=tag_v)
+                else:
+                    self._log(f"MPEG-TS archival join skipped for group {gi + 1}: "
+                              f"{ts_skip_reason}. Falling back to a direct stream-copy join.")
+                    for tp in ts_originals:
+                        try:
+                            tp.unlink()
+                        except OSError:
+                            pass
+                    sources = [Path(c.path) for c, _ in pairs]
+                    arch_cmd_builder = lambda lf: build_archival_concat_cmd(ff, lf, interm)
+                with open(arch_list, "w", encoding="utf-8") as f:
+                    for sp in sources:
+                        safe = str(Path(sp).resolve()).replace("\\", "/").replace("'", r"'\''")
+                        f.write(f"file '{safe}'\n")
+                if not self._run_stage(arch_cmd_builder(arch_list),
                                        temp_dir, progress_file,
                                        f"Archiving original files, group {gi + 1}/{len(groups)} "
                                        "— lossless copy for recovery",
@@ -577,6 +621,14 @@ class MergeWorker(QThread):
         except Exception:
             pass
         return out_path
+
+    def _log(self, message: str):
+        """Record a non-fatal pipeline decision and show it to the user."""
+        self._merge_notices.append(message)
+        try:
+            self.progress.emit({"stage": "notice", "stage_label": message})
+        except Exception:
+            pass
 
     def run(self):
         ff, fp = get_ffmpeg()
@@ -817,18 +869,57 @@ class MergeWorker(QThread):
             # per segment, so this costs nothing in quality and little in time
             # (still pure stream-copy) while closing that off unconditionally,
             # not just when a mismatch is detected in advance.
+            #
+            # The route is not unconditional, though, because MPEG-TS cannot
+            # carry every codec and does not say so: the mpegts muxer writes a
+            # codec it has no stream type for as a private `bin_data` stream
+            # and exits 0, so a PCM/FLAC/ALAC audio track or ProRes/DNxHD/VP9
+            # video silently disappears on the way back out to MP4. Losing a
+            # track outright is strictly worse than the parameter-set bug this
+            # fixes — and parameter-set loss is an H.264/HEVC phenomenon
+            # anyway — so anything the TS route cannot carry intact falls back
+            # to the plain MP4 concat, with the reason recorded in the log
+            # rather than swallowed. ts_route_supported screens on codec name
+            # before doing the work; probe.verify_ts_remux confirms per clip
+            # afterwards, covering codecs the static list has never seen.
             ts_clips: list[Path] = []
-            for i, (p, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
+            ts_ok, ts_skip_reason = True, ""
+            for i, (p_clip, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
+                supported, reason = ts_route_supported(codec)
+                if not supported:
+                    ts_ok, ts_skip_reason = False, reason
+                    break
                 out_ts = temp_dir / f"clip_{i+1:02d}.ts"
-                ts_cmd = build_ts_remux_progress_cmd(ff, p, out_ts, codec, progress_file)
+                ts_cmd = build_ts_remux_progress_cmd(ff, p_clip, out_ts, codec, progress_file)
                 if not self._run_stage(ts_cmd, temp_dir, progress_file,
                                        f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
                                        stage_total, stage_total, clips[i].duration):
                     return
+                remux_ok, remux_reason = verify_ts_remux(fp, str(p_clip), str(out_ts))
+                if not remux_ok:
+                    ts_ok, ts_skip_reason = False, remux_reason
+                    break
                 ts_clips.append(out_ts)
-            tag_v = "hvc1" if (getattr(self._conform, "codec", "hevc") or "hevc").lower() in ("hevc", "h265") else "avc1"
-            cmd = build_ts_concat_cmd(ff, ts_clips, chapters_file, baseline_target, progress_file,
-                                      extra_out_args=embed, tag_v=tag_v)
+
+            if ts_ok:
+                ts_list_file = temp_dir / "concat_list_ts.txt"
+                with open(ts_list_file, "w", encoding="utf-8") as f:
+                    for tp in ts_clips:
+                        safe = str(tp.resolve()).replace("\\", "/").replace("'", r"'\''")
+                        f.write(f"file '{safe}'\n")
+                tag_v = "hvc1" if (getattr(self._conform, "codec", "hevc") or "hevc").lower() in ("hevc", "h265") else "avc1"
+                cmd = build_ts_concat_cmd(ff, ts_list_file, chapters_file, baseline_target,
+                                          progress_file, extra_out_args=embed, tag_v=tag_v)
+            else:
+                self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
+                          "Falling back to a direct stream-copy join.")
+                for tp in ts_clips:
+                    try:
+                        tp.unlink()
+                    except OSError:
+                        pass
+                cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
+                                       progress_file, extra_out_args=embed)
 
         thumb = None
         if self._enable_preview:

@@ -573,3 +573,50 @@ def probe_chapters_safe(ffprobe_bin: str, path: str) -> tuple:
     except Exception as e:
         return [], str(e)
     return parse_chapters(raw), None
+
+
+# ── MPEG-TS round-trip integrity ─────────────────────────────────────────────
+# Backstop for core.ffmpeg_cmd.ts_route_supported's static codec allowlist.
+# The failure this guards against is silent by construction: ffmpeg's mpegts
+# muxer has no stream type for e.g. PCM or ProRes, so instead of refusing it
+# writes those packets as a private `bin_data` stream and exits 0. The join
+# back out to MP4 then drops them, and a track vanishes from the finished
+# master with no error at any stage. The allowlist catches every case measured
+# here, but it is a list of codec NAMES — a build of ffmpeg with different
+# muxer support, or a codec nobody tested, would slip past it. So rather than
+# trust the list alone, confirm after the fact that the .ts really does carry
+# what the source did.
+
+def verify_ts_remux(ffprobe_bin: str, source: str, ts_path: str) -> tuple:
+    """Check that a TS remux preserved the source's video and audio streams.
+
+    Returns `(ok, reason)`. `reason` is "" when ok, otherwise names what was
+    lost, suitable for the merge log. A probe that fails outright returns ok
+    (with a reason noting the probe failed): an unreadable probe is not
+    positive evidence of loss, and the decode-test on the finished master
+    remains the real gate.
+    """
+    try:
+        src_raw = _run_ffprobe(ffprobe_bin, source)
+        ts_raw = _run_ffprobe(ffprobe_bin, ts_path)
+    except Exception as e:
+        return (True, f"could not verify TS remux ({e})")
+
+    def counts(raw: dict) -> tuple:
+        v = a = 0
+        for st in raw.get("streams", []) or []:
+            t = (st.get("codec_type") or "").lower()
+            if t == "video":
+                v += 1
+            elif t == "audio":
+                a += 1
+        return (v, a)
+
+    src_v, src_a = counts(src_raw)
+    ts_v, ts_a = counts(ts_raw)
+    if src_v and not ts_v:
+        return (False, "the MPEG-TS remux lost the video stream")
+    if src_a and not ts_a:
+        return (False, "the MPEG-TS remux lost the audio track "
+                       "(its codec has no MPEG-TS stream type)")
+    return (True, "")
