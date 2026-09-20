@@ -1035,6 +1035,100 @@ def ts_route_supported(video_codec: str, audio_codec: str = "") -> tuple:
     return (True, "")
 
 
+def audio_codec_ts_safe(audio_codec: str) -> bool:
+    """Per-track version of ts_route_supported's audio check, for splitting a
+    multi-track output where SOME tracks can travel through MPEG-TS and
+    others can't — see build_ts_remux_selective_progress_cmd's docstring for
+    why this exists as its own function rather than only the combined
+    video+audio check."""
+    return not audio_codec or (audio_codec or "").strip().lower() in _TS_SAFE_AUDIO
+
+
+def build_ts_remux_selective_progress_cmd(ff: str, segment: Path, out_ts: Path,
+                                          codec: str, audio_indices: list,
+                                          progress_file: Path) -> list:
+    """Like build_ts_remux_progress_cmd, but maps only the given audio track
+    INDICES (each an int, ffmpeg's `0:a:N`) instead of every audio track.
+
+    Exists for a real case, not a hypothetical one: this app's default output
+    plan attaches a second "backup audio" track (real WAV-backed, or a
+    same-camera-audio duplicate when no WAV exists) encoded as ALAC for
+    bit-depth consistency across segments — and MPEG-TS has no stream type
+    for ALAC (or PCM, or FLAC), so it silently drops whichever track uses one
+    of those (see ts_route_supported's docstring). Since that default plan
+    means MOST real merges carry an ALAC track, gating the ENTIRE join on
+    "can every track survive TS" would mean the parameter-set-loss fix this
+    whole module exists for almost never actually applies. Splitting instead
+    — video (+ any TS-safe audio) through this selective remux, the TS-unsafe
+    track(s) through build_track_concat_progress_cmd's plain stream-copy
+    join, both re-combined by build_split_final_mux_cmd — lets the real fix
+    apply to the video (an HEVC/H.264 bitstream phenomenon, ALAC/PCM don't
+    have an equivalent parameter-set concept to lose) even when the output
+    has a lossless backup track TS can't carry at all.
+    """
+    cmd = [ff, "-y", "-i", str(segment), "-map", "0:v"]
+    for i in audio_indices:
+        cmd += ["-map", f"0:a:{i}"]
+    cmd += ["-c", "copy"]
+    bsf = _ANNEXB_BSF.get((codec or "").lower())
+    if bsf:
+        cmd += ["-bsf:v", bsf]
+    cmd += ["-f", "mpegts", "-progress", str(progress_file), "-nostats", str(out_ts)]
+    return cmd
+
+
+def build_track_concat_progress_cmd(ff: str, concat_file: Path, audio_index: int,
+                                    output: Path, progress_file: Path) -> list:
+    """Join ONE audio track (by index) across the original per-clip temp
+    files via the plain stream-copy concat demuxer — the join mechanism this
+    whole module exists to move AWAY from for video, but audio codecs like
+    ALAC/PCM don't carry anything equivalent to HEVC/H.264's parameter sets,
+    so they aren't exposed to the corruption the TS route fixes and the
+    simpler join is fine. Output is audio-only (no video map at all); a
+    `.mov` container accepts any of the codecs this is used for (ALAC, PCM,
+    AAC)."""
+    return [ff, "-y",
+           "-f", "concat", "-safe", "0", "-i", str(concat_file),
+           "-map", f"0:a:{audio_index}", "-c", "copy",
+           "-progress", str(progress_file), "-nostats", str(output)]
+
+
+def build_split_final_mux_cmd(ff: str, video_part: Path, unsafe_track_files: list,
+                              unsafe_indices: list, n_tracks: int,
+                              chapters_file: Path, output: Path, progress_file: Path,
+                              extra_out_args: Optional[list] = None,
+                              tag_v: str = "hvc1") -> list:
+    """Recombine the split join: `video_part` carries the video stream plus
+    every TS-safe audio track (in their original relative order, but
+    renumbered starting at 0 — safe_local_index below reconstructs the
+    mapping); `unsafe_track_files[i]` is the separately-joined audio-only
+    file for original track index `unsafe_indices[i]`. Output order matches
+    the ORIGINAL track plan regardless of which path produced each track —
+    the split is an implementation detail, not something that should
+    reorder a user's camera/backup track preference. Still `-c copy`
+    throughout: this step is a remux, not a re-encode."""
+    safe_indices = [i for i in range(n_tracks) if i not in unsafe_indices]
+    inputs = [video_part] + list(unsafe_track_files)
+    cmd = [ff, "-y", "-i", str(video_part)]
+    for f in unsafe_track_files:
+        cmd += ["-i", str(f)]
+    chapters_input_idx = len(inputs)
+    cmd += ["-i", str(chapters_file), "-map_metadata", str(chapters_input_idx)]
+    cmd += ["-map", "0:v"]
+    for i in range(n_tracks):
+        if i in safe_indices:
+            cmd += ["-map", f"0:a:{safe_indices.index(i)}"]
+        else:
+            src_input = 1 + unsafe_indices.index(i)
+            cmd += ["-map", f"{src_input}:a:0"]
+    cmd += ["-c", "copy", "-tag:v", tag_v, "-movflags", "+faststart",
+           "-progress", str(progress_file), "-nostats"]
+    if extra_out_args:
+        cmd += list(extra_out_args)
+    cmd += [str(output)]
+    return cmd
+
+
 def build_ts_remux_cmd(ff: str, segment: Path, out_ts: Path, codec: str) -> list:
     """Step 1 of the TS round-trip: stream-copy one per-clip temp file into an
     MPEG-TS container, converting HEVC/H.264 from MP4's length-prefixed NAL

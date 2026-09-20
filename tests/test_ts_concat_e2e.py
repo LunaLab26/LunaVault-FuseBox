@@ -57,10 +57,10 @@ def _make_clip(path: Path, freq: int, keyint: int, acodec: str, dur: int = 3):
     return path
 
 
-def _run_merge(clips, out_path) -> tuple:
+def _run_merge(clips, out_path, plan=None) -> tuple:
     """Drive MergeWorker synchronously; return (ok, message, notices)."""
-    w = MergeWorker(clips, out_path, OutputPlan(), "crop", enable_preview=False,
-                    conform=_SMALL_CONFORM)
+    w = MergeWorker(clips, out_path, plan if plan is not None else OutputPlan(),
+                    "crop", enable_preview=False, conform=_SMALL_CONFORM)
     result = {}
     w.finished.connect(lambda ok, msg: result.update(ok=ok, msg=msg))
     w.run()   # synchronous: run() directly, not start()
@@ -91,17 +91,47 @@ def _clips_for(paths):
 
 
 def test_aac_clips_take_the_ts_route_and_keep_duration_and_audio():
+    """Single-track output (camera audio only) — the pure "full" TS-route
+    path, no split needed."""
+    from core.ffmpeg_cmd import OutputTrack
     d = Path(tempfile.mkdtemp())
     a = _make_clip(d / "a.mp4", 440, 25, "aac")
     b = _make_clip(d / "b.mp4", 880, 10, "aac")
     out = d / "master.mov"
-    ok, msg, notices = _run_merge(_clips_for([a, b]), out)
+    single_track_plan = OutputPlan(tracks=[OutputTrack("camera")])
+    ok, msg, notices = _run_merge(_clips_for([a, b]), out, plan=single_track_plan)
     assert ok, f"merge failed: {msg}"
     got = _inspect(out)
     assert abs(got["duration"] - 6.0) < 0.4, f"duration drifted: {got}"
     assert got["audio"], f"audio track lost: {got}"
     assert got["decode_errors"] == 0, f"master does not decode clean: {got}"
     assert not notices, f"AAC/HEVC should take the TS route cleanly, got {notices}"
+
+
+def test_default_two_track_output_splits_the_join_for_the_alac_backup_track():
+    """The app's DEFAULT output plan (camera + backup audio) is what most
+    real merges actually produce — including every clip in the Cattle
+    Country Farm Park footage, which has real per-clip _backup.wav files.
+    With no wav here, the backup track falls back to a same-camera-audio
+    duplicate encoded as ALAC, which MPEG-TS cannot carry at all. This must
+    NOT silently fall back to the plain concat for the whole job (which
+    would mean the parameter-set fix never applies to a default merge) — it
+    must split: video+camera-audio via the TS route, the ALAC backup via a
+    plain per-track join, recombined into one file with both tracks intact."""
+    d = Path(tempfile.mkdtemp())
+    a = _make_clip(d / "a.mp4", 440, 25, "aac")
+    b = _make_clip(d / "b.mp4", 880, 10, "aac")
+    out = d / "master.mov"
+    ok, msg, notices = _run_merge(_clips_for([a, b]), out)   # default plan: camera + wav
+    assert ok, f"merge failed: {msg}"
+    got = _inspect(out)
+    assert abs(got["duration"] - 6.0) < 0.4, f"duration drifted: {got}"
+    assert got["audio"] == ["aac", "alac"], f"expected both tracks intact in order, got {got}"
+    assert got["decode_errors"] == 0, f"master does not decode clean: {got}"
+    assert any("Splitting the join" in n for n in notices), (
+        f"expected the split path to engage and say so, got {notices}")
+    assert not any("Falling back to a direct stream-copy join" in n for n in notices), (
+        f"the split should succeed, not fall all the way back: {notices}")
 
 
 def test_pcm_audio_falls_back_instead_of_silently_losing_the_track():
