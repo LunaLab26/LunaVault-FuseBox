@@ -148,19 +148,27 @@ class Manifest:
 # ── Spec signature + grouping ──────────────────────────────────────────────────
 
 def spec_signature(codec: str, width: int, height: int, fps: str, pix_fmt: str,
-                   rotation: int = 0) -> str:
+                   rotation: int = 0, audio_codec: str = "") -> str:
     """Stable grouping key: clips sharing a signature can be concat-copied onto
     one archival track. Groups by the params that must match for a stream-copy
     concat to stay valid (codec, resolution, frame rate, pixel format) plus
     ROTATION — differently-rotated clips must NOT share a track or their
     orientation is lost on recovery. In practice this means "same camera/format,
-    same orientation"."""
+    same orientation".
+
+    AUDIO_CODEC matters for the same reason: the archival join stream-copies
+    audio too (`-map 0:a:0?`), and concatenating genuinely different audio
+    codecs via -c copy is invalid regardless of container — confirmed
+    directly (a merge mixing AAC-camera clips with one PCM-camera clip, same
+    video spec throughout, corrupted at the audio splice). An empty string
+    (audio-less clip) is its own bucket, distinct from any real codec."""
     return "|".join((
         (codec or "?").lower(),
         f"{int(width)}x{int(height)}",
         fps or "?",
         (pix_fmt or "?").lower(),
         f"rot{int(rotation) % 360}",
+        f"a{(audio_codec or 'none').lower()}",
     ))
 
 

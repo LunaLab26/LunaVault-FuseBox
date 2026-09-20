@@ -670,6 +670,22 @@ def _slot_fill(kind: str, clip: ClipInfo, mix: MixSpec) -> tuple:
             return ("stretch", "aac", "Synced Audio (WAV stretched to video)")
         if has_cam:
             t = "Camera Audio (AAC)" if has_wav else "Camera Audio (On-board mic)"
+            # This slot's codec is documented as fixed at AAC (see this
+            # function's own docstring: "so a stream copy concat stays
+            # valid") — but "copy" literally means stream-copy WHATEVER the
+            # clip's native camera audio happens to be. That's only actually
+            # AAC by coincidence for most cameras; a source whose native
+            # audio is something else (confirmed directly: a ProRes export
+            # with PCM camera audio, mixed into a merge alongside AAC-camera
+            # clips) breaks the stated invariant outright — concatenating
+            # genuinely different audio CODECS via -c copy is invalid
+            # regardless of container/route, and corrupts at the splice the
+            # same way a video parameter-set mismatch does. "cam_transcode"
+            # maps from the same source index as "copy" but re-encodes to
+            # the codec this slot promises, closing that gap.
+            src_codec = (clip.stream.audio_codec or "").strip().lower() if clip.stream else ""
+            if src_codec and src_codec != "aac":
+                return ("cam_transcode", "aac", t)
             return ("copy", "aac", t)
         if has_wav:
             return ("wav_aac", "aac", "Primary Audio (from WAV)")
@@ -852,7 +868,7 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         cmd += ["-map", "[v]" if uses_fc_video else f"{video_src_idx}:v:0"]
     mix_slot_i = 0
     for (kind, fill, codec, title) in fills:
-        if fill in ("copy", "cam_alac"):
+        if fill in ("copy", "cam_alac", "cam_transcode"):
             cmd += ["-map", "0:a:0"]
         elif fill in ("wav_alac", "wav_aac"):
             cmd += ["-map", f"{wav_idx}:a:0"]

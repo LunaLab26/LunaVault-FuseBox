@@ -321,7 +321,7 @@ class MergeWorker(QThread):
                                    else "transcoded"),
                 spec_group=("" if status == "ok"
                             else manifest_mod.spec_signature(codec, width, height, fps, pix,
-                                                             (st.rotation if st else 0))),
+                                                             (st.rotation if st else 0), acodec)),
                 has_camera_audio=has_cam, original_audio_codec=acodec,
                 audio_lossless=audio_lossless, has_wav=clip.has_wav(),
                 baseline_chapter_index=idx,
@@ -892,20 +892,38 @@ class MergeWorker(QThread):
             _, fp_gate = get_ffmpeg()
             tag_v = "hvc1" if (getattr(self._conform, "codec", "hevc") or "hevc").lower() in ("hevc", "h265") else "avc1"
 
-            # Which tracks can survive the round-trip is decided ONCE from a
-            # representative clip (temp_clips[0]) rather than per-clip: every
-            # clip in this group was built by the SAME OutputPlan, so track
-            # COUNT/codec is uniform across the group by construction — only
-            # the content differs. (The per-clip loops below still reprobe
-            # and verify each individual file, matching the existing
-            # defense-in-depth; a representative mismatched against reality
-            # for any one clip falls the WHOLE group back to the plain
-            # concat, same as before, rather than attempting to reconcile a
-            # heterogeneous group.)
-            rep_v, rep_audios = probe_stream_codecs(fp_gate, str(temp_clips[0]))
-            video_ok, video_reason = ts_route_supported(rep_v or temp_clip_codecs[0])
-            safe_idx = [i for i, ac in enumerate(rep_audios) if audio_codec_ts_safe(ac)]
-            unsafe_idx = [i for i, ac in enumerate(rep_audios) if not audio_codec_ts_safe(ac)]
+            # Which tracks can survive the round-trip is decided from EVERY
+            # clip's actual probed layout, not one representative. The two
+            # are NOT the same thing: every clip shares the same OutputPlan,
+            # but a "copy" fill (the camera track, most commonly) inherits
+            # whatever audio codec that clip's OWN source happens to carry —
+            # which can genuinely differ per clip in a mixed-source merge.
+            # Measured directly: a merge of six AAC-camera clips plus one
+            # ProRes-origin clip (whose camera audio is PCM, copied through
+            # unchanged) — checking only clip[0] (AAC) called track 0 "safe"
+            # for the whole group, the PCM clip then failed the per-clip
+            # verify further down and the ENTIRE join fell back to the plain
+            # concat — reintroducing the very parameter-set-loss corruption
+            # this fix exists to prevent, for a merge that should have taken
+            # the split route cleanly. A track is only as TS-safe as its
+            # least-safe clip: if any clip's audio at a given index isn't
+            # TS-safe, that whole track index routes via the plain per-track
+            # join for every clip, not just the odd one out.
+            per_clip_layout = [probe_stream_codecs(fp_gate, str(p)) for p in temp_clips]
+            video_ok, video_reason = True, ""
+            for (v, _), fallback_codec in zip(per_clip_layout, temp_clip_codecs):
+                ok, reason = ts_route_supported(v or fallback_codec)
+                if not ok:
+                    video_ok, video_reason = False, reason
+                    break
+            n_tracks = max((len(a) for _, a in per_clip_layout), default=0)
+            safe_idx, unsafe_idx = [], []
+            for i in range(n_tracks):
+                codecs_at_i = [a[i] for _, a in per_clip_layout if i < len(a)]
+                if all(audio_codec_ts_safe(ac) for ac in codecs_at_i):
+                    safe_idx.append(i)
+                else:
+                    unsafe_idx.append(i)
 
             if not video_ok:
                 ts_mode, ts_skip_reason = "none", video_reason
@@ -1031,7 +1049,7 @@ class MergeWorker(QThread):
                         unsafe_files.append(u_out)
 
                     cmd = build_split_final_mux_cmd(
-                        ff, video_part, unsafe_files, unsafe_idx, len(rep_audios),
+                        ff, video_part, unsafe_files, unsafe_idx, n_tracks,
                         chapters_file, baseline_target, progress_file,
                         extra_out_args=embed, tag_v=tag_v)
                 else:

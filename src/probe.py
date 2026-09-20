@@ -620,3 +620,26 @@ def verify_ts_remux(ffprobe_bin: str, source: str, ts_path: str) -> tuple:
         return (False, "the MPEG-TS remux lost the audio track "
                        "(its codec has no MPEG-TS stream type)")
     return (True, "")
+
+
+def probe_stream_codecs(ffprobe_bin: str, path: str) -> tuple:
+    """Ground-truth (video_codec, [audio_codec, ...]) straight from the file on
+    disk — used by the MPEG-TS carriage gate against a freshly-produced
+    per-clip temp file, where the actual audio codec(s) depend on which
+    branch of the mux plan ran (camera audio kept as-is, a backup track
+    added as ALAC, etc.) and guessing from the source clip's own probe data
+    would be wrong. Cheap: metadata-only, no frame decode."""
+    try:
+        raw = _run_ffprobe(ffprobe_bin, path)
+    except Exception:
+        return ("", [])
+    video_codec = ""
+    audio_codecs = []
+    for st in raw.get("streams", []) or []:
+        t = (st.get("codec_type") or "").lower()
+        name = st.get("codec_name", "")
+        if t == "video" and not video_codec:
+            video_codec = name
+        elif t == "audio" and name:
+            audio_codecs.append(name)
+    return (video_codec, audio_codecs)

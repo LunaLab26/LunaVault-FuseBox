@@ -1565,3 +1565,131 @@ def test_ts_join_keeps_duration_honest_with_audio():
                        "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(out)],
                       capture_output=True, text=True).stdout.strip()
     assert "ac3" in astreams, f"audio must survive the join, got {astreams!r}"
+
+
+def test_probe_stream_codecs_finds_video_and_all_audio_tracks():
+    import subprocess as sp, tempfile
+    from core.binaries import get_ffmpeg
+    from probe import probe_stream_codecs
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    out = d / "multi.mov"
+    sp.run([ff, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            "-c:a:0", "aac", "-c:a:1", "pcm_s16le", str(out)],
+           check=True, capture_output=True)
+    v, audios = probe_stream_codecs(fp, str(out))
+    assert v == "hevc"
+    assert audios == ["aac", "pcm_s16le"]
+
+
+def test_probe_stream_codecs_handles_unreadable_file():
+    from probe import probe_stream_codecs
+    v, audios = probe_stream_codecs("ffprobe", "/nonexistent/path/x.mp4")
+    assert v == "" and audios == []
+
+
+# ── Camera-audio codec uniformity (mixed native codecs across a merge) ──────
+
+def test_camera_slot_transcodes_non_aac_source_instead_of_copying():
+    """The camera slot's docstring states its codec is fixed at AAC "so a
+    stream copy concat stays valid" — but the old implementation's "copy"
+    fill stream-copied whatever the clip's NATIVE audio codec happened to
+    be. Confirmed directly: a merge mixing AAC-camera clips with one
+    PCM-camera clip (a ProRes export's native audio) corrupted at the audio
+    splice via plain -c copy concat alone, with no MPEG-TS route involved —
+    concatenating genuinely different codecs via -c copy is invalid
+    regardless of container. A source whose camera audio isn't already AAC
+    must be transcoded to it, not copied."""
+    from core.ffmpeg_cmd import _slot_fill, MixSpec
+    pcm_clip = ClipInfo(path=Path("c.mov"),
+                        stream=StreamInfo(status="transcode", audio_codec="pcm_s16le"))
+    fill, codec, title = _slot_fill("camera", pcm_clip, MixSpec())
+    assert fill == "cam_transcode" and codec == "aac"
+
+    aac_clip = ClipInfo(path=Path("c.mp4"),
+                        stream=StreamInfo(status="transcode", audio_codec="aac"))
+    fill2, codec2, title2 = _slot_fill("camera", aac_clip, MixSpec())
+    assert fill2 == "copy" and codec2 == "aac"   # unchanged for the common case
+
+
+def test_cam_transcode_maps_source_and_encodes_aac():
+    plan = OutputPlan(tracks=[OutputTrack("camera")])
+    pcm_clip = ClipInfo(path=Path("c.mov"),
+                        stream=StreamInfo(status="transcode", width=1920, height=1080,
+                                          conflicts=["1920×1080"], audio_codec="pcm_s16le"))
+    cmd = build_mux_cmd_plan("ffmpeg", pcm_clip, Path("o.mov"), PF, plan, "crop",
+                             conform=ConformSpec(codec="h264", pix_fmt="yuv420p"))
+    s = " ".join(cmd)
+    assert "-map 0:a:0" in s
+    assert "-c:a:0 aac" in s
+    assert "-c:a:0 copy" not in s
+
+
+def test_archival_spec_signature_separates_mismatched_audio_codecs():
+    """spec_signature's own docstring says it groups by "the params that
+    must match for a stream-copy concat to stay valid" — audio codec IS one
+    of those params (the archival join stream-copies audio too), but wasn't
+    included, so two clips with identical video specs but different native
+    audio codecs (AAC vs PCM) landed in the same archival group and
+    corrupted at the audio splice the same way."""
+    from core.manifest import spec_signature
+    a = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le", audio_codec="aac")
+    b = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le", audio_codec="pcm_s16le")
+    assert a != b
+    # Same audio codec (or both silent) -> still grouped together, unchanged.
+    c = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le", audio_codec="aac")
+    assert a == c
+    d = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le")
+    e = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le")
+    assert d == e   # both audio-less -> same bucket
+
+
+def test_mixed_camera_codec_merge_decodes_clean_end_to_end():
+    """Real ffmpeg integration: two AAC-camera clips + one PCM-camera clip
+    (mirrors the ProRes-export scenario), through a REAL merge with the
+    default plan. Before this fix this corrupted at the audio splice
+    (confirmed: 181 decode errors on the exact same fixture shape)."""
+    import subprocess as sp, tempfile, os as _os
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    clips_src = []
+    for i, (freq, acodec, ext) in enumerate([(440, "aac", "mp4"), (880, "aac", "mp4"),
+                                             (1200, "pcm_s16le", "mov")]):
+        p = d / f"c{i}.{ext}"
+        sp.run([ff, "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+                "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=2",
+                "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+                "-c:a", acodec, str(p)], check=True, capture_output=True)
+        clips_src.append(p)
+
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from probe import probe as _probe, apply_conformance as _apply_conf, DEFAULT_BASELINE as _DB
+    from ffmpeg_runner import MergeWorker
+
+    clips = []
+    for i, p in enumerate(clips_src):
+        info = _probe(fp, str(p))
+        info = _apply_conf(info, _DB)
+        clips.append(ClipInfo(path=p, stream=info, order_idx=i))
+
+    conform = ConformSpec(width=320, height=240, fps="25", codec="hevc", pix_fmt="yuv420p")
+    out_path = d / "master.mov"
+    w = MergeWorker(clips, out_path, OutputPlan(), "crop", enable_preview=False, conform=conform)
+    result = {}
+    w.finished.connect(lambda ok, msg: result.update(ok=ok, msg=msg))
+    w.run()
+    assert result.get("ok"), result.get("msg")
+
+    errs = sp.run([ff, "-v", "error", "-i", str(out_path), "-f", "null", "-"],
+                  capture_output=True, text=True).stderr
+    err_lines = [l for l in errs.splitlines() if l.strip()]
+    assert not err_lines, f"expected clean decode, got {len(err_lines)} errors: {err_lines[:5]}"
