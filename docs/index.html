@@ -56,6 +56,19 @@
   .dl .plat{font-size:15px;font-weight:600}
   .dl .note{color:var(--muted);font-size:13px}
 
+  .install{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px}
+  .install .card{padding:22px}
+  .install .plat{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .install ol{margin:14px 0 0;padding-left:22px;color:var(--muted);font-size:14px}
+  .install li{margin-bottom:10px}
+  .install li::marker{color:var(--accent);font-weight:600}
+  .install code{background:var(--surface2);border:1px solid var(--border);border-radius:5px;
+    padding:1px 6px;font-size:13px;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .install .tip{margin-top:14px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);
+    border-radius:8px;font-size:13px;color:var(--muted)}
+  .install .tip b{color:var(--accent)}
+  @media(max-width:640px){.install{grid-template-columns:1fr}}
+
   footer{padding:40px 0 60px;text-align:center;color:var(--dim);font-size:13px;
     border-top:1px solid #2A1808}
   footer a{color:var(--muted)}
@@ -126,6 +139,32 @@
       <div class="card"><span class="plat">Steam Deck / Linux</span><span class="note">Unzip and run LunaVaultFuseBox — a self-contained x86-64 build.</span><a class="btn" href="https://github.com/LunaLab26/LunaVault-FuseBox/releases/download/v1.4.004/LunaVaultFuseBox-v1.4.004-build47-linux-x86_64.zip">Download for Linux</a></div>
     </div>
     <p style="color:var(--dim);font-size:13px;margin-top:14px">Prefer to build it yourself? <a href="https://github.com/LunaLab26/LunaVault-FuseBox#run-from-source">Run from source.</a> · <a href="https://github.com/LunaLab26/LunaVault-FuseBox/releases/latest">All releases</a></p>
+  </section>
+
+  <section>
+    <h2>Install guide</h2>
+    <div class="install">
+      <div class="card">
+        <span class="plat">🪟 Windows</span>
+        <ol>
+          <li>Click <b>Download for Windows</b> above to get the <code>.zip</code>.</li>
+          <li>Right-click the downloaded file and choose <b>Extract All…</b> (or use any unzip tool) to a folder you can find again — your Desktop or Documents works fine.</li>
+          <li>Open the extracted folder and double-click <code>LunaVaultFuseBox.exe</code>. Nothing else to install — no admin rights needed.</li>
+          <li>Windows SmartScreen may say "Windows protected your PC" the first time, since the app isn't code-signed. Click <b>More info</b>, then <b>Run anyway</b>.</li>
+        </ol>
+        <div class="tip"><b>Tip:</b> keep the whole extracted folder together — the <code>.exe</code> depends on the other files sitting next to it.</div>
+      </div>
+      <div class="card">
+        <span class="plat">🐧 Steam Deck / Linux</span>
+        <ol>
+          <li>Click <b>Download for Linux</b> above to get the <code>.zip</code>.</li>
+          <li>Unzip it — right-click → <b>Extract Here</b> in a file manager, or in a terminal: <code>unzip LunaVaultFuseBox-*-linux-x86_64.zip</code>.</li>
+          <li>If the extracted <code>LunaVaultFuseBox</code> file isn't already marked executable (double-clicking does nothing, or a terminal shows "Permission denied"), fix it once with <code>chmod +x LunaVaultFuseBox</code> — zip files don't always preserve that bit.</li>
+          <li>Run it: double-click it in your file manager, or from a terminal: <code>./LunaVaultFuseBox</code>.</li>
+        </ol>
+        <div class="tip"><b>On Steam Deck:</b> switch to <b>Desktop Mode</b> first (Power menu → Switch to Desktop) — the packaged build is a regular Linux app, not a Steam game, so it needs Desktop Mode to launch and show its window.</div>
+      </div>
+    </div>
   </section>
 
   <section style="text-align:center">
