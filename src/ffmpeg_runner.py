@@ -39,6 +39,7 @@ from core.ffmpeg_cmd import (
     build_concat_cmd, build_archival_concat_cmd, ts_route_supported,
     audio_codec_ts_safe, build_ts_remux_selective_progress_cmd,
     build_track_concat_progress_cmd, build_split_final_mux_cmd,
+    mov_supports_video_codec, build_archival_sidecar_cmd,
     ConformSpec, DEFAULT_CONFORM,
 )
 from core.extract import (build_recovery_plan, build_recover_clip_cmd,
@@ -550,7 +551,36 @@ class MergeWorker(QThread):
             manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
         if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
             embed = None
-        cmd = build_final_archival_mux_cmd(ff, baseline, archival_files, final_tmp,
+
+        # An archival track is always the ORIGINAL codec, stream-copied never
+        # transcoded — that's the entire point of it. But not every codec a
+        # camera produces can be embedded in a .mov container at all (VP9 is
+        # the confirmed real case: ffmpeg's MOV muxer refuses it outright,
+        # "vp9 only supported in MP4", which previously failed this ENTIRE
+        # merge over one odd-spec original rather than just that one
+        # archival track). For a .mov final output, redirect any archival
+        # file the muxer can't carry to its own sidecar .mkv (which accepts
+        # virtually any codec) instead of embedding it — still fully
+        # recoverable, byte-exact, just not single-file for that one clip.
+        embeddable_archival = archival_files
+        if str(final_tmp).lower().endswith(".mov"):
+            embeddable_archival = []
+            for i, af in enumerate(archival_files):
+                video_codec, _ = probe_stream_codecs(fp, str(af))
+                if mov_supports_video_codec(video_codec):
+                    embeddable_archival.append(af)
+                    continue
+                sidecar = self._output.with_name(f"{self._output.stem}.archival_{i+1}.mkv")
+                sidecar_cmd = build_archival_sidecar_cmd(ff, af, sidecar, progress_file)
+                if not self._run_stage(sidecar_cmd, temp_dir, progress_file,
+                                       f"Saving archival track {i + 1} separately "
+                                       f"({video_codec} isn't supported inside .mov)",
+                                       stage_total, stage_total, total_dur):
+                    return False
+                self._log(f"Archival track {i + 1} ({video_codec}) can't be embedded "
+                          f"in a .mov master — saved separately as {sidecar.name} instead.")
+
+        cmd = build_final_archival_mux_cmd(ff, baseline, embeddable_archival, final_tmp,
                                            progress_file, extra_out_args=embed,
                                            base_has_video=bool(base_video_count))
         return self._run_stage(cmd, temp_dir, progress_file,

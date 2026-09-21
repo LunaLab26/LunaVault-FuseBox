@@ -1060,6 +1060,28 @@ def audio_codec_ts_safe(audio_codec: str) -> bool:
     return not audio_codec or (audio_codec or "").strip().lower() in _TS_SAFE_AUDIO
 
 
+# Video codecs ffmpeg's MOV muxer refuses outright when an archival track's
+# ORIGINAL codec (stream-copied, never transcoded — that is the entire point
+# of an archival track) doesn't match what MOV can carry. Confirmed directly:
+# a real merge whose "Archival master" preserved a VP9 original (a Pixel
+# phone clip, real footage) failed at the final combine step with "vp9 only
+# supported in MP4" / "Could not write header ... Invalid argument" —
+# aborting the ENTIRE merge over one odd-spec original, not just that one
+# archival track. MKV has no such restriction (it will carry almost any
+# codec), which is why an incompatible archival track gets redirected to a
+# sidecar .mkv instead of embedded in the .mov master — see
+# ffmpeg_runner.py's _build_and_mux_archival.
+_MOV_UNSUPPORTED_VIDEO_CODECS = {"vp9", "av1"}
+
+
+def mov_supports_video_codec(video_codec: str) -> bool:
+    """Can ffmpeg's MOV muxer carry this video codec as a stream-copied
+    track? Only meaningful for a `.mov`-extension output — .mkv accepts
+    everything, so callers should skip this check entirely for a non-MOV
+    final container."""
+    return (video_codec or "").strip().lower() not in _MOV_UNSUPPORTED_VIDEO_CODECS
+
+
 def build_ts_remux_selective_progress_cmd(ff: str, segment: Path, out_ts: Path,
                                           codec: str, audio_indices: list,
                                           progress_file: Path) -> list:
@@ -1449,6 +1471,18 @@ def build_archival_concat_cmd(ff: str, concat_file: Path, output: Path) -> list:
     return [ff, "-y", "-v", "error",
             "-f", "concat", "-safe", "0", "-i", str(concat_file),
             "-map", "0:v:0", "-map", "0:a:0?", "-map_chapters", "-1", "-c", "copy", str(output)]
+
+
+def build_archival_sidecar_cmd(ff: str, archival_file: Path, output: Path,
+                               progress_file: Path) -> list:
+    """Remux one archival intermediate that mov_supports_video_codec() flagged
+    as MOV-incompatible into its own standalone .mkv, stream-copied — the
+    fallback for build_final_archival_mux_cmd when embedding it in the .mov
+    master would fail the whole merge outright. Sits beside the finished
+    master rather than inside it; still fully recoverable, just not
+    single-file."""
+    return [ff, "-y", "-i", str(archival_file), "-map", "0:v", "-map", "0:a?",
+           "-c", "copy", "-progress", str(progress_file), "-nostats", str(output)]
 
 
 def build_final_archival_mux_cmd(ff: str, baseline: Path, archival_files: list,

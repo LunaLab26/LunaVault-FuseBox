@@ -21,6 +21,7 @@ from core.ffmpeg_cmd import (
     _override_fill, _resolve_hw_extras, _is_unsafe_vaapi_main10, _range_filter,
     build_ts_remux_cmd, build_ts_remux_progress_cmd, build_ts_concat_cmd,
     build_ts_archival_concat_cmd,
+    mov_supports_video_codec, build_archival_sidecar_cmd,
 )
 
 PF = Path("progress.txt")
@@ -1693,3 +1694,89 @@ def test_mixed_camera_codec_merge_decodes_clean_end_to_end():
                   capture_output=True, text=True).stderr
     err_lines = [l for l in errs.splitlines() if l.strip()]
     assert not err_lines, f"expected clean decode, got {len(err_lines)} errors: {err_lines[:5]}"
+
+
+# ── Archival tracks whose codec MOV can't carry (VP9) ────────────────────────
+
+def test_mov_supports_video_codec_flags_vp9_and_av1():
+    from core.ffmpeg_cmd import mov_supports_video_codec
+    assert not mov_supports_video_codec("vp9")
+    assert not mov_supports_video_codec("VP9")
+    assert not mov_supports_video_codec("av1")
+    assert mov_supports_video_codec("h264")
+    assert mov_supports_video_codec("hevc")
+    assert mov_supports_video_codec("prores")
+    assert mov_supports_video_codec("")   # no video stream at all isn't a codec conflict
+
+
+def test_build_archival_sidecar_cmd_stream_copies_to_mkv():
+    cmd = build_archival_sidecar_cmd("ffmpeg", Path("archive_0.mov"), Path("out.archival_1.mkv"),
+                                     Path("p.txt"))
+    s = " ".join(str(x) for x in cmd)
+    assert "-c copy" in s
+    assert cmd[-1] == "out.archival_1.mkv"
+    assert "0:v" in cmd and "0:a?" in cmd
+
+
+def test_archival_vp9_sidecar_end_to_end_real_ffmpeg():
+    """Real bug, found driving the actual GUI: a merge whose 'Archival
+    master' preserved a VP9 original (a real Pixel-phone clip) failed the
+    ENTIRE merge at the final combine step - ffmpeg's MOV muxer refuses VP9
+    outright ("vp9 only supported in MP4"). This drives a real MergeWorker
+    merge with archival on and a VP9-sourced clip mixed in with ordinary
+    AAC/HEVC clips, and confirms the merge now succeeds with the VP9
+    archival track redirected to a sidecar .mkv instead of aborting."""
+    import subprocess as sp, tempfile, os as _os
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+
+    # Clip 1: ordinary HEVC/AAC (matches baseline -> "ok", no archival needed).
+    c1 = d / "c1.mp4"
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+           "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+           "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-c:a", "aac", str(c1)],
+          check=True, capture_output=True)
+
+    # Clip 2: VP9 — odd-spec, triggers an archival track in its own native codec.
+    c2 = d / "c2.mp4"
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+           "-f", "lavfi", "-i", "sine=frequency=880:duration=2",
+           "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", "-c:a", "aac", str(c2)],
+          check=True, capture_output=True)
+    assert sp.run([fp, "-v", "error", "-select_streams", "v", "-show_entries",
+                  "stream=codec_name", "-of", "csv=p=0", str(c2)],
+                 capture_output=True, text=True).stdout.strip() == "vp9"
+
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from probe import probe as _probe, apply_conformance as _apply_conf, DEFAULT_BASELINE as _DB
+    from ffmpeg_runner import MergeWorker
+
+    clips = []
+    for i, p in enumerate([c1, c2]):
+        info = _probe(fp, str(p))
+        info = _apply_conf(info, _DB)
+        clips.append(ClipInfo(path=p, stream=info, order_idx=i))
+
+    conform = ConformSpec(width=320, height=240, fps="25", codec="hevc", pix_fmt="yuv420p")
+    out_path = d / "master.mov"
+    w = MergeWorker(clips, out_path, OutputPlan(), "crop", enable_preview=False,
+                    conform=conform, archival=True)
+    result = {}
+    w.finished.connect(lambda ok, msg: result.update(ok=ok, msg=msg))
+    w.run()
+    assert result.get("ok"), f"merge should succeed via the sidecar fallback, got: {result.get('msg')}"
+
+    assert out_path.exists()
+    sidecars = list(d.glob("master.archival_*.mkv"))
+    assert sidecars, "expected the VP9 archival track redirected to a sidecar .mkv"
+    vcodec = sp.run([fp, "-v", "error", "-select_streams", "v", "-show_entries",
+                    "stream=codec_name", "-of", "csv=p=0", str(sidecars[0])],
+                   capture_output=True, text=True).stdout.strip()
+    assert vcodec == "vp9", "the archival copy must stay byte-exact (original codec), not transcoded"
+
+    errs = sp.run([ff, "-v", "error", "-i", str(out_path), "-f", "null", "-"],
+                 capture_output=True, text=True).stderr
+    assert not [l for l in errs.splitlines() if l.strip()], f"master should decode clean: {errs}"
