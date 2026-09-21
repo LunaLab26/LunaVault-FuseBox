@@ -532,15 +532,60 @@ class MergeWorker(QThread):
                     e.recovery_fidelity = "decode-lossless"
             groups_entries.append(entries_in_group)
 
-        manifest_mod.assign_archival_locations(groups_entries, base_video_count, base_audio_count)
+        # Which archival intermediates the final container can actually embed
+        # has to be decided BEFORE assigning master video/audio-stream indices
+        # (below) — a track redirected to its own sidecar (VP9 is the confirmed
+        # real case: ffmpeg's MOV muxer refuses it outright) never occupies a
+        # real slot in the master, so it must never consume one of these
+        # counters. Splitting late used to leave every later clip's manifest
+        # entry pointing at the WRONG master stream (off by however many
+        # earlier groups got redirected) — confirmed as a real regression this
+        # way: it silently broke recovery/verify for every clip after the
+        # first redirected one, not just the redirected one itself.
+        _, fp = get_ffmpeg()
+        kw = no_window()
+        is_mov_output = str(final_tmp).lower().endswith(".mov")
+        embeddable_pairs = []   # (archival_file, entries) staying in the master
+        sidecar_pairs = []      # (archival_file, entries, video_codec) redirected to their own file
+        for af, entries_in_group in zip(archival_files, groups_entries):
+            if is_mov_output:
+                video_codec, _ = probe_stream_codecs(fp, str(af))
+                if not mov_supports_video_codec(video_codec):
+                    sidecar_pairs.append((af, entries_in_group, video_codec))
+                    continue
+            embeddable_pairs.append((af, entries_in_group))
+
+        embeddable_archival = [af for af, _ in embeddable_pairs]
+        manifest_mod.assign_archival_locations(
+            [g for _, g in embeddable_pairs], base_video_count, base_audio_count)
+
+        for i, (af, entries_in_group, video_codec) in enumerate(sidecar_pairs):
+            sidecar = self._output.with_name(f"{self._output.stem}.archival_{i + 1}.mkv")
+            sidecar_cmd = build_archival_sidecar_cmd(ff, af, sidecar, progress_file)
+            if not self._run_stage(sidecar_cmd, temp_dir, progress_file,
+                                   f"Saving archival track {i + 1} separately "
+                                   f"({video_codec} isn't supported inside .mov)",
+                                   stage_total, stage_total, total_dur):
+                return False
+            self._log(f"Archival track {i + 1} ({video_codec}) can't be embedded "
+                      f"in a .mov master — saved separately as {sidecar.name} instead.")
+            # A sidecar is its own standalone file (built the same "0:v -0:a?"
+            # shape as any archival track — see build_archival_sidecar_cmd), so
+            # its video/audio are always LOCAL index 0, never a master-file
+            # index. assign_in_track_offsets still applies unchanged for a
+            # multi-clip sidecar group; measure_in_track_offsets (below) then
+            # re-pins it to real keyframes exactly like an embeddable group.
+            manifest_mod.assign_in_track_offsets(entries_in_group)
+            for e in entries_in_group:
+                e.archival_track = 0
+                e.archival_audio_stream = 0 if e.has_camera_audio else None
+                e.archival_sidecar = sidecar.name
 
         # assign_archival_locations only sets the DRIFTING duration-sum offsets.
         # For every concatenated (multi-clip) archival track, re-pin each clip's
         # in_track_start/duration to the built intermediate's real keyframes, so
         # recovery's `-ss` seek lands on the right clip boundary (see
         # manifest.measure_in_track_offsets). Lone-clip tracks stay at offset 0.
-        _, fp = get_ffmpeg()
-        kw = no_window()
         for entries_in_group, clips_in_group, interm in multi_clip_groups:
             kf_times = probe_keyframe_times(fp, str(interm), **kw)
             total_dur = probe_video_stream_duration(fp, str(interm), **kw)
@@ -551,34 +596,6 @@ class MergeWorker(QThread):
             manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
         if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
             embed = None
-
-        # An archival track is always the ORIGINAL codec, stream-copied never
-        # transcoded — that's the entire point of it. But not every codec a
-        # camera produces can be embedded in a .mov container at all (VP9 is
-        # the confirmed real case: ffmpeg's MOV muxer refuses it outright,
-        # "vp9 only supported in MP4", which previously failed this ENTIRE
-        # merge over one odd-spec original rather than just that one
-        # archival track). For a .mov final output, redirect any archival
-        # file the muxer can't carry to its own sidecar .mkv (which accepts
-        # virtually any codec) instead of embedding it — still fully
-        # recoverable, byte-exact, just not single-file for that one clip.
-        embeddable_archival = archival_files
-        if str(final_tmp).lower().endswith(".mov"):
-            embeddable_archival = []
-            for i, af in enumerate(archival_files):
-                video_codec, _ = probe_stream_codecs(fp, str(af))
-                if mov_supports_video_codec(video_codec):
-                    embeddable_archival.append(af)
-                    continue
-                sidecar = self._output.with_name(f"{self._output.stem}.archival_{i+1}.mkv")
-                sidecar_cmd = build_archival_sidecar_cmd(ff, af, sidecar, progress_file)
-                if not self._run_stage(sidecar_cmd, temp_dir, progress_file,
-                                       f"Saving archival track {i + 1} separately "
-                                       f"({video_codec} isn't supported inside .mov)",
-                                       stage_total, stage_total, total_dur):
-                    return False
-                self._log(f"Archival track {i + 1} ({video_codec}) can't be embedded "
-                          f"in a .mov master — saved separately as {sidecar.name} instead.")
 
         cmd = build_final_archival_mux_cmd(ff, baseline, embeddable_archival, final_tmp,
                                            progress_file, extra_out_args=embed,
@@ -1332,6 +1349,16 @@ class MergeWorker(QThread):
         own_archival_track = entry.archival_track is not None
         safe_to_read_unbounded = own_archival_track and plan.bit_exact
         kwargs = no_window()
+        # A sidecar-carried clip (ClipEntry.archival_sidecar) lives in its own
+        # standalone file next to the master, not inside it — every RECOVERED-
+        # side probe/extraction below must read that file, not the master
+        # itself; plan.video_stream/audio_stream are already local (0) indices
+        # into it either way. The metadata check further down goes through
+        # build_recover_clip_cmd, which already does this same substitution
+        # internally from plan.sidecar_path, so it keeps passing self._output
+        # unchanged.
+        rec_source = (str(self._output.parent / plan.sidecar_path)
+                     if plan.sidecar_path else str(self._output))
         if self._skip_predictable_verify:
             # Only worth the extra ffprobe call when it could actually change
             # the prediction: a clip with its own archival track never hits
@@ -1471,7 +1498,7 @@ class MergeWorker(QThread):
                 # than assuming entry.codec applies to both sides (confirmed
                 # directly: assuming it crashed the annexb bitstream filter when
                 # an h264 original was re-encoded into an HEVC baseline).
-                rec_codec = (probe_video_codec(fp, str(self._output), video_stream_index=plan.video_stream, **kwargs)
+                rec_codec = (probe_video_codec(fp, rec_source, video_stream_index=plan.video_stream, **kwargs)
                             or entry.codec) if video_expected_to_differ else entry.codec
                 # Measured windows (Task 87) take the SEEK_EPS guards: bitstream
                 # extraction (copy-mode, keyframe-snap-at-or-before) seeks a hair
@@ -1483,15 +1510,15 @@ class MergeWorker(QThread):
                 copy_seek = plan.video_start + (SEEK_EPS if plan.video_measured else 0.0)
                 dec_seek = max(0.0, plan.video_start - (SEEK_EPS if plan.video_measured else 0.0))
                 src_cmd = build_video_es_cmd(ff, str(clip.path), str(src_v), entry.codec)
-                rec_cmd = build_video_es_cmd(ff, str(self._output), str(rec_v), rec_codec,
+                rec_cmd = build_video_es_cmd(ff, rec_source, str(rec_v), rec_codec,
                                              seek=copy_seek, duration=plan.video_duration,
                                              video_stream=plan.video_stream)
-                rec_cmd_relaxed = (build_video_es_cmd(ff, str(self._output), str(rec_v), rec_codec,
+                rec_cmd_relaxed = (build_video_es_cmd(ff, rec_source, str(rec_v), rec_codec,
                                                       seek=copy_seek, video_stream=plan.video_stream)
                                    if safe_to_read_unbounded else None)
                 # Decode-lossless fallback pair: same window, but hashing decoded pixels.
                 dec_src = build_decoded_video_md5_cmd(ff, str(clip.path), video_stream=0)
-                dec_rec = build_decoded_video_md5_cmd(ff, str(self._output), video_stream=plan.video_stream,
+                dec_rec = build_decoded_video_md5_cmd(ff, rec_source, video_stream=plan.video_stream,
                                                       seek=dec_seek, duration=plan.video_duration)
                 return compare_adaptive("Video", src_cmd, rec_cmd, rec_cmd_relaxed, src_v, rec_v,
                                         decoded_pair=(dec_src, dec_rec))
@@ -1558,7 +1585,7 @@ class MergeWorker(QThread):
         else:
             try:
                 src_rot = probe_rotation(fp, str(clip.path), **kwargs)
-                rec_rot = probe_rotation(fp, str(self._output), video_stream_index=plan.video_stream, **kwargs)
+                rec_rot = probe_rotation(fp, rec_source, video_stream_index=plan.video_stream, **kwargs)
                 if src_rot == rec_rot:
                     result.checks.append(StreamCheck("Rotation", str(src_rot), str(rec_rot), True))
                 elif not own_archival_track:
@@ -1643,11 +1670,11 @@ class MergeWorker(QThread):
                     # boundary (only meaningful for the own-track case, so only
                     # offered then).
                     if safe_to_read_unbounded:
-                        rec_cmd = build_audio_pcm_cmd(ff, str(self._output), str(rec_a),
+                        rec_cmd = build_audio_pcm_cmd(ff, rec_source, str(rec_a),
                                                       seek=plan.video_start, audio_stream=plan.audio_stream)
                         rec_cmd_relaxed = None
                     else:
-                        rec_cmd = build_audio_pcm_cmd(ff, str(self._output), str(rec_a),
+                        rec_cmd = build_audio_pcm_cmd(ff, rec_source, str(rec_a),
                                                       seek=plan.video_start, duration=plan.video_duration,
                                                       audio_stream=plan.audio_stream)
                         rec_cmd_relaxed = None
@@ -1669,7 +1696,7 @@ class MergeWorker(QThread):
                     if interior >= 0.5:
                         dec_src = build_decoded_audio_md5_cmd(ff, str(clip.path), audio_stream=0,
                                                               seek=g, duration=interior)
-                        dec_rec = build_decoded_audio_md5_cmd(ff, str(self._output), audio_stream=plan.audio_stream,
+                        dec_rec = build_decoded_audio_md5_cmd(ff, rec_source, audio_stream=plan.audio_stream,
                                                               seek=plan.video_start + g, duration=interior)
                         decoded_pair = (dec_src, dec_rec)
                     else:

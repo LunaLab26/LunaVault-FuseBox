@@ -93,8 +93,17 @@ class ClipEntry:
     # Conforming clips live in the baseline (video 0:v:0 + baseline audio tracks), cut at
     # their chapter. Odd-spec clips live on an archival track, cut at the in-track offset.
     baseline_chapter_index: Optional[int] = None   # index in the master's chapter list
-    archival_track: Optional[int] = None           # 0-based master VIDEO stream, or None if baseline
-    archival_audio_stream: Optional[int] = None    # 0-based master AUDIO stream for this clip's camera audio
+    archival_track: Optional[int] = None           # 0-based VIDEO stream, or None if baseline. Indexes
+                                                    # into the MASTER file normally, or into archival_sidecar
+                                                    # (always 0 there) when that's set.
+    archival_audio_stream: Optional[int] = None    # 0-based AUDIO stream for this clip's camera audio,
+                                                    # same file-selection rule as archival_track above
+    archival_sidecar: Optional[str] = None         # filename (next to the master) of a standalone archival
+                                                    # file this clip's archival track actually lives in,
+                                                    # when its codec can't be embedded in the master's own
+                                                    # container (e.g. VP9 inside a .mov) — None means
+                                                    # archival_track/archival_audio_stream index the master
+                                                    # itself, same as ever
     in_track_start: float = 0.0                    # seconds offset within the archival track
     in_track_duration: float = 0.0
     # ── Measured concat positions (Task 85) ────────────────────────────────────

@@ -1748,6 +1748,18 @@ def test_archival_vp9_sidecar_end_to_end_real_ffmpeg():
                   "stream=codec_name", "-of", "csv=p=0", str(c2)],
                  capture_output=True, text=True).stdout.strip() == "vp9"
 
+    # Clip 3: ordinary H264 — odd-spec relative to the HEVC baseline (so it
+    # ALSO gets a normal, EMBEDDABLE archival track), positioned AFTER the
+    # VP9 clip. Real bug this catches: assigning archival stream indices
+    # before deciding the VP9 track needs a sidecar left every later clip's
+    # manifest entry pointing one video-stream index too high, silently
+    # breaking recovery/verify for it - not just for the VP9 clip itself.
+    c3 = d / "c3.mp4"
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+           "-f", "lavfi", "-i", "sine=frequency=220:duration=2",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(c3)],
+          check=True, capture_output=True)
+
     _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
@@ -1755,7 +1767,7 @@ def test_archival_vp9_sidecar_end_to_end_real_ffmpeg():
     from ffmpeg_runner import MergeWorker
 
     clips = []
-    for i, p in enumerate([c1, c2]):
+    for i, p in enumerate([c1, c2, c3]):
         info = _probe(fp, str(p))
         info = _apply_conf(info, _DB)
         clips.append(ClipInfo(path=p, stream=info, order_idx=i))
@@ -1780,3 +1792,30 @@ def test_archival_vp9_sidecar_end_to_end_real_ffmpeg():
     errs = sp.run([ff, "-v", "error", "-i", str(out_path), "-f", "null", "-"],
                  capture_output=True, text=True).stderr
     assert not [l for l in errs.splitlines() if l.strip()], f"master should decode clean: {errs}"
+
+    # The regression: c3's archival video must land at the CORRECT master
+    # stream index (not shifted by the VP9 track that got redirected to a
+    # sidecar) - recover it via the app's real recovery path and confirm the
+    # video comes back byte-exact against the original c3, not garbage from
+    # the wrong stream.
+    from core.manifest import read_manifest
+    from core.extract import build_recovery_plan, build_recover_clip_cmd
+    manifest = read_manifest(fp, str(out_path))
+    entry3 = manifest.clips[2]
+    assert entry3.archival_sidecar is None, "c3 (h264) should embed normally, not redirect to a sidecar"
+    plan3 = build_recovery_plan(manifest, entry3)
+    rec3 = d / "c3_recovered.mp4"
+    cmd3 = build_recover_clip_cmd(ff, str(out_path), plan3, str(rec3))
+    sp.run(cmd3, check=True, capture_output=True)
+    assert rec3.exists()
+
+    def _video_md5(path):
+        r = sp.run([ff, "-v", "error", "-i", str(path), "-map", "0:v:0",
+                   "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "md5", "-"],
+                  capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    assert _video_md5(c3) == _video_md5(rec3), (
+        "c3 recovered from the WRONG archival stream (the index-shift regression the "
+        "sidecar redirect introduced) - its video must round-trip byte-exact")

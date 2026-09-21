@@ -72,6 +72,9 @@ class RecoveryPlan:
                                    # untrimmed, byte-exact stream, or None if not preserved
     lrv_video_archival_track: Optional[int] = None   # this clip's preserved LRV proxy's
     lrv_audio_archival_track: Optional[int] = None   # own video/audio streams, or None if not preserved
+    sidecar_path: Optional[str] = None   # ClipEntry.archival_sidecar carried through — when set,
+                                   # video_stream/audio_stream above index THIS standalone file
+                                   # (next to the master), not the master itself
 
 
 def compute_baseline_offsets(manifest: Manifest) -> dict:
@@ -155,6 +158,7 @@ def build_recovery_plan(manifest: Manifest, entry: ClipEntry) -> Optional[Recove
         wav_archival_stream=entry.wav_archival_stream,
         lrv_video_archival_track=entry.lrv_video_archival_track,
         lrv_audio_archival_track=entry.lrv_audio_archival_track,
+        sidecar_path=getattr(entry, "archival_sidecar", None),
     )
 
 
@@ -211,9 +215,15 @@ def build_recover_clip_cmd(ff: str, master_path: str, plan: RecoveryPlan, out_pa
     boundary that rounds a hair below this clip's own IDR timestamp would
     otherwise snap a whole GOP back into the previous clip.
     """
+    # A sidecar-carried clip (see ClipEntry.archival_sidecar) lives in its own
+    # standalone file next to the master, not inside the master's container —
+    # video_stream/audio_stream still index it exactly the same way (a sidecar
+    # is built the same "0:v"/"0:a?" shape as any archival track), just against
+    # this other file instead.
+    source = str(Path(master_path).parent / plan.sidecar_path) if plan.sidecar_path else str(master_path)
     seek = plan.video_start + (SEEK_EPS if plan.video_measured else 0.0)
     cmd = [ff, "-y", "-v", "error",
-           "-ss", f"{max(0.0, seek):.3f}", "-i", str(master_path),
+           "-ss", f"{max(0.0, seek):.3f}", "-i", source,
            "-t", f"{max(0.01, plan.video_duration):.3f}"]
     # No video map at all when this clip has none anywhere (an Advanced-output
     # "video unchecked" export with no archival track for this clip) — a bare
@@ -324,10 +334,12 @@ def build_recover_camera_audio_cmd(ff: str, master_path: str, plan: RecoveryPlan
     standalone WAV file — used when the chosen output container (MP4) can't
     carry the camera audio's codec natively (see `is_mp4_compatible_audio`),
     same window as the video (`video_start`/`video_duration`, not the WAV
-    backup's own offsets)."""
+    backup's own offsets). See build_recover_clip_cmd's sidecar note above —
+    same file-selection rule applies here."""
     codec = _BIT_DEPTH_PCM.get(bit_depth, "pcm_s24le")
+    source = str(Path(master_path).parent / plan.sidecar_path) if plan.sidecar_path else str(master_path)
     return [ff, "-y", "-v", "error",
-            "-ss", f"{max(0.0, plan.video_start):.3f}", "-i", str(master_path),
+            "-ss", f"{max(0.0, plan.video_start):.3f}", "-i", source,
             "-t", f"{max(0.01, plan.video_duration):.3f}",
             "-map", f"0:a:{plan.audio_stream}", "-c:a", codec, str(out_wav_path)]
 
