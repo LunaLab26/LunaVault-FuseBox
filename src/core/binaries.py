@@ -1,5 +1,6 @@
 """core/binaries.py — locate bundled ffmpeg/ffprobe and suppress console windows."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,7 +29,20 @@ def get_ffmpeg() -> tuple:
     fp = base / "bin" / f"ffprobe{suffix}"
     if ff.exists():
         if sys.platform != "win32":
-            ff.chmod(0o755)
-            fp.chmod(0o755)
+            # Best-effort: a zip doesn't always preserve the executable bit, so
+            # this is normally needed. But bin/ffmpeg can also be a symlink to
+            # a root-owned system binary (a user's local workaround, or a
+            # future packaging choice) — chmod on a path you don't own raises
+            # PermissionError, and an unhandled exception here crashes the
+            # whole app before any window shows, with no clue why. If it's
+            # already executable there's nothing to do; if chmod fails
+            # anyway, proceed regardless — the exec attempt below is the real
+            # test, and fails loudly (unlike this).
+            for path in (ff, fp):
+                if path.exists() and not os.access(path, os.X_OK):
+                    try:
+                        path.chmod(0o755)
+                    except OSError:
+                        pass
         return str(ff), str(fp)
     return "ffmpeg", "ffprobe"
