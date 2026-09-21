@@ -2168,8 +2168,8 @@ class MergeTab(QWidget):
             self._set_loaded(False)
             QMessageBox.information(
                 self, "No clips found",
-                "No MP4 clips were found in that folder. Choose a folder that "
-                "contains your camera clips (and their WAV backups).")
+                "No video clips were found in that folder. Choose a folder "
+                "that contains your camera clips (and their WAV backups).")
             return
 
         self._set_loaded(True)

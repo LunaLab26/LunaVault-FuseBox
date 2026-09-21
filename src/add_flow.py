@@ -19,10 +19,9 @@ from PySide6.QtWidgets import (
 
 import theme
 from merge_tab import MergeTab
+from clip_model import VIDEO_EXTS as _VIDEO_EXTS
 from core.binaries import get_ffmpeg, no_window
 from core import proof as proof_mod
-
-_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".m2ts"}
 
 
 def _screen(*widgets) -> QWidget:
