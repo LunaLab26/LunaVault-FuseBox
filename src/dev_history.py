@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-07-19 22:10"
+LAST_UPDATED = "2026-09-21 14:30"
 
 
 @dataclass
@@ -25,6 +25,40 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-09-21",
+        title="v1.4.006 — merge splices are byte-safe across mixed cameras, and every video "
+              "format is found again",
+        summary="A round of testing against real, mixed-camera footage (four different "
+              "cameras in one folder, including a VP9 clip and a ProRes master) turned up "
+              "three real bugs, all fixed. Clips saved in anything but .mp4 were silently "
+              "being left out of a merge entirely. A folder with an odd-format original (like "
+              "a VP9 phone clip) could fail the whole merge at the very last step. And a "
+              "narrower version of that same fix could point a clip's \"Extract and Recover\" "
+              "at the wrong data. All three are fixed and covered by new tests run against "
+              "real footage, not just synthetic samples.",
+        details=[
+            "Fixed: the Merge tab only ever looked for .mp4 files, so a .mov, .mkv, .m4v, "
+              ".avi, .mts, or .m2ts original in the same folder was silently skipped — not "
+              "merged, not archived, no error shown. Found on a real folder mixing a GoPro-"
+              "style camera, a phone, and a ProRes master file: the clip count was quietly "
+              "wrong. The Merge tab now looks for every common video format.",
+            "Fixed: a folder containing one VP9 (or AV1) original could fail an Archival "
+              "master merge entirely, right at the final step, over that one clip — even "
+              "though every other clip merged fine. The app's own archival copies always keep "
+              "a clip's exact original file untouched, but a small number of formats (VP9 "
+              "confirmed) can't be embedded inside a .mov master file at all. Rather than "
+              "failing the whole merge, that one archival copy is now saved alongside the "
+              "master as its own small file instead — everything else proceeds normally, and "
+              "nothing about that clip's recoverability is lost.",
+            "Fixed: a side effect of the fix above could point a LATER clip's \"Extract and "
+              "Recover\" (and the app's own post-merge verification) at the wrong data inside "
+              "the master, for any clip that came after an odd-format one in the folder. Found "
+              "before it reached anyone — verification would have reported those later clips "
+              "as unrecoverable, when they were actually fine; extraction would have pulled "
+              "the wrong bytes. Recovery and verification now always find the right data.",
+        ],
+    ),
     HistoryEntry(
         date="2026-07-19",
         title="v1.4.005 — Linux/Steam Deck build fixes: the app now starts on more machines, "

@@ -3334,3 +3334,133 @@ rather than pursued further this session.
 
   Tests: `test_ffmpeg_cmd.py` (+2). 51 test files, all green (no new file —
   existing file gained tests).
+
+### Task 105 — real bug: `scan_folder()` was MP4-only, silently dropping every other video container from the Merge tab (fixed)
+
+  Found live, driving the app against a real mixed-camera folder (ProRes
+  `.mov`, `.mts`/`.m2ts` action-cam files alongside the usual `.mp4`s): the
+  Merge tab reported fewer clips found than the folder actually held, with no
+  error — `clip_model.py`'s `scan_folder()` globbed literally `folder.glob("*.mp4")`,
+  so a `.mov`/`.m4v`/`.avi`/`.mkv`/`.mts`/`.m2ts` original was invisible to
+  the merge, not conformed, not archived, just silently absent. This also
+  retroactively explained an earlier unexplained discrepancy in the Add
+  flow's clip count vs. its camera-grouping dialog's own sum.
+
+  **The fix.** New `VIDEO_EXTS` constant in `clip_model.py` (`.mp4 .mov .m4v
+  .avi .mkv .mts .m2ts`) as the single source of truth; `scan_folder()`
+  rewritten to `iterdir()` + filter on `VIDEO_EXTS` instead of a single-glob.
+  `add_flow.py`'s own private, duplicate `_VIDEO_EXTS` set replaced with an
+  import of the same constant (one definition, not two that can drift).
+  `merge_tab.py`'s "No MP4 clips were found…" empty-folder dialog corrected
+  to "No video clips were found…" (the old text was itself misleading once
+  the scan actually looks at more than MP4).
+
+  **Verified**: two new unit tests (`test_scan_folder_finds_non_mp4_video_
+  containers`, `test_scan_folder_ignores_non_video_files`) plus a live GUI
+  re-scan of the same real folder — clip count went from "6 found" to the
+  correct "7 found", with the new PRORES camera group appearing.
+
+  Tests: `test_clip_model.py` (+2). Full suite green.
+
+### Task 106 — real bug: an odd-spec archival original (VP9, confirmed; AV1 the same class) aborted the ENTIRE merge instead of just that one archival track (fixed)
+
+  Found live, testing Archival master on a folder including a real
+  VP9-sourced Pixel-phone clip mixed with ordinary HEVC/AAC clips: the merge
+  ran the whole baseline concat successfully, then failed at the very last
+  step —
+
+  ```
+  Merge failed: Finalising archive — combining baseline and originals failed
+  (exit 234). [mov @ ...] vp9 only supported in MP4. [out#0/mov @ ...] Could
+  not write header for output file #0 (incorrect codec parameters ?)
+  ```
+
+  Root cause: `build_final_archival_mux_cmd` (`core/ffmpeg_cmd.py`) embeds
+  every archival track's ORIGINAL codec — the entire point of an archival
+  track is that it's never transcoded — straight into the `.mov` final
+  output with no compatibility check. ffmpeg's MOV muxer refuses a handful of
+  codecs outright (VP9 confirmed directly; AV1 documented the same way), so
+  one odd-spec original anywhere in the folder failed the whole merge, not
+  just its own archival copy.
+
+  **The fix.** New `mov_supports_video_codec()` gate (currently a VP9/AV1
+  denylist against a `.mov`-extension output only — `.mkv` accepts virtually
+  anything, so the check is skipped for a non-MOV final container) and
+  `build_archival_sidecar_cmd()`, which stream-copies one incompatible
+  archival intermediate out to its own standalone `<master>.archival_N.mkv`
+  instead of trying to embed it. `ffmpeg_runner.py`'s `_build_and_mux_archival`
+  routes every archival file through the gate before the final combine step;
+  an incompatible one gets its own sidecar (logged plainly: which codec,
+  which file) and is excluded from the embed list, so the merge as a whole
+  no longer aborts over it.
+
+  **Verified**: real end-to-end `MergeWorker` integration test
+  (`test_archival_vp9_sidecar_end_to_end_real_ffmpeg`) — builds a real
+  `libvpx-vp9` clip alongside a normal HEVC/AAC one, archival on, asserts the
+  merge now succeeds, a `master.archival_1.mkv` sidecar exists with the VP9
+  stream byte-exact (not transcoded), and the master itself decodes clean.
+
+  Tests: `test_ffmpeg_cmd.py` (+2 unit, +1 real-ffmpeg integration). Full
+  suite green (550 passed).
+
+### Task 107 — real bug, found extending Task 106's own test: the VP9-sidecar redirect corrupted recovery for every clip whose archival group came AFTER it (fixed)
+
+  `_build_and_mux_archival` (Task 106) decided which archival intermediates
+  the final `.mov` could embed only AFTER `assign_archival_locations` had
+  already handed out every clip's manifest `archival_track`/
+  `archival_audio_stream` indices against the FULL, un-filtered list. Once a
+  VP9/AV1 track actually got redirected to its own sidecar, it no longer
+  occupied a real video/audio slot in the master — but every later clip's
+  manifest entry still pointed at the OLD (now too-high) stream index.
+  Surfaced live on a real 7-clip GUI merge: the app's own post-merge verify
+  pass reported *"4 of 7 clips did NOT verify"*, with raw ffmpeg bitstream-
+  filter errors (`Error initializing bitstream filter: h264_mp4toannexb`) on
+  exactly the clips downstream of the VP9 one — a real user would have hit
+  the same wrong-stream extraction on a real "Extract and Recover" click, not
+  just in verify.
+
+  **The fix.** Split embeddable vs. sidecar-bound archival intermediates
+  FIRST; `assign_archival_locations` now only runs over the embeddable ones,
+  so master stream indices are never handed out for a track that doesn't
+  live in the master. New `ClipEntry.archival_sidecar` field (filename, next
+  to the master) marks a clip whose archival copy lives in its own
+  standalone file instead — such a clip gets `archival_track = 0` /
+  `archival_audio_stream = (0 or None)` (a sidecar is built the same
+  "0:v -0:a?" shape as any archival track, so these are always LOCAL indices
+  into it, never the master's). `build_recover_clip_cmd` and
+  `build_recover_camera_audio_cmd` (`core/extract.py`) — and the live MD5
+  verify pass's video/rotation/camera-audio checks (`ffmpeg_runner.py`) —
+  resolve that sidecar file instead of the master whenever it's set, so both
+  a real Extract & Recover click and the verify pass work correctly for a
+  sidecar-carried clip.
+
+  **Verified**: extended Task 106's own end-to-end test with a third (H264)
+  clip placed AFTER the VP9 one, and recovered it via the app's real
+  recovery path — confirmed byte-exact against the original. Confirmed the
+  test genuinely catches the regression (stashed the fix, reran: fails with
+  an `AttributeError` before even reaching the byte-compare).
+
+  Tests: `test_ffmpeg_cmd.py` (+1, extended existing test). Full suite green
+  (550 passed; one pre-existing, unrelated VAAPI-hardware-device test
+  failure confirmed present before this change too — environment-dependent
+  on this machine's `/dev/dri` setup, not a regression).
+
+### Known issue — Merge tab's "▶ Start merge" button not rendering/clickable (not fixed, needs a human)
+
+  Hit live while driving a real ~60-clip merge through the GUI: after
+  scanning a folder and configuring settings, the action bar's row (Live
+  preview checkbox + GPU-encode checkbox + Show me…/Pre-flight…/▶ Start merge
+  buttons, `merge_tab.py`'s `btn_row`) renders ONLY the Live preview
+  checkbox — the buttons after it occupy no visible pixels at any scroll
+  position, don't respond to a click or a hover-repaint, and Tab-focus
+  walking the widget order never lands on them either. `_start_btn` should
+  be enabled (`setEnabled(bool(self._clips))`, and clips were loaded) and
+  styled with a bright accent background (`_style_start_btn`), so this reads
+  as a genuine Qt layout/paint bug in this specific row, not a disabled-state
+  styling issue — not root-caused or fixed this round (out of scope: a GUI
+  rendering defect, not a merge-logic one). Worked around for real production
+  use by driving `ffmpeg_runner.MergeWorker` directly from a script (the
+  exact class `_start_merge()` itself calls) rather than through the
+  unusable button. Needs a human with an interactive display to reproduce
+  and bisect — screenshots alone didn't reveal why only that one row's
+  buttons fail to paint.
