@@ -222,3 +222,48 @@ def test_scan_folder_ignores_non_video_files():
         clips = scan_folder(folder)
         assert len(clips) == 1
         assert clips[0].path.name == "clip.mov"
+
+
+def test_scan_folder_preserves_alphabetical_order_for_multi_day_folder_with_undated_clip():
+    """Real-world regression: a Sept 18 + Sept 19 multi-day shoot, staged
+    with numeric filename prefixes to force order, plus a ProRes export
+    renamed "000_prores.mov" (no embedded timestamp at all) to force it
+    first. scan_folder() used to re-sort everything by filename_ts alone
+    (seconds-since-midnight, no date) — colliding same-time-of-day clips
+    from different days, and sentinel-ing the undated ProRes clip to dead
+    last instead of keeping it first. It must now leave the already-correct
+    alphabetical order untouched whenever any clip lacks a full date+time."""
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d)
+        names = [
+            "000_prores.mov",
+            "001_VID_20260918_235900_001.mp4",
+            "002_VID_20260919_000100_002.mp4",
+            "003_VID_20260919_172719_125.mp4",
+        ]
+        for name in names:
+            (folder / name).write_bytes(b"")
+        clips = scan_folder(folder)
+        assert [c.path.name for c in clips] == names
+
+
+def test_scan_folder_sorts_by_date_and_time_when_every_clip_has_both():
+    """When every clip DOES carry a full `_YYYYMMDD_HHMMSS_` timestamp, an
+    out-of-alphabetical-order dump (e.g. two camera folders merged without
+    a forced numeric prefix) should still sort into real chronological
+    order, spanning midnight into the next day correctly."""
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d)
+        names = [
+            "VID_20260919_000100_002.mp4",   # day 2, 00:01 — should sort AFTER day 1 23:59
+            "VID_20260918_235900_001.mp4",   # day 1, 23:59
+            "VID_20260919_172719_125.mp4",   # day 2, 17:27
+        ]
+        for name in names:
+            (folder / name).write_bytes(b"")
+        clips = scan_folder(folder)
+        assert [c.path.name for c in clips] == [
+            "VID_20260918_235900_001.mp4",
+            "VID_20260919_000100_002.mp4",
+            "VID_20260919_172719_125.mp4",
+        ]
