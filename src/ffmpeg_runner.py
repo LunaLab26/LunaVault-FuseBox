@@ -19,7 +19,7 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from grade_manager import Grade
-from probe import probe_duration, probe_concat_segment, pix_fmt_info
+from probe import probe_duration, probe_concat_segment, pix_fmt_info, verify_ts_remux, probe_stream_codecs
 
 from core.binaries import get_app_dir, get_ffmpeg, no_window
 from core import manifest as manifest_mod
@@ -30,11 +30,16 @@ from core.eta import ConservativeEta
 from core.sync_advanced import analyze_sync
 from core.ffmpeg_cmd import (
     hms_to_seconds, MixSpec, OutputPlan, SLOWMO_RATIO,
-    build_mux_cmd, build_mux_cmd_plan, build_concat_cmd, build_concat_reencode_cmd,
+    build_mux_cmd, build_mux_cmd_plan, build_concat_reencode_cmd,
     build_whatsapp_cmd,
     build_preview_cmd, build_thumbnail_cmd,
-    build_archival_concat_cmd, build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
+    build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
     build_lrv_archival_mux_cmd,
+    build_ts_remux_progress_cmd, build_ts_concat_cmd, build_ts_archival_concat_cmd,
+    build_concat_cmd, build_archival_concat_cmd, ts_route_supported,
+    audio_codec_ts_safe, build_ts_remux_selective_progress_cmd,
+    build_track_concat_progress_cmd, build_split_final_mux_cmd,
+    mov_supports_video_codec, build_archival_sidecar_cmd,
     ConformSpec, DEFAULT_CONFORM,
 )
 from core.extract import (build_recovery_plan, build_recover_clip_cmd,
@@ -48,6 +53,7 @@ from core.verify import (
     build_decoded_video_md5_cmd, build_decoded_audio_md5_cmd, decoded_md5,
     predict_unverifiable, _PREDICTED_PREFIX,
     quick_video_rounding_check, quick_wav_rounding_check,
+    verify_master_splice_integrity,
     clip_has_audio_priming_gap,
 )
 
@@ -165,6 +171,13 @@ class MergeWorker(QThread):
         self._conform           = conform    # baseline the transcode conforms non-matching clips to
         self._per_clip_archival = per_clip_archival   # one archival track per clip (bit-exact) vs concat by spec
         self._verify_md5        = verify_md5   # post-merge: MD5-check every clip's recovery against its original
+        # Non-fatal decisions the merge made on the user's behalf that change
+        # HOW the output was produced (currently: falling back off the MPEG-TS
+        # join because a codec can't survive it). Surfaced live as a stage
+        # label and recorded in the verify log — this bug class is precisely
+        # the one where the pipeline quietly did something else and nothing
+        # said so.
+        self._merge_notices: list = []
         # Skip the extraction+hash pass ENTIRELY for a check the app already
         # knows (from the manifest, before touching ffmpeg) can't produce a
         # meaningful pass — a transcoded clip with no archival track of its
@@ -309,7 +322,7 @@ class MergeWorker(QThread):
                                    else "transcoded"),
                 spec_group=("" if status == "ok"
                             else manifest_mod.spec_signature(codec, width, height, fps, pix,
-                                                             (st.rotation if st else 0))),
+                                                             (st.rotation if st else 0), acodec)),
                 has_camera_audio=has_cam, original_audio_codec=acodec,
                 audio_lossless=audio_lossless, has_wav=clip.has_wav(),
                 baseline_chapter_index=idx,
@@ -443,13 +456,69 @@ class MergeWorker(QThread):
                 archival_files.append(Path(pairs[0][0].path))
                 entries_in_group[0].recovery_fidelity = "byte-exact"
             else:
-                lst = temp_dir / f"arch_list_{gi}.txt"
-                with open(lst, "w", encoding="utf-8") as f:
-                    for clip, _ in pairs:
-                        safe = str(clip.path.resolve()).replace("\\", "/").replace("'", r"'\''")
-                        f.write(f"file '{safe}'\n")
+                # Same TS-round-trip reasoning as the baseline concat (see
+                # ffmpeg_runner.run()'s comment and build_ts_remux_cmd's
+                # docstring): "same spec_group" only means these originals
+                # PROBE alike — codec/res/fps/pix_fmt — not that they share one
+                # encoder's actual parameter sets. Two odd-spec clips grouped
+                # here for archival could still be a plain -c copy concat away
+                # from the exact splice corruption this fixes elsewhere.
                 interm = temp_dir / f"archive_{gi}.mov"
-                if not self._run_stage(build_archival_concat_cmd(ff, lst, interm),
+                # Same MPEG-TS carriage gate as the baseline join (see
+                # core.ffmpeg_cmd.ts_route_supported). It matters MORE here:
+                # this path exists precisely because these clips are
+                # odd-spec, so they are the likeliest in the whole app to be
+                # something TS cannot carry — and an archival track that
+                # silently lost its audio would defeat the entire point of
+                # keeping the originals for recovery.
+                _, fp_arch = get_ffmpeg()
+                ts_originals: list[Path] = []
+                ts_ok, ts_skip_reason = True, ""
+                for j, (clip, _) in enumerate(pairs):
+                    codec = clip.stream.codec if clip.stream else "hevc"
+                    # These are RAW originals, untouched by any mux plan — the
+                    # app's own earlier probe of audio_codec is ground truth
+                    # here (unlike the baseline join's temp files, no reprobe
+                    # needed).
+                    audio_codec = clip.stream.audio_codec if clip.stream else ""
+                    supported, reason = ts_route_supported(codec, audio_codec)
+                    if not supported:
+                        ts_ok, ts_skip_reason = False, reason
+                        break
+                    out_ts = temp_dir / f"arch_{gi}_{j}.ts"
+                    ts_cmd = build_ts_remux_progress_cmd(ff, clip.path, out_ts, codec, progress_file)
+                    if not self._run_stage(ts_cmd, temp_dir, progress_file,
+                                           f"Archiving original files, group {gi + 1}/{len(groups)} "
+                                           f"({j + 1}/{len(pairs)}) — lossless copy for recovery",
+                                           stage_total, stage_total, total_dur):
+                        return False
+                    remux_ok, remux_reason = verify_ts_remux(fp_arch, str(clip.path), str(out_ts))
+                    if not remux_ok:
+                        ts_ok, ts_skip_reason = False, remux_reason
+                        break
+                    ts_originals.append(out_ts)
+
+                first_codec = pairs[0][0].stream.codec if pairs[0][0].stream else "hevc"
+                tag_v = "hvc1" if (first_codec or "hevc").lower() in ("hevc", "h265") else "avc1"
+                arch_list = temp_dir / f"archive_{gi}_list.txt"
+                if ts_ok:
+                    sources = ts_originals
+                    arch_cmd_builder = lambda lf: build_ts_archival_concat_cmd(ff, lf, interm, tag_v=tag_v)
+                else:
+                    self._log(f"MPEG-TS archival join skipped for group {gi + 1}: "
+                              f"{ts_skip_reason}. Falling back to a direct stream-copy join.")
+                    for tp in ts_originals:
+                        try:
+                            tp.unlink()
+                        except OSError:
+                            pass
+                    sources = [Path(c.path) for c, _ in pairs]
+                    arch_cmd_builder = lambda lf: build_archival_concat_cmd(ff, lf, interm)
+                with open(arch_list, "w", encoding="utf-8") as f:
+                    for sp in sources:
+                        safe = str(Path(sp).resolve()).replace("\\", "/").replace("'", r"'\''")
+                        f.write(f"file '{safe}'\n")
+                if not self._run_stage(arch_cmd_builder(arch_list),
                                        temp_dir, progress_file,
                                        f"Archiving original files, group {gi + 1}/{len(groups)} "
                                        "— lossless copy for recovery",
@@ -463,15 +532,60 @@ class MergeWorker(QThread):
                     e.recovery_fidelity = "decode-lossless"
             groups_entries.append(entries_in_group)
 
-        manifest_mod.assign_archival_locations(groups_entries, base_video_count, base_audio_count)
+        # Which archival intermediates the final container can actually embed
+        # has to be decided BEFORE assigning master video/audio-stream indices
+        # (below) — a track redirected to its own sidecar (VP9 is the confirmed
+        # real case: ffmpeg's MOV muxer refuses it outright) never occupies a
+        # real slot in the master, so it must never consume one of these
+        # counters. Splitting late used to leave every later clip's manifest
+        # entry pointing at the WRONG master stream (off by however many
+        # earlier groups got redirected) — confirmed as a real regression this
+        # way: it silently broke recovery/verify for every clip after the
+        # first redirected one, not just the redirected one itself.
+        _, fp = get_ffmpeg()
+        kw = no_window()
+        is_mov_output = str(final_tmp).lower().endswith(".mov")
+        embeddable_pairs = []   # (archival_file, entries) staying in the master
+        sidecar_pairs = []      # (archival_file, entries, video_codec) redirected to their own file
+        for af, entries_in_group in zip(archival_files, groups_entries):
+            if is_mov_output:
+                video_codec, _ = probe_stream_codecs(fp, str(af))
+                if not mov_supports_video_codec(video_codec):
+                    sidecar_pairs.append((af, entries_in_group, video_codec))
+                    continue
+            embeddable_pairs.append((af, entries_in_group))
+
+        embeddable_archival = [af for af, _ in embeddable_pairs]
+        manifest_mod.assign_archival_locations(
+            [g for _, g in embeddable_pairs], base_video_count, base_audio_count)
+
+        for i, (af, entries_in_group, video_codec) in enumerate(sidecar_pairs):
+            sidecar = self._output.with_name(f"{self._output.stem}.archival_{i + 1}.mkv")
+            sidecar_cmd = build_archival_sidecar_cmd(ff, af, sidecar, progress_file)
+            if not self._run_stage(sidecar_cmd, temp_dir, progress_file,
+                                   f"Saving archival track {i + 1} separately "
+                                   f"({video_codec} isn't supported inside .mov)",
+                                   stage_total, stage_total, total_dur):
+                return False
+            self._log(f"Archival track {i + 1} ({video_codec}) can't be embedded "
+                      f"in a .mov master — saved separately as {sidecar.name} instead.")
+            # A sidecar is its own standalone file (built the same "0:v -0:a?"
+            # shape as any archival track — see build_archival_sidecar_cmd), so
+            # its video/audio are always LOCAL index 0, never a master-file
+            # index. assign_in_track_offsets still applies unchanged for a
+            # multi-clip sidecar group; measure_in_track_offsets (below) then
+            # re-pins it to real keyframes exactly like an embeddable group.
+            manifest_mod.assign_in_track_offsets(entries_in_group)
+            for e in entries_in_group:
+                e.archival_track = 0
+                e.archival_audio_stream = 0 if e.has_camera_audio else None
+                e.archival_sidecar = sidecar.name
 
         # assign_archival_locations only sets the DRIFTING duration-sum offsets.
         # For every concatenated (multi-clip) archival track, re-pin each clip's
         # in_track_start/duration to the built intermediate's real keyframes, so
         # recovery's `-ss` seek lands on the right clip boundary (see
         # manifest.measure_in_track_offsets). Lone-clip tracks stay at offset 0.
-        _, fp = get_ffmpeg()
-        kw = no_window()
         for entries_in_group, clips_in_group, interm in multi_clip_groups:
             kf_times = probe_keyframe_times(fp, str(interm), **kw)
             total_dur = probe_video_stream_duration(fp, str(interm), **kw)
@@ -482,7 +596,8 @@ class MergeWorker(QThread):
             manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
         if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
             embed = None
-        cmd = build_final_archival_mux_cmd(ff, baseline, archival_files, final_tmp,
+
+        cmd = build_final_archival_mux_cmd(ff, baseline, embeddable_archival, final_tmp,
                                            progress_file, extra_out_args=embed,
                                            base_has_video=bool(base_video_count))
         return self._run_stage(cmd, temp_dir, progress_file,
@@ -561,6 +676,14 @@ class MergeWorker(QThread):
             pass
         return out_path
 
+    def _log(self, message: str):
+        """Record a non-fatal pipeline decision and show it to the user."""
+        self._merge_notices.append(message)
+        try:
+            self.progress.emit({"stage": "notice", "stage_label": message})
+        except Exception:
+            pass
+
     def run(self):
         ff, fp = get_ffmpeg()
         # Per-clip temp files go on a fast LOCAL scratch dir; only the finished
@@ -587,6 +710,11 @@ class MergeWorker(QThread):
         self._produced_bytes_base = 0
 
         temp_clips: list[Path] = []
+        # Parallel to temp_clips — the ACTUAL video codec written into each per-
+        # clip temp file (the clip's own, stream-copied, when it conforms; the
+        # conform target's, when transcoded) — needed by the TS-remux step below
+        # to pick the right Annex-B bitstream filter per segment.
+        temp_clip_codecs: list[str] = []
         cumulative_duration = 0.0
         # Measured concat positions (see manifest.ClipEntry.concat_start): the
         # concat demuxer advances each segment by the temp FILE's container
@@ -685,6 +813,9 @@ class MergeWorker(QThread):
                 return
 
             temp_clips.append(out_clip)
+            temp_clip_codecs.append(
+                clip.stream.codec if (clip.effective_status() == "ok" and clip.stream)
+                else (getattr(self._conform, "codec", "hevc") or "hevc"))
             cumulative_duration += clip.duration
             try:
                 self._produced_bytes_base += out_clip.stat().st_size
@@ -768,16 +899,216 @@ class MergeWorker(QThread):
         if self._compat_baseline:
             # Watchable-master path: one clean continuous re-encode (H.264 or
             # ProRes), so the baseline plays everywhere (no broken concat
-            # splices). See task #13.
+            # splices). See task #13. Re-encoding already produces one coherent
+            # stream end to end, so the TS round-trip below (which exists to
+            # preserve independently-encoded segments' OWN parameter sets
+            # through a stream-copy concat) doesn't apply here.
             cmd = build_concat_reencode_cmd(ff, concat_file, chapters_file, baseline_target,
                                             progress_file, extra_out_args=embed,
                                             codec=self._compat_codec,
                                             prores_profile=self._compat_prores_profile,
                                             hw_encoder=self._conform.hw_encoder,
-                                            hw_decode=self._conform.hw_decode)
+                                            hw_decode=self._conform.hw_decode,
+                                            color_range=getattr(self._conform, "color_range", "tv"))
         else:
-            cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target, progress_file,
-                                   extra_out_args=embed)
+            # Lossless stream-copy path — route each segment through MPEG-TS
+            # first (build_ts_remux_cmd's docstring has the full root-cause
+            # writeup): a plain MP4 -c copy concat (build_concat_cmd, still kept
+            # for callers that explicitly want it) keeps only the FIRST
+            # segment's HEVC/H.264 parameter sets for the whole track, so a
+            # later segment written by a different encoder — the camera vs.
+            # this app's own libx265 conform, or even two units of the same
+            # camera model — can decode wrong from that point on, invisibly to
+            # ffprobe and often to local playback. TS carries parameter sets
+            # per segment, so this costs nothing in quality and little in time
+            # (still pure stream-copy) while closing that off unconditionally,
+            # not just when a mismatch is detected in advance.
+            #
+            # The route is not unconditional, though, because MPEG-TS cannot
+            # carry every codec and does not say so: the mpegts muxer writes a
+            # codec it has no stream type for as a private `bin_data` stream
+            # and exits 0, so a PCM/FLAC/ALAC audio track or ProRes/DNxHD/VP9
+            # video silently disappears on the way back out to MP4. Losing a
+            # track outright is strictly worse than the parameter-set bug this
+            # fixes — and parameter-set loss is an H.264/HEVC phenomenon
+            # anyway — so anything the TS route cannot carry intact falls back
+            # to the plain MP4 concat, with the reason recorded in the log
+            # rather than swallowed. ts_route_supported screens on codec name
+            # before doing the work; probe.verify_ts_remux confirms per clip
+            # afterwards, covering codecs the static list has never seen.
+            _, fp_gate = get_ffmpeg()
+            tag_v = "hvc1" if (getattr(self._conform, "codec", "hevc") or "hevc").lower() in ("hevc", "h265") else "avc1"
+
+            # Which tracks can survive the round-trip is decided from EVERY
+            # clip's actual probed layout, not one representative. The two
+            # are NOT the same thing: every clip shares the same OutputPlan,
+            # but a "copy" fill (the camera track, most commonly) inherits
+            # whatever audio codec that clip's OWN source happens to carry —
+            # which can genuinely differ per clip in a mixed-source merge.
+            # Measured directly: a merge of six AAC-camera clips plus one
+            # ProRes-origin clip (whose camera audio is PCM, copied through
+            # unchanged) — checking only clip[0] (AAC) called track 0 "safe"
+            # for the whole group, the PCM clip then failed the per-clip
+            # verify further down and the ENTIRE join fell back to the plain
+            # concat — reintroducing the very parameter-set-loss corruption
+            # this fix exists to prevent, for a merge that should have taken
+            # the split route cleanly. A track is only as TS-safe as its
+            # least-safe clip: if any clip's audio at a given index isn't
+            # TS-safe, that whole track index routes via the plain per-track
+            # join for every clip, not just the odd one out.
+            per_clip_layout = [probe_stream_codecs(fp_gate, str(p)) for p in temp_clips]
+            video_ok, video_reason = True, ""
+            for (v, _), fallback_codec in zip(per_clip_layout, temp_clip_codecs):
+                ok, reason = ts_route_supported(v or fallback_codec)
+                if not ok:
+                    video_ok, video_reason = False, reason
+                    break
+            n_tracks = max((len(a) for _, a in per_clip_layout), default=0)
+            safe_idx, unsafe_idx = [], []
+            for i in range(n_tracks):
+                codecs_at_i = [a[i] for _, a in per_clip_layout if i < len(a)]
+                if all(audio_codec_ts_safe(ac) for ac in codecs_at_i):
+                    safe_idx.append(i)
+                else:
+                    unsafe_idx.append(i)
+
+            if not video_ok:
+                ts_mode, ts_skip_reason = "none", video_reason
+            elif not unsafe_idx:
+                ts_mode, ts_skip_reason = "full", ""
+            else:
+                ts_mode, ts_skip_reason = "split", ""
+
+            if ts_mode == "none":
+                self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
+                          "Falling back to a direct stream-copy join.")
+                cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
+                                       progress_file, extra_out_args=embed)
+
+            elif ts_mode == "full":
+                ts_clips: list[Path] = []
+                ts_ok = True
+                for i, (p_clip, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
+                    real_v, real_audios = probe_stream_codecs(fp_gate, str(p_clip))
+                    supported, reason = ts_route_supported(real_v or codec)
+                    if supported:
+                        for ac in real_audios:
+                            supported, reason = ts_route_supported(real_v or codec, ac)
+                            if not supported:
+                                break
+                    if not supported:
+                        ts_ok, ts_skip_reason = False, reason
+                        break
+                    out_ts = temp_dir / f"clip_{i+1:02d}.ts"
+                    ts_cmd = build_ts_remux_progress_cmd(ff, p_clip, out_ts, codec, progress_file)
+                    if not self._run_stage(ts_cmd, temp_dir, progress_file,
+                                           f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
+                                           stage_total, stage_total, clips[i].duration):
+                        return
+                    remux_ok, remux_reason = verify_ts_remux(fp, str(p_clip), str(out_ts))
+                    if not remux_ok:
+                        ts_ok, ts_skip_reason = False, remux_reason
+                        break
+                    ts_clips.append(out_ts)
+
+                if ts_ok:
+                    ts_list_file = temp_dir / "concat_list_ts.txt"
+                    with open(ts_list_file, "w", encoding="utf-8") as f:
+                        for tp in ts_clips:
+                            safe = str(tp.resolve()).replace("\\", "/").replace("'", r"'\''")
+                            f.write(f"file '{safe}'\n")
+                    cmd = build_ts_concat_cmd(ff, ts_list_file, chapters_file, baseline_target,
+                                              progress_file, extra_out_args=embed, tag_v=tag_v)
+                else:
+                    self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
+                              "Falling back to a direct stream-copy join.")
+                    for tp in ts_clips:
+                        try:
+                            tp.unlink()
+                        except OSError:
+                            pass
+                    cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
+                                           progress_file, extra_out_args=embed)
+
+            else:  # ts_mode == "split"
+                # This is the common real-world case: the app's default
+                # output plan attaches a second "backup audio" track (real
+                # WAV-backed, or a same-camera-audio duplicate) encoded as
+                # ALAC — which MPEG-TS cannot carry at all — alongside a
+                # perfectly TS-safe AAC camera track. Gating the whole join
+                # on "every track survives TS" would mean the parameter-set
+                # fix almost never applies to a default merge. Instead: the
+                # video (+ any TS-safe audio) is TS-routed as normal, each
+                # TS-unsafe track is joined on its own via a plain
+                # stream-copy concat (ALAC/PCM have no parameter-set concept
+                # to lose, so they aren't exposed to the bug the TS route
+                # exists for), and build_split_final_mux_cmd recombines both
+                # into one file in the ORIGINAL track order.
+                self._log("Splitting the join: video"
+                          + (f" + track(s) {safe_idx}" if safe_idx else "")
+                          + " via the MPEG-TS route, track(s) "
+                          f"{unsafe_idx} (lossless backup audio — ALAC/PCM/FLAC "
+                          "cannot be carried in MPEG-TS) via a direct stream-copy "
+                          "join.")
+                no_chapters = temp_dir / "no_chapters.txt"
+                no_chapters.write_text(";FFMETADATA1\n", encoding="utf-8")
+
+                ts_video_clips: list[Path] = []
+                split_ok = True
+                for i, (p_clip, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
+                    out_ts = temp_dir / f"clip_{i+1:02d}_v.ts"
+                    ts_cmd = build_ts_remux_selective_progress_cmd(
+                        ff, p_clip, out_ts, codec, safe_idx, progress_file)
+                    if not self._run_stage(ts_cmd, temp_dir, progress_file,
+                                           f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
+                                           stage_total, stage_total, clips[i].duration):
+                        return
+                    _, out_audios = probe_stream_codecs(fp, str(out_ts))
+                    if len(out_audios) != len(safe_idx):
+                        split_ok, ts_skip_reason = False, (
+                            f"the MPEG-TS remux of {p_clip.name} lost a track "
+                            "the static codec check expected to survive")
+                        break
+                    ts_video_clips.append(out_ts)
+
+                if split_ok:
+                    video_list_file = temp_dir / "concat_list_ts_video.txt"
+                    with open(video_list_file, "w", encoding="utf-8") as f:
+                        for tp in ts_video_clips:
+                            safe = str(tp.resolve()).replace("\\", "/").replace("'", r"'\''")
+                            f.write(f"file '{safe}'\n")
+                    video_part = temp_dir / "video_part.mov"
+                    vpart_cmd = build_ts_concat_cmd(ff, video_list_file, no_chapters,
+                                                    video_part, progress_file, tag_v=tag_v)
+                    if not self._run_stage(vpart_cmd, temp_dir, progress_file,
+                                           "Joining video (MPEG-TS route)",
+                                           stage_total, stage_total, cumulative_duration):
+                        return
+
+                    unsafe_files: list[Path] = []
+                    for u in unsafe_idx:
+                        u_out = temp_dir / f"audio_track_{u}.mov"
+                        u_cmd = build_track_concat_progress_cmd(ff, concat_file, u, u_out, progress_file)
+                        if not self._run_stage(u_cmd, temp_dir, progress_file,
+                                               f"Joining backup audio track {u} (direct copy)",
+                                               stage_total, stage_total, cumulative_duration):
+                            return
+                        unsafe_files.append(u_out)
+
+                    cmd = build_split_final_mux_cmd(
+                        ff, video_part, unsafe_files, unsafe_idx, n_tracks,
+                        chapters_file, baseline_target, progress_file,
+                        extra_out_args=embed, tag_v=tag_v)
+                else:
+                    self._log(f"MPEG-TS split join failed: {ts_skip_reason}. "
+                              "Falling back to a direct stream-copy join.")
+                    for tp in ts_video_clips:
+                        try:
+                            tp.unlink()
+                        except OSError:
+                            pass
+                    cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
+                                           progress_file, extra_out_args=embed)
 
         thumb = None
         if self._enable_preview:
@@ -928,9 +1259,38 @@ class MergeWorker(QThread):
         finally:
             shutil.rmtree(verify_dir, ignore_errors=True)
 
+        # Splice integrity on the finished, PLAYABLE master itself — distinct
+        # from the per-clip recovery checks above, which only prove a clip
+        # EXTRACTED back out matches its original. Full linear decode-test +
+        # a frame dump at every concat boundary (see core.verify's module
+        # comment for why both, not just the decode-test — a silent decode
+        # scan is necessary but not sufficient). Boundaries are the same
+        # cumulative clip durations chapters.txt was built from; the first
+        # clip has no preceding splice so it's excluded.
+        splice_result = None
+        if not self._cancelled:
+            try:
+                boundaries = []
+                cum = 0.0
+                for clip in clips[:-1]:
+                    cum += clip.duration
+                    boundaries.append(cum)
+                fps = (clips[0].stream.fps_float if clips and clips[0].stream else 0) or (30000 / 1001)
+                frames_dir = self._output.parent / (self._output.stem + ".splice_check")
+                splice_result = verify_master_splice_integrity(
+                    ff, str(self._output), boundaries, fps, frames_dir, **no_window())
+            except Exception:
+                splice_result = None
+
         report_path = self._output.parent / (self._output.stem + ".verify.log")
         try:
             write_verify_log(report_path, self._output.name, results)
+            if splice_result is not None:
+                with open(report_path, "a", encoding="utf-8") as f:
+                    f.write("\nSplice integrity (finished master):\n")
+                    f.write(f"{'PASS' if splice_result.passed else 'FAIL'}  {splice_result.detail}\n")
+                    if not splice_result.passed:
+                        f.write(f"       {splice_result.decode_error_detail}\n")
         except Exception:
             pass
 
@@ -941,16 +1301,24 @@ class MergeWorker(QThread):
             if c.skipped_reason.startswith(_PREDICTED_PREFIX))
         self._verify_passed = passed          # picked up by _emit_collection
         self._verify_total = total_checked
-        all_passed = total_checked > 0 and passed == total_checked
+        # A splice-corrupted master can still have every clip individually
+        # MD5-recoverable (recovery re-decodes the ORIGINAL bytes at each
+        # clip's own offset — it never plays through a splice) — so this
+        # check is independent, not redundant, and a failure here must not
+        # be masked by an all-clips-passed per-clip result.
+        splice_ok = splice_result is None or splice_result.passed
+        all_passed = total_checked > 0 and passed == total_checked and splice_ok
         skip_note = (f" ({n_predicted_skips} check{'s' if n_predicted_skips != 1 else ''} "
                      "predicted unverifiable, skipped)") if n_predicted_skips else ""
-        if all_passed:
+        if total_checked > 0 and passed == total_checked:
             summary = (f"Verified {passed}/{total_checked} clips byte-identical to their "
                       f"originals.{skip_note}")
         else:
             failed_names = ", ".join(r.name for r in results if not r.passed)
             summary = (f"⚠ {total_checked - passed} of {total_checked} clips did NOT verify: "
                       f"{failed_names}{skip_note}")
+        if splice_result is not None and not splice_result.passed:
+            summary += f" ⚠ Splice check failed: {splice_result.detail}"
         self.verification_done.emit(all_passed, summary, str(report_path))
 
     def _verify_one_clip(self, ff: str, fp: str, clip, entry, manifest, verify_dir: Path) -> ClipVerifyResult:
@@ -981,6 +1349,16 @@ class MergeWorker(QThread):
         own_archival_track = entry.archival_track is not None
         safe_to_read_unbounded = own_archival_track and plan.bit_exact
         kwargs = no_window()
+        # A sidecar-carried clip (ClipEntry.archival_sidecar) lives in its own
+        # standalone file next to the master, not inside it — every RECOVERED-
+        # side probe/extraction below must read that file, not the master
+        # itself; plan.video_stream/audio_stream are already local (0) indices
+        # into it either way. The metadata check further down goes through
+        # build_recover_clip_cmd, which already does this same substitution
+        # internally from plan.sidecar_path, so it keeps passing self._output
+        # unchanged.
+        rec_source = (str(self._output.parent / plan.sidecar_path)
+                     if plan.sidecar_path else str(self._output))
         if self._skip_predictable_verify:
             # Only worth the extra ffprobe call when it could actually change
             # the prediction: a clip with its own archival track never hits
@@ -1120,7 +1498,7 @@ class MergeWorker(QThread):
                 # than assuming entry.codec applies to both sides (confirmed
                 # directly: assuming it crashed the annexb bitstream filter when
                 # an h264 original was re-encoded into an HEVC baseline).
-                rec_codec = (probe_video_codec(fp, str(self._output), video_stream_index=plan.video_stream, **kwargs)
+                rec_codec = (probe_video_codec(fp, rec_source, video_stream_index=plan.video_stream, **kwargs)
                             or entry.codec) if video_expected_to_differ else entry.codec
                 # Measured windows (Task 87) take the SEEK_EPS guards: bitstream
                 # extraction (copy-mode, keyframe-snap-at-or-before) seeks a hair
@@ -1132,15 +1510,15 @@ class MergeWorker(QThread):
                 copy_seek = plan.video_start + (SEEK_EPS if plan.video_measured else 0.0)
                 dec_seek = max(0.0, plan.video_start - (SEEK_EPS if plan.video_measured else 0.0))
                 src_cmd = build_video_es_cmd(ff, str(clip.path), str(src_v), entry.codec)
-                rec_cmd = build_video_es_cmd(ff, str(self._output), str(rec_v), rec_codec,
+                rec_cmd = build_video_es_cmd(ff, rec_source, str(rec_v), rec_codec,
                                              seek=copy_seek, duration=plan.video_duration,
                                              video_stream=plan.video_stream)
-                rec_cmd_relaxed = (build_video_es_cmd(ff, str(self._output), str(rec_v), rec_codec,
+                rec_cmd_relaxed = (build_video_es_cmd(ff, rec_source, str(rec_v), rec_codec,
                                                       seek=copy_seek, video_stream=plan.video_stream)
                                    if safe_to_read_unbounded else None)
                 # Decode-lossless fallback pair: same window, but hashing decoded pixels.
                 dec_src = build_decoded_video_md5_cmd(ff, str(clip.path), video_stream=0)
-                dec_rec = build_decoded_video_md5_cmd(ff, str(self._output), video_stream=plan.video_stream,
+                dec_rec = build_decoded_video_md5_cmd(ff, rec_source, video_stream=plan.video_stream,
                                                       seek=dec_seek, duration=plan.video_duration)
                 return compare_adaptive("Video", src_cmd, rec_cmd, rec_cmd_relaxed, src_v, rec_v,
                                         decoded_pair=(dec_src, dec_rec))
@@ -1207,7 +1585,7 @@ class MergeWorker(QThread):
         else:
             try:
                 src_rot = probe_rotation(fp, str(clip.path), **kwargs)
-                rec_rot = probe_rotation(fp, str(self._output), video_stream_index=plan.video_stream, **kwargs)
+                rec_rot = probe_rotation(fp, rec_source, video_stream_index=plan.video_stream, **kwargs)
                 if src_rot == rec_rot:
                     result.checks.append(StreamCheck("Rotation", str(src_rot), str(rec_rot), True))
                 elif not own_archival_track:
@@ -1292,11 +1670,11 @@ class MergeWorker(QThread):
                     # boundary (only meaningful for the own-track case, so only
                     # offered then).
                     if safe_to_read_unbounded:
-                        rec_cmd = build_audio_pcm_cmd(ff, str(self._output), str(rec_a),
+                        rec_cmd = build_audio_pcm_cmd(ff, rec_source, str(rec_a),
                                                       seek=plan.video_start, audio_stream=plan.audio_stream)
                         rec_cmd_relaxed = None
                     else:
-                        rec_cmd = build_audio_pcm_cmd(ff, str(self._output), str(rec_a),
+                        rec_cmd = build_audio_pcm_cmd(ff, rec_source, str(rec_a),
                                                       seek=plan.video_start, duration=plan.video_duration,
                                                       audio_stream=plan.audio_stream)
                         rec_cmd_relaxed = None
@@ -1318,7 +1696,7 @@ class MergeWorker(QThread):
                     if interior >= 0.5:
                         dec_src = build_decoded_audio_md5_cmd(ff, str(clip.path), audio_stream=0,
                                                               seek=g, duration=interior)
-                        dec_rec = build_decoded_audio_md5_cmd(ff, str(self._output), audio_stream=plan.audio_stream,
+                        dec_rec = build_decoded_audio_md5_cmd(ff, rec_source, audio_stream=plan.audio_stream,
                                                               seek=plan.video_start + g, duration=interior)
                         decoded_pair = (dec_src, dec_rec)
                     else:

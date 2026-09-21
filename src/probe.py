@@ -55,6 +55,17 @@ class BaselineSpec:
     fps_float: float = TARGET_FPS_FLOAT
     pix_fmt: str = "yuv420p10le"
     color_space: str = "bt709"
+    # "tv" (limited, 16-235) matches ordinary camera output; a genuine full-range
+    # source (phone cameras commonly probe as yuvj420p/"pc" — see
+    # PIX_FMT_LABELS) needs its PIXELS rescaled, not just relabeled, before it
+    # can share a track with limited-range footage. See apply_conformance() and
+    # core.ffmpeg_cmd.transcode_vf_parts() for why: two clips matching on every
+    # other field but this one used to both classify "ok" (stream-copy) and
+    # land, unrescaled, on the same concat track — confirmed as a real splice-
+    # boundary corruption source (green fill + noise at the first few frames
+    # after the cut), invisible to ffprobe's summary view and to a silent
+    # decode-test alike.
+    color_range: str = "tv"
 
 
 DEFAULT_BASELINE = BaselineSpec()
@@ -111,6 +122,7 @@ class StreamInfo:
     color_space: str = ""
     color_transfer: str = ""
     color_primaries: str = ""
+    color_range: str = ""      # "tv" (limited) | "pc" (full) | "" (unreported)
     audio_codec: str = ""
     audio_sample_rate: int = 0
     audio_channels: int = 0
@@ -262,6 +274,13 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
             info.color_space   = s.get("color_space", "")
             info.color_transfer = s.get("color_transfer", "")
             info.color_primaries = s.get("color_primaries", "")
+            # "unknown" is ffprobe's own value when a container doesn't carry
+            # range at all — normalise it to "" so `apply_conformance()`'s
+            # comparison below treats "no data" the same as "no data", rather
+            # than a probe-side string literal that happens to differ from a
+            # baseline's real "tv"/"pc" value.
+            raw_range = s.get("color_range", "")
+            info.color_range = "" if raw_range in ("", "unknown") else raw_range
             # r_frame_rate is the clean, stable nominal rate; avg_frame_rate is the
             # measured average and drifts slightly per clip. Detect VFR from a large
             # r-vs-avg gap, then pick the nominal rate (see _nominal_fps) — using r
@@ -330,6 +349,16 @@ def apply_conformance(info: StreamInfo, baseline: "BaselineSpec" = DEFAULT_BASEL
     if (info.color_space and baseline.color_space
             and info.color_space.lower() not in (baseline.color_space.lower(), "unknown", "")):
         conflicts.append(info.color_space)
+    # Full vs. limited range: NOT visible in ffprobe's summary view (color_space/
+    # transfer/primaries can all match while this differs), and a plain -c copy
+    # concat bakes both ranges into the same track unrescaled — confirmed as a
+    # real splice-boundary corruption source (see BaselineSpec.color_range's
+    # docstring). Only compare when the clip actually reports a range — an
+    # unreported range isn't a real mismatch, just missing metadata, and forcing
+    # a conform over it would be a false positive on otherwise-fine footage.
+    if (info.color_range and baseline.color_range
+            and info.color_range.lower() != baseline.color_range.lower()):
+        conflicts.append(f"{info.color_range} range")
     # A rotated clip (270°/180°/90°) can numerically match the baseline's own
     # codec/resolution/fps/pix_fmt while still needing its picture corrected —
     # and a plain stream-copy into a shared concat track does NOT reliably
@@ -544,3 +573,73 @@ def probe_chapters_safe(ffprobe_bin: str, path: str) -> tuple:
     except Exception as e:
         return [], str(e)
     return parse_chapters(raw), None
+
+
+# ── MPEG-TS round-trip integrity ─────────────────────────────────────────────
+# Backstop for core.ffmpeg_cmd.ts_route_supported's static codec allowlist.
+# The failure this guards against is silent by construction: ffmpeg's mpegts
+# muxer has no stream type for e.g. PCM or ProRes, so instead of refusing it
+# writes those packets as a private `bin_data` stream and exits 0. The join
+# back out to MP4 then drops them, and a track vanishes from the finished
+# master with no error at any stage. The allowlist catches every case measured
+# here, but it is a list of codec NAMES — a build of ffmpeg with different
+# muxer support, or a codec nobody tested, would slip past it. So rather than
+# trust the list alone, confirm after the fact that the .ts really does carry
+# what the source did.
+
+def verify_ts_remux(ffprobe_bin: str, source: str, ts_path: str) -> tuple:
+    """Check that a TS remux preserved the source's video and audio streams.
+
+    Returns `(ok, reason)`. `reason` is "" when ok, otherwise names what was
+    lost, suitable for the merge log. A probe that fails outright returns ok
+    (with a reason noting the probe failed): an unreadable probe is not
+    positive evidence of loss, and the decode-test on the finished master
+    remains the real gate.
+    """
+    try:
+        src_raw = _run_ffprobe(ffprobe_bin, source)
+        ts_raw = _run_ffprobe(ffprobe_bin, ts_path)
+    except Exception as e:
+        return (True, f"could not verify TS remux ({e})")
+
+    def counts(raw: dict) -> tuple:
+        v = a = 0
+        for st in raw.get("streams", []) or []:
+            t = (st.get("codec_type") or "").lower()
+            if t == "video":
+                v += 1
+            elif t == "audio":
+                a += 1
+        return (v, a)
+
+    src_v, src_a = counts(src_raw)
+    ts_v, ts_a = counts(ts_raw)
+    if src_v and not ts_v:
+        return (False, "the MPEG-TS remux lost the video stream")
+    if src_a and not ts_a:
+        return (False, "the MPEG-TS remux lost the audio track "
+                       "(its codec has no MPEG-TS stream type)")
+    return (True, "")
+
+
+def probe_stream_codecs(ffprobe_bin: str, path: str) -> tuple:
+    """Ground-truth (video_codec, [audio_codec, ...]) straight from the file on
+    disk — used by the MPEG-TS carriage gate against a freshly-produced
+    per-clip temp file, where the actual audio codec(s) depend on which
+    branch of the mux plan ran (camera audio kept as-is, a backup track
+    added as ALAC, etc.) and guessing from the source clip's own probe data
+    would be wrong. Cheap: metadata-only, no frame decode."""
+    try:
+        raw = _run_ffprobe(ffprobe_bin, path)
+    except Exception:
+        return ("", [])
+    video_codec = ""
+    audio_codecs = []
+    for st in raw.get("streams", []) or []:
+        t = (st.get("codec_type") or "").lower()
+        name = st.get("codec_name", "")
+        if t == "video" and not video_codec:
+            video_codec = name
+        elif t == "audio" and name:
+            audio_codecs.append(name)
+    return (video_codec, audio_codecs)

@@ -93,8 +93,17 @@ class ClipEntry:
     # Conforming clips live in the baseline (video 0:v:0 + baseline audio tracks), cut at
     # their chapter. Odd-spec clips live on an archival track, cut at the in-track offset.
     baseline_chapter_index: Optional[int] = None   # index in the master's chapter list
-    archival_track: Optional[int] = None           # 0-based master VIDEO stream, or None if baseline
-    archival_audio_stream: Optional[int] = None    # 0-based master AUDIO stream for this clip's camera audio
+    archival_track: Optional[int] = None           # 0-based VIDEO stream, or None if baseline. Indexes
+                                                    # into the MASTER file normally, or into archival_sidecar
+                                                    # (always 0 there) when that's set.
+    archival_audio_stream: Optional[int] = None    # 0-based AUDIO stream for this clip's camera audio,
+                                                    # same file-selection rule as archival_track above
+    archival_sidecar: Optional[str] = None         # filename (next to the master) of a standalone archival
+                                                    # file this clip's archival track actually lives in,
+                                                    # when its codec can't be embedded in the master's own
+                                                    # container (e.g. VP9 inside a .mov) — None means
+                                                    # archival_track/archival_audio_stream index the master
+                                                    # itself, same as ever
     in_track_start: float = 0.0                    # seconds offset within the archival track
     in_track_duration: float = 0.0
     # ── Measured concat positions (Task 85) ────────────────────────────────────
@@ -148,19 +157,27 @@ class Manifest:
 # ── Spec signature + grouping ──────────────────────────────────────────────────
 
 def spec_signature(codec: str, width: int, height: int, fps: str, pix_fmt: str,
-                   rotation: int = 0) -> str:
+                   rotation: int = 0, audio_codec: str = "") -> str:
     """Stable grouping key: clips sharing a signature can be concat-copied onto
     one archival track. Groups by the params that must match for a stream-copy
     concat to stay valid (codec, resolution, frame rate, pixel format) plus
     ROTATION — differently-rotated clips must NOT share a track or their
     orientation is lost on recovery. In practice this means "same camera/format,
-    same orientation"."""
+    same orientation".
+
+    AUDIO_CODEC matters for the same reason: the archival join stream-copies
+    audio too (`-map 0:a:0?`), and concatenating genuinely different audio
+    codecs via -c copy is invalid regardless of container — confirmed
+    directly (a merge mixing AAC-camera clips with one PCM-camera clip, same
+    video spec throughout, corrupted at the audio splice). An empty string
+    (audio-less clip) is its own bucket, distinct from any real codec."""
     return "|".join((
         (codec or "?").lower(),
         f"{int(width)}x{int(height)}",
         fps or "?",
         (pix_fmt or "?").lower(),
         f"rot{int(rotation) % 360}",
+        f"a{(audio_codec or 'none').lower()}",
     ))
 
 

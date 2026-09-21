@@ -18,7 +18,10 @@ from core.ffmpeg_cmd import (
     build_archival_concat_cmd, build_final_archival_mux_cmd, build_wav_archival_mux_cmd,
     build_lrv_archival_mux_cmd,
     transcode_vf_parts, ConformSpec, _video_encoder_args, build_clip_sample_cmd,
-    _override_fill,
+    _override_fill, _resolve_hw_extras, _is_unsafe_vaapi_main10, _range_filter,
+    build_ts_remux_cmd, build_ts_remux_progress_cmd, build_ts_concat_cmd,
+    build_ts_archival_concat_cmd,
+    mov_supports_video_codec, build_archival_sidecar_cmd,
 )
 
 PF = Path("progress.txt")
@@ -81,10 +84,105 @@ def test_transcode_vf_parts_no_override_unaffected():
     assert transcode_vf_parts(clip, "pad") == []
 
 
+# ── Color-range rescale (artifact §06A: tag alone is not enough) ────────────
+
+def test_range_filter_maps_tv_pc_to_ffmpeg_scale_vocabulary():
+    # The scale filter's in_range/out_range option only recognises full/limited
+    # by name — "tv"/"pc" is the OUTPUT (-color_range) flag's vocabulary, a
+    # different one for the same two values.
+    assert _range_filter("pc", "tv") == "scale=w=iw:h=ih:in_range=full:out_range=limited"
+    assert _range_filter("tv", "pc") == "scale=w=iw:h=ih:in_range=limited:out_range=full"
+
+
+def test_transcode_vf_parts_range_only_mismatch_adds_bare_range_filter():
+    # Same resolution/fps as baseline — the ONLY conflict is range. Must still
+    # get a range-rescale step even though no resize/pad is needed at all.
+    clip = _clip(["pc range"], w=3840, h=2160)
+    clip.stream.color_range = "pc"
+    parts = transcode_vf_parts(clip, "pad", ConformSpec(color_range="tv"))
+    assert parts == ["scale=w=iw:h=ih:in_range=full:out_range=limited"]
+
+
+def test_transcode_vf_parts_range_and_resize_both_needed():
+    # A clip needing BOTH a resize and a range conversion gets both steps —
+    # the range step doesn't replace or get swallowed by the resize step.
+    clip = _clip(["1280×960", "pc range"], w=1280, h=960)
+    clip.stream.color_range = "pc"
+    parts = transcode_vf_parts(clip, "pad", ConformSpec(color_range="tv"))
+    assert any("force_original_aspect_ratio=decrease" in p for p in parts)
+    assert "scale=w=iw:h=ih:in_range=full:out_range=limited" in parts
+
+
+def test_transcode_vf_parts_matching_range_adds_no_range_filter():
+    clip = _clip([], w=3840, h=2160)
+    clip.stream.color_range = "tv"
+    parts = transcode_vf_parts(clip, "pad", ConformSpec(color_range="tv"))
+    assert parts == []
+
+
 def test_encoder_args_switch_codec():
     assert "libx265" in _video_encoder_args(ConformSpec(codec="hevc"))
     h264 = _video_encoder_args(ConformSpec(codec="h264", pix_fmt="yuv420p"))
     assert "libx264" in h264 and "hvc1" not in h264 and "yuv420p" in h264
+
+
+def test_encoder_args_tags_color_range():
+    # Previously absent entirely — see the artifact's §06A: two clips could
+    # "match" on every OTHER tracked field yet differ in range, and a plain
+    # tag (without this) never got written on the conform output either.
+    args = _video_encoder_args(ConformSpec(codec="hevc", color_range="tv"))
+    assert "-color_range" in args and args[args.index("-color_range") + 1] == "tv"
+
+
+# ── Splice-safe hardware encoding (artifact §06B/§07: hevc_vaapi Main10) ────
+
+def test_is_unsafe_vaapi_main10_flags_only_the_exact_combination():
+    assert _is_unsafe_vaapi_main10("hevc", "vaapi", "yuv420p10le") is True
+    assert _is_unsafe_vaapi_main10("hevc", "vaapi", "yuv420p") is False   # 8-bit — fine
+    assert _is_unsafe_vaapi_main10("h264", "vaapi", "yuv420p10le") is False  # not HEVC
+    assert _is_unsafe_vaapi_main10("hevc", "nvenc", "yuv420p10le") is False  # not vaapi
+
+
+def test_video_encoder_args_refuses_vaapi_main10_when_for_concat():
+    import core.gpu_encode as ge
+    real_plan_fn = ge.hw_encode_plan
+
+    def fake_plan(codec, vendor, pix_fmt, quality=18):
+        return {"ffmpeg_bin": None, "global_args": [], "filter_suffix": None,
+               "encoder_args": ["-c:v", "hevc_vaapi", "-qp", str(quality)]}
+    ge.hw_encode_plan = fake_plan
+    try:
+        conform = ConformSpec(codec="hevc", pix_fmt="yuv420p10le", hw_encoder="vaapi")
+        concat_args = _video_encoder_args(conform, "ffmpeg", for_concat=True)
+        standalone_args = _video_encoder_args(conform, "ffmpeg", for_concat=False)
+    finally:
+        ge.hw_encode_plan = real_plan_fn
+
+    assert "libx265" in concat_args and "hevc_vaapi" not in concat_args
+    assert "hevc_vaapi" in standalone_args   # unaffected — genuinely standalone output
+
+
+def test_resolve_hw_extras_refuses_vaapi_main10_when_for_concat():
+    import core.gpu_encode as ge
+    real_detect, real_plan, real_ff, real_dev = (
+        ge.detect_best_hw, ge.hw_encode_plan, ge.system_vaapi_ffmpeg, ge.vaapi_render_device)
+    ge.detect_best_hw = lambda ff, codec: "vaapi"
+    ge.hw_encode_plan = lambda codec, vendor, pix_fmt, quality=18: (
+        {"ffmpeg_bin": "/usr/bin/ffmpeg", "global_args": ["-vaapi_device", "/dev/dri/renderD128"],
+         "filter_suffix": "format=p010le,hwupload", "encoder_args": ["-c:v", "hevc_vaapi"]}
+        if vendor == "vaapi" else None)
+    ge.system_vaapi_ffmpeg = lambda: "/usr/bin/ffmpeg"
+    ge.vaapi_render_device = lambda: "/dev/dri/renderD128"
+    try:
+        conform = ConformSpec(codec="hevc", pix_fmt="yuv420p10le", hw_encoder="auto")
+        concat_extras = _resolve_hw_extras(conform, "ffmpeg_bundled", for_concat=True)
+        standalone_extras = _resolve_hw_extras(conform, "ffmpeg_bundled", for_concat=False)
+    finally:
+        (ge.detect_best_hw, ge.hw_encode_plan, ge.system_vaapi_ffmpeg,
+         ge.vaapi_render_device) = (real_detect, real_plan, real_ff, real_dev)
+
+    assert concat_extras is None   # no encode AND no decode requested → nothing to weave in
+    assert standalone_extras is not None and standalone_extras["encoder_args"] == ["-c:v", "hevc_vaapi"]
 
 
 def test_encoder_args_bt709_default_uses_same_value_for_all_three_color_args():
@@ -382,10 +480,12 @@ def test_concat_reencode_cmd_vaapi_swaps_binary_adds_device_and_hwupload():
     s = " ".join(cmd)
     assert "h264_vaapi" in s and "-qp 20" in s
     assert "libx264" not in s
-    # scale=out_range=tv pins the no-reinit graph's negotiated range to the
-    # same limited range the software path produces (else a full-range first
-    # segment skews the entire output), and the output is tagged to match.
-    assert "-vf scale=out_range=tv,format=nv12,hwupload" in s
+    # scale=out_range=limited pins the no-reinit graph's negotiated range to
+    # the same limited range the software path produces (else a full-range
+    # first segment skews the entire output), and the output is tagged to
+    # match ("limited" is the scale filter's own vocabulary for what
+    # -color_range tv means as an output tag — see _SCALE_RANGE_ALIAS).
+    assert "-vf scale=out_range=limited,format=nv12,hwupload" in s
 
 
 def test_concat_reencode_cmd_non_vaapi_vendors_keep_bundled_binary():
@@ -1233,6 +1333,132 @@ def _integration_wav_overrun_is_trimmed() -> bool:
     return True
 
 
+# ── MPEG-TS round-trip concat (artifact §03: parameter-set loss fix) ────────
+
+def test_ts_remux_cmd_hevc_uses_annexb_bsf_and_mpegts_container():
+    cmd = build_ts_remux_cmd("ffmpeg", Path("clip_01.mov"), Path("clip_01.ts"), "hevc")
+    s = " ".join(str(x) for x in cmd)
+    assert "-bsf:v hevc_mp4toannexb" in s
+    assert "-f mpegts" in s and cmd[-1] == "clip_01.ts"
+    assert "-c" in cmd and "copy" in cmd
+    # Explicit v/a maps, never a blanket -map 0 — see build_concat_cmd's own
+    # docstring for the bin_data/telemetry-track muxer crash this avoids.
+    assert "-map" in cmd and "0:v" in cmd and "0:a?" in cmd
+
+
+def test_ts_remux_cmd_h264_uses_h264_annexb_bsf():
+    cmd = build_ts_remux_cmd("ffmpeg", Path("c.mov"), Path("c.ts"), "h264")
+    assert "-bsf:v" in cmd and cmd[cmd.index("-bsf:v") + 1] == "h264_mp4toannexb"
+
+
+def test_ts_remux_cmd_unknown_codec_skips_bsf_but_still_remuxes():
+    cmd = build_ts_remux_cmd("ffmpeg", Path("c.mov"), Path("c.ts"), "vp9")
+    assert "-bsf:v" not in cmd
+    assert "-f" in cmd and "mpegts" in cmd
+
+
+def test_ts_remux_progress_cmd_adds_progress_file():
+    cmd = build_ts_remux_progress_cmd("ffmpeg", Path("c.mov"), Path("c.ts"), "hevc", Path("p.txt"))
+    assert "-progress" in cmd and cmd[cmd.index("-progress") + 1] == "p.txt"
+
+
+def test_ts_concat_cmd_uses_concat_demuxer_not_protocol():
+    """The `concat:` protocol byte-joins TS without touching timestamps, and
+    each .ts starts on its own ~1.4s mpegts muxer offset — so the protocol
+    hands the demuxer a BACKWARDS PTS jump at every splice and the inferred
+    duration goes wrong (measured: two 4.0s AC-3 segments joined to 11.94s
+    instead of 8.0s). The concat demuxer offsets each segment onto the
+    previous one's end instead. See build_ts_concat_cmd's docstring."""
+    cmd = build_ts_concat_cmd("ffmpeg", Path("ts_list.txt"),
+                              Path("ch.txt"), Path("out.mov"), Path("p.txt"))
+    i = cmd.index("-i")
+    assert cmd[i + 1] == "ts_list.txt"
+    assert cmd[i - 3:i] == ["-f", "concat", "-safe"] or "-f" in cmd[:i]
+    assert "-safe" in cmd and "0" in cmd
+    assert not any(str(x).startswith("concat:") for x in cmd)
+    # Chapters still attached the same way build_concat_cmd does.
+    assert "-map_metadata" in cmd and "1" in cmd
+    assert cmd[-1] == "out.mov"
+
+
+def test_ts_concat_cmd_tags_and_faststart():
+    cmd = build_ts_concat_cmd("ffmpeg", Path("ts_list.txt"), Path("ch.txt"), Path("out.mov"),
+                              Path("p.txt"), tag_v="avc1")
+    s = " ".join(str(x) for x in cmd)
+    assert "-tag:v avc1" in s
+    assert "-movflags +faststart" in s
+    assert "-c copy" in s
+
+
+def test_ts_concat_cmd_appends_extra_out_args_before_output():
+    cmd = build_ts_concat_cmd("ffmpeg", Path("ts_list.txt"), Path("ch.txt"), Path("out.mov"),
+                              Path("p.txt"), extra_out_args=["-metadata", "k=v"])
+    assert cmd[-1] == "out.mov"
+    assert cmd[-3:-1] == ["-metadata", "k=v"]
+
+
+def test_ts_archival_concat_cmd_no_chapters_maps_first_streams_only():
+    cmd = build_ts_archival_concat_cmd("ffmpeg", Path("arch_list.txt"), Path("arch.mov"))
+    assert "-f" in cmd and "concat" in cmd and "-safe" in cmd
+    assert "arch_list.txt" in [str(x) for x in cmd]
+    assert not any(str(x).startswith("concat:") for x in cmd)
+    assert "0:v:0" in cmd and "0:a:0?" in cmd
+    assert cmd.count("-i") == 1   # no second (chapters) input, unlike build_ts_concat_cmd
+
+
+def test_ts_remux_and_concat_round_trip_real_mixed_encoder_footage():
+    """Real ffmpeg integration: build two segments with genuinely different
+    HEVC parameter sets (camera-shaped libx265 defaults vs. a deliberately
+    different GOP/tune), stream-copy concat them directly (the OLD path) vs.
+    via the TS round-trip (the fix), and confirm the fix's output decodes
+    clean while at least demonstrating the round-trip completes and produces
+    a playable file — the definitive corruption repro needs a real camera
+    file's actual encoder, which isn't available in a synthetic unit test,
+    so this checks the mechanism runs correctly end-to-end rather than
+    re-proving the artifact's own before/after numbers."""
+    import subprocess as sp
+    import tempfile
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    if not Path(ff).exists():
+        print("  (skipped integration: ffmpeg not found)")
+        return
+    d = Path(tempfile.mkdtemp())
+    seg_a = d / "a.mov"
+    seg_b = d / "b.mov"
+    # Two segments, deliberately different libx265 tunes/GOP so their SPS/PPS
+    # genuinely differ, mirroring "camera encoder" vs. "this app's own conform".
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30:duration=1",
+           "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "keyint=15",
+           "-pix_fmt", "yuv420p", "-tag:v", "hvc1", str(seg_a)], check=True)
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=1",
+           "-c:v", "libx265", "-preset", "medium", "-x265-params", "keyint=60:bframes=4",
+           "-pix_fmt", "yuv420p", "-tag:v", "hvc1", str(seg_b)], check=True)
+
+    ts_a, ts_b = d / "a.ts", d / "b.ts"
+    sp.run(build_ts_remux_cmd(ff, seg_a, ts_a, "hevc"), check=True)
+    sp.run(build_ts_remux_cmd(ff, seg_b, ts_b, "hevc"), check=True)
+    out = d / "joined.mov"
+    chapters = d / "ch.txt"
+    chapters.write_text(";FFMETADATA1\n")
+    ts_list = d / "ts_list.txt"
+    ts_list.write_text("".join(f"file '{p}'\n" for p in (ts_a, ts_b)))
+    sp.run(build_ts_concat_cmd(ff, ts_list, chapters, out, d / "p.txt"), check=True)
+    assert out.exists() and out.stat().st_size > 0
+
+    decode = sp.run([fp, "-v", "error", "-i", str(out), "-show_entries",
+                     "format=duration", "-of", "default=nw=1:nk=1"],
+                    capture_output=True, text=True)
+    got_dur = float(decode.stdout.strip() or 0)
+    assert abs(got_dur - 2.0) < 0.2, f"expected ~2s joined duration, got {got_dur}"
+
+    from core.verify import run_full_decode_test
+    n_errs, detail = run_full_decode_test(ff, str(out))
+    assert n_errs == 0, f"TS-routed join produced decode errors: {detail}"
+    print("  real TS round-trip: two differently-encoded HEVC segments joined "
+         "and decode clean end-to-end — OK")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
@@ -1242,3 +1468,354 @@ if __name__ == "__main__":
     print("running real ffmpeg integration...")
     _integration_wav_overrun_is_trimmed()
     print("test_ffmpeg_cmd: all tests passed")
+
+
+# ── MPEG-TS carriage gate ────────────────────────────────────────────────────
+
+def test_ts_route_supported_accepts_the_codecs_ts_can_carry():
+    from core.ffmpeg_cmd import ts_route_supported
+    for v in ("hevc", "h265", "h264", "HEVC", "mpeg2video"):
+        ok, why = ts_route_supported(v, "aac")
+        assert ok, f"{v} should be TS-routable: {why}"
+    for a in ("aac", "ac3", "eac3", "mp3", "opus", ""):
+        ok, why = ts_route_supported("hevc", a)
+        assert ok, f"audio {a!r} should be TS-routable: {why}"
+
+
+def test_ts_route_supported_refuses_codecs_ts_silently_drops():
+    """The failure being prevented is silent: ffmpeg's mpegts muxer writes a
+    codec it has no stream type for as `bin_data` and exits 0, so the track
+    vanishes on the way back out to MP4 with no error anywhere."""
+    from core.ffmpeg_cmd import ts_route_supported
+    for a in ("pcm_s16le", "pcm_s24le", "flac", "alac"):
+        ok, why = ts_route_supported("hevc", a)
+        assert not ok and a in why, f"audio {a} must be refused"
+    for v in ("prores", "dnxhd", "vp9", "av1"):
+        ok, why = ts_route_supported(v, "aac")
+        assert not ok and v in why, f"video {v} must be refused"
+
+
+def test_verify_ts_remux_catches_a_silently_dropped_audio_track():
+    """Backstop behind the static allowlist, exercised against real ffmpeg:
+    a PCM audio track becomes `bin_data` in the .ts and is gone from the
+    round-trip output, with ffmpeg exiting 0 the whole way."""
+    import subprocess as sp, tempfile
+    from core.binaries import get_ffmpeg
+    from probe import verify_ts_remux
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    src = d / "pcm.mov"
+    sp.run([ff, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            "-c:a", "pcm_s16le", str(src)], check=True, capture_output=True)
+    assert src.exists()
+    ts = d / "pcm.ts"
+    r = sp.run(build_ts_remux_cmd(ff, src, ts, "hevc"), capture_output=True)
+    assert r.returncode == 0, "ffmpeg exits 0 — that is precisely the problem"
+    ok, why = verify_ts_remux(fp, str(src), str(ts))
+    assert not ok and "audio" in why.lower(), f"lost audio should be caught, got {(ok, why)}"
+
+    # ...and a normal AAC clip must NOT trip the check.
+    src2, ts2 = d / "aac.mp4", d / "aac.ts"
+    sp.run([ff, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", str(src2)], check=True, capture_output=True)
+    sp.run(build_ts_remux_cmd(ff, src2, ts2, "hevc"), check=True, capture_output=True)
+    assert verify_ts_remux(fp, str(src2), str(ts2)) == (True, "")
+
+
+def test_ts_join_keeps_duration_honest_with_audio():
+    """Regression for the concat-PROTOCOL timestamp bug. The original
+    integration test used video-only segments, which is exactly why it never
+    caught this: the overrun needs an audio stream to show up. Two 4.0s
+    AC-3 segments joined via the protocol measured 11.94s; via the demuxer,
+    8.01s."""
+    import subprocess as sp, tempfile
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    segs, tss = [], []
+    for i, (freq, keyint) in enumerate(((440, 25), (880, 10))):
+        seg = d / f"s{i}.mp4"
+        sp.run([ff, "-y", "-v", "error",
+                "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=25:duration=4",
+                "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=4",
+                "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+                "-x265-params", f"keyint={keyint}:log-level=none",
+                "-c:a", "ac3", str(seg)], check=True, capture_output=True)
+        ts = d / f"s{i}.ts"
+        sp.run(build_ts_remux_cmd(ff, seg, ts, "hevc"), check=True, capture_output=True)
+        segs.append(seg); tss.append(ts)
+
+    ts_list = d / "list.txt"
+    ts_list.write_text("".join(f"file '{p}'\n" for p in tss))
+    out = d / "joined.mp4"
+    chapters = d / "ch.txt"; chapters.write_text(";FFMETADATA1\n")
+    sp.run(build_ts_concat_cmd(ff, ts_list, chapters, out, d / "p.txt"),
+           check=True, capture_output=True)
+
+    r = sp.run([fp, "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1", str(out)], capture_output=True, text=True)
+    dur = float(r.stdout.strip() or 0)
+    assert abs(dur - 8.0) < 0.3, f"expected ~8.0s, got {dur} (concat-protocol bug?)"
+    astreams = sp.run([fp, "-v", "error", "-select_streams", "a",
+                       "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(out)],
+                      capture_output=True, text=True).stdout.strip()
+    assert "ac3" in astreams, f"audio must survive the join, got {astreams!r}"
+
+
+def test_probe_stream_codecs_finds_video_and_all_audio_tracks():
+    import subprocess as sp, tempfile
+    from core.binaries import get_ffmpeg
+    from probe import probe_stream_codecs
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    out = d / "multi.mov"
+    sp.run([ff, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            "-c:a:0", "aac", "-c:a:1", "pcm_s16le", str(out)],
+           check=True, capture_output=True)
+    v, audios = probe_stream_codecs(fp, str(out))
+    assert v == "hevc"
+    assert audios == ["aac", "pcm_s16le"]
+
+
+def test_probe_stream_codecs_handles_unreadable_file():
+    from probe import probe_stream_codecs
+    v, audios = probe_stream_codecs("ffprobe", "/nonexistent/path/x.mp4")
+    assert v == "" and audios == []
+
+
+# ── Camera-audio codec uniformity (mixed native codecs across a merge) ──────
+
+def test_camera_slot_transcodes_non_aac_source_instead_of_copying():
+    """The camera slot's docstring states its codec is fixed at AAC "so a
+    stream copy concat stays valid" — but the old implementation's "copy"
+    fill stream-copied whatever the clip's NATIVE audio codec happened to
+    be. Confirmed directly: a merge mixing AAC-camera clips with one
+    PCM-camera clip (a ProRes export's native audio) corrupted at the audio
+    splice via plain -c copy concat alone, with no MPEG-TS route involved —
+    concatenating genuinely different codecs via -c copy is invalid
+    regardless of container. A source whose camera audio isn't already AAC
+    must be transcoded to it, not copied."""
+    from core.ffmpeg_cmd import _slot_fill, MixSpec
+    pcm_clip = ClipInfo(path=Path("c.mov"),
+                        stream=StreamInfo(status="transcode", audio_codec="pcm_s16le"))
+    fill, codec, title = _slot_fill("camera", pcm_clip, MixSpec())
+    assert fill == "cam_transcode" and codec == "aac"
+
+    aac_clip = ClipInfo(path=Path("c.mp4"),
+                        stream=StreamInfo(status="transcode", audio_codec="aac"))
+    fill2, codec2, title2 = _slot_fill("camera", aac_clip, MixSpec())
+    assert fill2 == "copy" and codec2 == "aac"   # unchanged for the common case
+
+
+def test_cam_transcode_maps_source_and_encodes_aac():
+    plan = OutputPlan(tracks=[OutputTrack("camera")])
+    pcm_clip = ClipInfo(path=Path("c.mov"),
+                        stream=StreamInfo(status="transcode", width=1920, height=1080,
+                                          conflicts=["1920×1080"], audio_codec="pcm_s16le"))
+    cmd = build_mux_cmd_plan("ffmpeg", pcm_clip, Path("o.mov"), PF, plan, "crop",
+                             conform=ConformSpec(codec="h264", pix_fmt="yuv420p"))
+    s = " ".join(cmd)
+    assert "-map 0:a:0" in s
+    assert "-c:a:0 aac" in s
+    assert "-c:a:0 copy" not in s
+
+
+def test_archival_spec_signature_separates_mismatched_audio_codecs():
+    """spec_signature's own docstring says it groups by "the params that
+    must match for a stream-copy concat to stay valid" — audio codec IS one
+    of those params (the archival join stream-copies audio too), but wasn't
+    included, so two clips with identical video specs but different native
+    audio codecs (AAC vs PCM) landed in the same archival group and
+    corrupted at the audio splice the same way."""
+    from core.manifest import spec_signature
+    a = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le", audio_codec="aac")
+    b = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le", audio_codec="pcm_s16le")
+    assert a != b
+    # Same audio codec (or both silent) -> still grouped together, unchanged.
+    c = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le", audio_codec="aac")
+    assert a == c
+    d = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le")
+    e = spec_signature("hevc", 3840, 2160, "30000/1001", "yuv420p10le")
+    assert d == e   # both audio-less -> same bucket
+
+
+def test_mixed_camera_codec_merge_decodes_clean_end_to_end():
+    """Real ffmpeg integration: two AAC-camera clips + one PCM-camera clip
+    (mirrors the ProRes-export scenario), through a REAL merge with the
+    default plan. Before this fix this corrupted at the audio splice
+    (confirmed: 181 decode errors on the exact same fixture shape)."""
+    import subprocess as sp, tempfile, os as _os
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+    clips_src = []
+    for i, (freq, acodec, ext) in enumerate([(440, "aac", "mp4"), (880, "aac", "mp4"),
+                                             (1200, "pcm_s16le", "mov")]):
+        p = d / f"c{i}.{ext}"
+        sp.run([ff, "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+                "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=2",
+                "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+                "-c:a", acodec, str(p)], check=True, capture_output=True)
+        clips_src.append(p)
+
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from probe import probe as _probe, apply_conformance as _apply_conf, DEFAULT_BASELINE as _DB
+    from ffmpeg_runner import MergeWorker
+
+    clips = []
+    for i, p in enumerate(clips_src):
+        info = _probe(fp, str(p))
+        info = _apply_conf(info, _DB)
+        clips.append(ClipInfo(path=p, stream=info, order_idx=i))
+
+    conform = ConformSpec(width=320, height=240, fps="25", codec="hevc", pix_fmt="yuv420p")
+    out_path = d / "master.mov"
+    w = MergeWorker(clips, out_path, OutputPlan(), "crop", enable_preview=False, conform=conform)
+    result = {}
+    w.finished.connect(lambda ok, msg: result.update(ok=ok, msg=msg))
+    w.run()
+    assert result.get("ok"), result.get("msg")
+
+    errs = sp.run([ff, "-v", "error", "-i", str(out_path), "-f", "null", "-"],
+                  capture_output=True, text=True).stderr
+    err_lines = [l for l in errs.splitlines() if l.strip()]
+    assert not err_lines, f"expected clean decode, got {len(err_lines)} errors: {err_lines[:5]}"
+
+
+# ── Archival tracks whose codec MOV can't carry (VP9) ────────────────────────
+
+def test_mov_supports_video_codec_flags_vp9_and_av1():
+    from core.ffmpeg_cmd import mov_supports_video_codec
+    assert not mov_supports_video_codec("vp9")
+    assert not mov_supports_video_codec("VP9")
+    assert not mov_supports_video_codec("av1")
+    assert mov_supports_video_codec("h264")
+    assert mov_supports_video_codec("hevc")
+    assert mov_supports_video_codec("prores")
+    assert mov_supports_video_codec("")   # no video stream at all isn't a codec conflict
+
+
+def test_build_archival_sidecar_cmd_stream_copies_to_mkv():
+    cmd = build_archival_sidecar_cmd("ffmpeg", Path("archive_0.mov"), Path("out.archival_1.mkv"),
+                                     Path("p.txt"))
+    s = " ".join(str(x) for x in cmd)
+    assert "-c copy" in s
+    assert cmd[-1] == "out.archival_1.mkv"
+    assert "0:v" in cmd and "0:a?" in cmd
+
+
+def test_archival_vp9_sidecar_end_to_end_real_ffmpeg():
+    """Real bug, found driving the actual GUI: a merge whose 'Archival
+    master' preserved a VP9 original (a real Pixel-phone clip) failed the
+    ENTIRE merge at the final combine step - ffmpeg's MOV muxer refuses VP9
+    outright ("vp9 only supported in MP4"). This drives a real MergeWorker
+    merge with archival on and a VP9-sourced clip mixed in with ordinary
+    AAC/HEVC clips, and confirms the merge now succeeds with the VP9
+    archival track redirected to a sidecar .mkv instead of aborting."""
+    import subprocess as sp, tempfile, os as _os
+    from core.binaries import get_ffmpeg
+    ff, fp = get_ffmpeg()
+    d = Path(tempfile.mkdtemp())
+
+    # Clip 1: ordinary HEVC/AAC (matches baseline -> "ok", no archival needed).
+    c1 = d / "c1.mp4"
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+           "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+           "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-c:a", "aac", str(c1)],
+          check=True, capture_output=True)
+
+    # Clip 2: VP9 — odd-spec, triggers an archival track in its own native codec.
+    c2 = d / "c2.mp4"
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+           "-f", "lavfi", "-i", "sine=frequency=880:duration=2",
+           "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", "-c:a", "aac", str(c2)],
+          check=True, capture_output=True)
+    assert sp.run([fp, "-v", "error", "-select_streams", "v", "-show_entries",
+                  "stream=codec_name", "-of", "csv=p=0", str(c2)],
+                 capture_output=True, text=True).stdout.strip() == "vp9"
+
+    # Clip 3: ordinary H264 — odd-spec relative to the HEVC baseline (so it
+    # ALSO gets a normal, EMBEDDABLE archival track), positioned AFTER the
+    # VP9 clip. Real bug this catches: assigning archival stream indices
+    # before deciding the VP9 track needs a sidecar left every later clip's
+    # manifest entry pointing one video-stream index too high, silently
+    # breaking recovery/verify for it - not just for the VP9 clip itself.
+    c3 = d / "c3.mp4"
+    sp.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2",
+           "-f", "lavfi", "-i", "sine=frequency=220:duration=2",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(c3)],
+          check=True, capture_output=True)
+
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from probe import probe as _probe, apply_conformance as _apply_conf, DEFAULT_BASELINE as _DB
+    from ffmpeg_runner import MergeWorker
+
+    clips = []
+    for i, p in enumerate([c1, c2, c3]):
+        info = _probe(fp, str(p))
+        info = _apply_conf(info, _DB)
+        clips.append(ClipInfo(path=p, stream=info, order_idx=i))
+
+    conform = ConformSpec(width=320, height=240, fps="25", codec="hevc", pix_fmt="yuv420p")
+    out_path = d / "master.mov"
+    w = MergeWorker(clips, out_path, OutputPlan(), "crop", enable_preview=False,
+                    conform=conform, archival=True)
+    result = {}
+    w.finished.connect(lambda ok, msg: result.update(ok=ok, msg=msg))
+    w.run()
+    assert result.get("ok"), f"merge should succeed via the sidecar fallback, got: {result.get('msg')}"
+
+    assert out_path.exists()
+    sidecars = list(d.glob("master.archival_*.mkv"))
+    assert sidecars, "expected the VP9 archival track redirected to a sidecar .mkv"
+    vcodec = sp.run([fp, "-v", "error", "-select_streams", "v", "-show_entries",
+                    "stream=codec_name", "-of", "csv=p=0", str(sidecars[0])],
+                   capture_output=True, text=True).stdout.strip()
+    assert vcodec == "vp9", "the archival copy must stay byte-exact (original codec), not transcoded"
+
+    errs = sp.run([ff, "-v", "error", "-i", str(out_path), "-f", "null", "-"],
+                 capture_output=True, text=True).stderr
+    assert not [l for l in errs.splitlines() if l.strip()], f"master should decode clean: {errs}"
+
+    # The regression: c3's archival video must land at the CORRECT master
+    # stream index (not shifted by the VP9 track that got redirected to a
+    # sidecar) - recover it via the app's real recovery path and confirm the
+    # video comes back byte-exact against the original c3, not garbage from
+    # the wrong stream.
+    from core.manifest import read_manifest
+    from core.extract import build_recovery_plan, build_recover_clip_cmd
+    manifest = read_manifest(fp, str(out_path))
+    entry3 = manifest.clips[2]
+    assert entry3.archival_sidecar is None, "c3 (h264) should embed normally, not redirect to a sidecar"
+    plan3 = build_recovery_plan(manifest, entry3)
+    rec3 = d / "c3_recovered.mp4"
+    cmd3 = build_recover_clip_cmd(ff, str(out_path), plan3, str(rec3))
+    sp.run(cmd3, check=True, capture_output=True)
+    assert rec3.exists()
+
+    def _video_md5(path):
+        r = sp.run([ff, "-v", "error", "-i", str(path), "-map", "0:v:0",
+                   "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "md5", "-"],
+                  capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    assert _video_md5(c3) == _video_md5(rec3), (
+        "c3 recovered from the WRONG archival stream (the index-shift regression the "
+        "sidecar redirect introduced) - its video must round-trip byte-exact")

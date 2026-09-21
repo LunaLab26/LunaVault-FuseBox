@@ -8,6 +8,16 @@ from typing import Optional
 
 from probe import StreamInfo
 
+# Every video container this app is known to receive from a real camera or
+# editor export — kept as the single source of truth so a folder scan and the
+# Add flow's own scan can't drift apart the way they did before this was
+# introduced: scan_folder() below used to glob only "*.mp4", which silently
+# dropped any .mov (a ProRes export, an iPhone/Luna .mov, etc.), .mkv, or
+# other real camera file from the Merge tab's clip list with no warning at
+# all — confirmed directly with a real ProRes export sitting untouched in a
+# folder that reported "6 found" instead of 7.
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".m2ts"}
+
 
 @dataclass
 class ClipInfo:
@@ -268,18 +278,21 @@ def order_clips_by_time(clips: list) -> list:
 
 
 def scan_folder(folder: Path) -> list:
-    mp4s = sorted(folder.glob("*.mp4"), key=lambda p: p.name.lower())
+    videos = sorted(
+        (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS),
+        key=lambda p: p.name.lower(),
+    )
     wavs = sorted(folder.glob("*.wav"), key=lambda p: p.name.lower())
     wav_stems = {w.stem: w for w in wavs}
     lrvs = sorted(folder.glob("*.lrv"), key=lambda p: p.name.lower())
     lrv_stems = {l.stem: l for l in lrvs}
 
     clips = []
-    for mp4 in mp4s:
-        wav = _pair_wav(mp4.stem, wav_stems)
-        lrv = _pair_lrv(mp4.stem, lrv_stems)
-        ts  = _parse_ts(mp4.stem)
-        clips.append(ClipInfo(path=mp4, wav_path=wav, lrv_path=lrv, filename_ts=ts))
+    for video in videos:
+        wav = _pair_wav(video.stem, wav_stems)
+        lrv = _pair_lrv(video.stem, lrv_stems)
+        ts  = _parse_ts(video.stem)
+        clips.append(ClipInfo(path=video, wav_path=wav, lrv_path=lrv, filename_ts=ts))
 
     clips.sort(key=lambda c: (
         c.filename_ts if c.filename_ts is not None else 99999999,
