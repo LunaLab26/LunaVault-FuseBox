@@ -3464,3 +3464,70 @@ rather than pursued further this session.
   unusable button. Needs a human with an interactive display to reproduce
   and bisect — screenshots alone didn't reveal why only that one row's
   buttons fail to paint.
+
+### Task 108 — two real bugs found by actual Steam Deck testing of the v1.4.006 Linux release (fixed)
+
+  v1.4.006's Linux/Steam Deck build was tested for real on a Steam Deck (not
+  just built and assumed to work) and turned up two genuine problems:
+
+  **Bug A — the release's bundled ffmpeg/ffprobe were dynamically linked, not
+  static.** `bin/ffmpeg` in this checkout had at some point become the
+  distro's own system ffmpeg (`file` confirmed "dynamically linked",
+  `ldd` listed `libavdevice.so.60`, `libavfilter.so.9`, `libavformat.so.60`,
+  `libavcodec.so.60`, `libswresample.so.4`, `libswscale.so.7`, `libavutil.so.58`,
+  `libpostproc.so.57` as dependencies) rather than the static build
+  `build_linux.sh` has always documented (`README.md`/the script both point
+  at johnvansickle's static releases). Packaging from it worked perfectly on
+  the build machine — it already has all those exact libraries — and then
+  failed immediately on a real Steam Deck: `libavdevice.so.60: cannot open
+  shared object file`. A frozen PyInstaller build's OWN bundled Qt/av
+  libraries are a different ABI from the system's, so this isn't fixable by
+  "just install the missing libs" — the fix is shipping a static binary that
+  depends on nothing but the kernel.
+
+  **The fix.** `build_linux.sh` now runs `ldd bin/ffmpeg` before building and
+  refuses to proceed if it succeeds (a static binary makes `ldd` refuse to
+  run at all — "not a dynamic executable" — so a zero exit means dynamically
+  linked, exactly backwards from every other `ldd` use, which is exactly why
+  this needs calling out explicitly rather than trusting the file to be
+  right by convention). The actual v1.4.007 release was rebuilt using a real
+  johnvansickle static `ffmpeg-7.0.2-amd64-static` (confirmed via `file`:
+  "statically linked"; confirmed it has `libx264`/`libx265` via `-encoders`)
+  copied into the package's own `bin/`, independent of whatever `bin/ffmpeg`
+  this repo checkout happens to have for local source-running.
+
+  **Bug B — `get_ffmpeg()` crashed the whole app on launch if the ffmpeg
+  binary wasn't owned by the running user.** Found because of Bug A: the
+  Steam Deck tester's own workaround was pointing `bin/ffmpeg` at a symlink
+  to the system ffmpeg (root-owned) to get a working codec set before this
+  fix existed. `core/binaries.py`'s `get_ffmpeg()` called `ff.chmod(0o755)`
+  unconditionally on every launch, with no existence check on `fp` and no
+  exception handling at all — `chmod` on a path you don't own raises
+  `PermissionError`, uncaught, so the app died before any window appeared,
+  with nothing in `crash.log` to explain why (the crash was in the
+  `_start_gpu_probe` call path, before the crash-logging excepthook was even
+  wired up).
+
+  **The fix.** `get_ffmpeg()` now only calls `chmod` on a binary that isn't
+  already executable (`os.access(path, os.X_OK)`), and wraps the call in
+  `try/except OSError: pass` either way — best-effort, matching the
+  function's actual intent ("make sure it's runnable if we can"), not a hard
+  requirement. A binary that genuinely can't run fails loudly at the actual
+  exec attempt downstream instead of silently here.
+
+  **Also cleaned up while rebuilding**: the previous release zip shipped a
+  `crash.log` and `settings.json` left over from this machine's own
+  smoke-test runs — a fresh download started with someone else's session
+  already in it. Excluded from the v1.4.007 package.
+
+  **Verified**: `test_binaries.py` (new, 4 tests) — already-executable skips
+  `chmod` entirely; a simulated `chmod` failure doesn't raise either way it's
+  reached; the existing bundled-vs-system-`PATH`-fallback lookup still
+  works. Confirmed 2 of the 4 fail without the fix (stashed it, reran). The
+  rebuilt v1.4.007 Linux zip was smoke-tested locally (launches clean,
+  correct version in the title bar) before publishing; the static-vs-dynamic
+  distinction itself can only be confirmed on a machine that genuinely lacks
+  the build machine's libav* — i.e. Steam Deck re-testing, not local.
+
+  Tests: `test_binaries.py` (new, 4 tests). Full suite: 554 passed (1
+  pre-existing unrelated failure).

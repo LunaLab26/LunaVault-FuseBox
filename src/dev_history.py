@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-09-21 14:30"
+LAST_UPDATED = "2026-09-21 16:15"
 
 
 @dataclass
@@ -25,6 +25,34 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-09-21",
+        title="v1.4.007 — real Steam Deck testing found a crash-on-launch and a broken Linux "
+              "download; both fixed",
+        summary="Real testing on a Steam Deck (not just this machine) turned up two problems "
+              "with the Linux/Steam Deck build specifically. First, the downloadable build's "
+              "ffmpeg was accidentally built in a way that only runs on the exact system it was "
+              "packaged on — it wouldn't even start on a Steam Deck. Second, an unrelated fix "
+              "(swapping in a working ffmpeg by hand) exposed a genuine crash-on-launch bug: if "
+              "the app's ffmpeg isn't owned by the account running it, the app failed instantly "
+              "with no window and no explanation. Both are fixed, and the Linux download is "
+              "rebuilt correctly.",
+        details=[
+            "Fixed: the Linux/Steam Deck download's bundled ffmpeg was accidentally built in a "
+              "way that only works on the exact machine it was packaged on — every Steam Deck "
+              "(and most other Linux machines) reported it missing several core libraries and "
+              "refused to run at all. The download is now built with a properly portable ffmpeg "
+              "that works the same way everywhere, the same way earlier Linux releases did.",
+            "Fixed: if the app's ffmpeg wasn't owned by the account trying to run it — for "
+              "example, someone had pointed it at their system's own copy instead of the bundled "
+              "one — the app crashed the instant it launched, with no window and no error "
+              "message to explain why. The app no longer needs to touch that file's permissions "
+              "unless it actually has to, and never crashes over it either way.",
+            "Also cleaned up the Linux download itself: a leftover settings file and log from "
+              "testing were accidentally included in the previous build. A fresh download no "
+              "longer starts with someone else's test session already in it.",
+        ],
+    ),
     HistoryEntry(
         date="2026-09-21",
         title="v1.4.006 — merge splices are byte-safe across mixed cameras, and every video "

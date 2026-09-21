@@ -37,6 +37,22 @@ if [ "$MISSING" -eq 1 ]; then
     echo "  Extract ffmpeg + ffprobe into bin/ then re-run."
     exit 1
 fi
+# A dynamically-linked system ffmpeg (e.g. Ubuntu's, or any distro package)
+# works fine on THIS machine but ships broken: the frozen build's bundled
+# libav* are a different ABI, so it needs the exact shared libraries this
+# build machine has installed — which a different distro (SteamOS, most
+# obviously) won't have. Confirmed as a real bug this way: a v1.4.006 release
+# built with Ubuntu's ffmpeg failed on a real Steam Deck with "libavdevice.so.60:
+# cannot open shared object file". `file` on a static build says "statically
+# linked"; ldd on one refuses to run at all ("not a dynamic executable").
+if ldd "bin/ffmpeg" >/dev/null 2>&1; then
+    echo "  ERROR: bin/ffmpeg is dynamically linked (a system/distro ffmpeg),"
+    echo "         not a static build. It will crash on any machine that"
+    echo "         doesn't have this exact machine's libav* installed."
+    echo "  Download a Linux amd64 STATIC build instead:"
+    echo "    https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    exit 1
+fi
 chmod +x bin/ffmpeg bin/ffprobe
 echo "  $(bin/ffmpeg -version 2>&1 | head -1)"
 echo ""
