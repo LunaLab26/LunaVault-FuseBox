@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-09-21 16:15"
+LAST_UPDATED = "2026-09-24 01:38"
 
 
 @dataclass
@@ -25,6 +25,36 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-09-24",
+        title="v1.4.008 — honest merge progress, a faster converter, and a calm cancel",
+        summary="Testing with real family footage from four different cameras showed the Merge "
+              "tab saying a clip was being converted on the graphics card when it was really "
+              "the (much slower) processor, and promising a ~4 minute merge that was on course "
+              "to take over six hours. The progress now names what's really doing the work, "
+              "the time estimate is based on measured speeds, and converting is roughly twice "
+              "as fast with no visible quality loss.",
+        details=[
+            "Fixed: progress said \"GPU: VAAPI\" while the processor was doing the converting. "
+              "The app deliberately avoids the graphics card for 10-bit HEVC (it corrupts the "
+              "joins between clips on AMD hardware), but the label never found out. The label "
+              "and the converter now share one decision, so they can't disagree.",
+            "Faster: converting clips on the processor now uses a quicker encoder setting at a "
+              "slightly higher quality level. Measured on real 4K footage: 1.3-2x faster, and "
+              "a closer match to the original than before (at the cost of slightly larger files).",
+            "Fixed: the \"Estimated transcode time\" was a guess based only on total length, so it "
+              "said ~4 minutes for a merge that would take hours. The estimate now counts only "
+              "the clips that actually need converting, uses the output resolution and whether "
+              "the graphics card will really be used, and names that clearly.",
+            "Fixed: with lots of clips, the row of per-clip progress badges grew wider than the "
+              "window and pushed the Start merge / Cancel buttons off the right-hand edge. The "
+              "badges now wrap onto extra lines. (Very likely the long-standing \"Start merge "
+              "button is missing\" report.)",
+            "Fixed: cancelling a merge showed a red \"Merge failed\" warning. Cancelling now "
+              "just says so quietly, and the app waits for ffmpeg to actually stop before "
+              "tidying up its temporary files.",
+        ],
+    ),
     HistoryEntry(
         date="2026-09-21",
         title="v1.4.007 — real Steam Deck testing found a crash-on-launch and a broken Linux "

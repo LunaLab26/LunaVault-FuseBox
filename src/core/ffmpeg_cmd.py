@@ -441,11 +441,38 @@ def _is_unsafe_vaapi_main10(codec: str, vendor: "str | None", pix_fmt: str) -> b
     radeonsi VAAPI Main10 encode path, not in any command-line flag this app
     could set. Not scoped to AMD specifically (no reliable per-vendor signal
     is available here), so this refuses hevc_vaapi Main10 for splice-bound
-    output on any GPU vendor VAAPI resolves to — the software fallback costs
-    seconds to low minutes per clip, not worth trading for an intermittent,
-    per-vendor-unverified splice-only defect."""
+    output on any GPU vendor VAAPI resolves to. The software fallback is NOT
+    cheap at 4K 10-bit (measured ~2 fps at the old `medium` preset on a Steam
+    Deck), which is why SW_CONFORM_PRESET exists."""
     return (vendor == "vaapi" and (codec or "").lower() in ("hevc", "h265")
             and "10" in (pix_fmt or ""))
+
+
+# Software conform speed/quality trade. Measured on a Steam Deck (4K 10-bit HEVC,
+# real Luna Ultra footage, SSIM vs source): medium/crf26 = 4.4 fps SSIM 0.9819;
+# veryfast/crf23 = 5.8 fps SSIM 0.9857. On a 1080p→4K upscale the gap widens to
+# ~2.1x. So a faster preset at a lower CRF is both quicker AND no worse-looking;
+# the cost is a moderately larger file, which is the right trade for an archive.
+SW_CONFORM_PRESET = "veryfast"
+SW_CONFORM_CRF_OFFSET = -3
+
+
+def effective_conform_encoder(conform: "ConformSpec", ff: str = None,
+                              for_concat: bool = True) -> str:
+    """The encoder a conform transcode will ACTUALLY use: a GPU vendor name
+    ("vaapi"/"nvenc"/"qsv"/"amf") or "software". The single source of truth for
+    anything that describes or times an encode (progress labels, estimates), so
+    they can never claim a GPU encode that _video_encoder_args refused."""
+    codec = (getattr(conform, "codec", None) or "hevc").lower()
+    hw_choice = getattr(conform, "hw_encoder", "off") or "off"
+    if hw_choice == "off" or not ff:
+        return "software"
+    from core.gpu_encode import detect_best_hw, hw_encode_plan
+    vendor = hw_choice if hw_choice != "auto" else detect_best_hw(ff, codec)
+    if not vendor or (for_concat and _is_unsafe_vaapi_main10(codec, vendor, conform.pix_fmt)):
+        return "software"
+    quality = getattr(conform, "quality", 18) or 18
+    return vendor if hw_encode_plan(codec, vendor, conform.pix_fmt, quality) else "software"
 
 
 def _video_encoder_args(conform: "ConformSpec", ff: str = None, for_concat: bool = True) -> list:
@@ -476,7 +503,8 @@ def _video_encoder_args(conform: "ConformSpec", ff: str = None, for_concat: bool
                 return plan["encoder_args"] + ["-colorspace", cs, "-color_primaries", primaries,
                         "-color_trc", trc, "-color_range", color_range]
 
-    args = ["-crf", str(quality), "-preset", "medium", "-pix_fmt", conform.pix_fmt]
+    sw_crf = max(0, int(quality) + SW_CONFORM_CRF_OFFSET)
+    args = ["-crf", str(sw_crf), "-preset", SW_CONFORM_PRESET, "-pix_fmt", conform.pix_fmt]
     if codec in ("hevc", "h265"):
         return ["-c:v", "libx265"] + args + ["-tag:v", "hvc1",
                 "-colorspace", cs, "-color_primaries", primaries, "-color_trc", trc,

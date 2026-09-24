@@ -94,6 +94,20 @@ __all__ = [
 
 # ── Thumbnail extractor thread ────────────────────────────────────────────────
 
+
+def _stop_proc(proc, timeout: float = 5.0):
+    """Stop an ffmpeg child and REAP it before the caller deletes its temp dir.
+    terminate() alone returned immediately while ffmpeg kept writing for ~25 s
+    into files the cleanup had already removed, then lingered as a zombie."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    except Exception:
+        pass
+
 class ThumbnailThread(QThread):
     frame_ready = Signal(str)
 
@@ -352,7 +366,7 @@ class MergeWorker(QThread):
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=ef, **no_window())
         while proc.poll() is None:
             if self._cancelled:
-                proc.terminate(); ef.close(); _stop_thumb(thumb)
+                _stop_proc(proc); ef.close(); _stop_thumb(thumb)
                 self._cleanup(temp_dir); self.finished.emit(False, "Cancelled")
                 return False
             parsed = parse_progress(read_progress(progress_file), total_dur)
@@ -382,7 +396,7 @@ class MergeWorker(QThread):
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=ef, **no_window())
         while proc.poll() is None:
             if self._cancelled:
-                proc.terminate(); ef.close(); _stop_thumb(thumb)
+                _stop_proc(proc); ef.close(); _stop_thumb(thumb)
                 return "cancelled", ""
             parsed = parse_progress(read_progress(progress_file), duration)
             self.progress.emit({
@@ -398,27 +412,35 @@ class MergeWorker(QThread):
             return "failed", _tail_text(err_path)
         return "ok", ""
 
-    _ENCODER_LABELS = {"nvenc": "GPU: NVENC", "qsv": "GPU: Quick Sync", "amf": "GPU: AMD AMF",
-                       "vaapi": "GPU: VAAPI"}
+    _ENCODER_LABELS = {"nvenc": "graphics card (NVENC)", "qsv": "graphics card (Quick Sync)",
+                       "amf": "graphics card (AMF)", "vaapi": "graphics card (VAAPI)"}
 
     def _clip_stage_label(self, clip, hw_encoder: Optional[str] = None) -> str:
         """Plain-language description of what's about to happen to this clip —
         surfaced live in the UI so a slow transcode doesn't look like a hang
-        next to a clip that's merely being stream-copied."""
+        next to a clip that's merely being stream-copied. `hw_encoder` must be
+        the EFFECTIVE encoder (core.ffmpeg_cmd.effective_conform_encoder), never
+        the raw setting — the setting can say VAAPI while the command falls
+        back to software."""
         if clip.effective_status() == "ok":
-            return f"Stream-copying {clip.stem} — lossless, no re-encode"
-        enc = hw_encoder if hw_encoder is not None else getattr(self._conform, "hw_encoder", "off")
-        enc_txt = self._ENCODER_LABELS.get(enc, "CPU: libx264")
-        conflicts = clip.stream.conflicts if (clip.stream and clip.stream.conflicts) else []
-        if conflicts:
-            reason = conflicts[0]
-        elif clip.video_source_override == "lrv":
-            reason = "using LRV proxy"
-        elif clip.video_source_override == "transcode":
-            reason = "forced by user"
+            return f"Copying {clip.stem} — no quality loss"
+        enc = hw_encoder or "software"
+        if enc in self._ENCODER_LABELS:
+            enc_txt = self._ENCODER_LABELS[enc]
         else:
-            reason = "different spec"
-        return f"Transcoding {clip.stem} — {enc_txt} ({reason})"
+            codec = (getattr(self._conform, "codec", "") or "hevc").lower()
+            enc_txt = "processor (x265)" if codec in ("hevc", "h265") else "processor (x264)"
+        conflicts = clip.stream.conflicts if (clip.stream and clip.stream.conflicts) else []
+        if clip.video_source_override == "lrv":
+            reason = "using the LRV proxy"
+        elif clip.video_source_override == "transcode":
+            reason = "you chose to convert it"
+        elif conflicts:
+            reason = "differs: " + ", ".join(str(c).upper() if len(str(c)) <= 4 else str(c)
+                                             for c in conflicts[:3])
+        else:
+            reason = "different format"
+        return f"Converting {clip.stem} on the {enc_txt} — {reason}"
 
     def _build_and_mux_archival(self, ff, clips, manifest, baseline, final_tmp,
                                 temp_dir, progress_file, stage_total, total_dur) -> bool:
@@ -735,10 +757,8 @@ class MergeWorker(QThread):
         # the "CPU: libx264" default, even while a real GPU encode was
         # genuinely running (confirmed directly: a hardware-accelerated merge
         # still showed "CPU: libx264" throughout).
-        hw_encoder_setting = getattr(self._conform, "hw_encoder", "off") or "off"
-        if hw_encoder_setting == "auto":
-            from core.gpu_encode import detect_best_hw
-            hw_encoder_setting = detect_best_hw(ff, getattr(self._conform, "codec", None) or "hevc") or "off"
+        from core.ffmpeg_cmd import effective_conform_encoder
+        hw_encoder_setting = effective_conform_encoder(self._conform, ff, for_concat=True)
 
         for i, clip in enumerate(clips):
             if self._cancelled:
@@ -1902,7 +1922,7 @@ class WhatsAppWorker(QThread):
                                 stderr=subprocess.DEVNULL, **no_window())
         while proc.poll() is None:
             if self._cancelled:
-                proc.terminate()
+                _stop_proc(proc)
                 _stop_thumb(thumb)
                 self._cleanup(temp_dir); self.finished.emit(False, "Cancelled"); return
             parsed = parse_progress(read_progress(progress_file), dur_secs)

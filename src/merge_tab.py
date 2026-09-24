@@ -25,6 +25,7 @@ from clip_model import (ClipInfo, scan_folder, unpaired_wavs, check_dst_warning,
                         order_clips_by_time, assign_cameras, group_clips_by_camera,
                         _iso_epoch, detect_clip_splits)
 from ffmpeg_runner import MergeWorker, get_ffmpeg, get_app_dir
+from widgets.flow_layout import FlowLayout
 from thread_utils import settle
 from probe import probe, probe_duration, pix_fmt_info, BaselineSpec, apply_conformance
 from settings import Settings
@@ -1083,7 +1084,7 @@ class MergeTab(QWidget):
         step_row.addWidget(self._step_label, 1)
         prog_layout.addLayout(step_row)
 
-        self._stage_row = QHBoxLayout()
+        self._stage_row = FlowLayout(spacing=6)
         self._stage_labels: list[QLabel] = []
         prog_layout.addLayout(self._stage_row)
 
@@ -2105,17 +2106,37 @@ class MergeTab(QWidget):
         if not self._clips:
             self._estimate_label.hide()
             return
-        total_secs = sum(c.duration for c in self._selected_clips() if c.duration > 0)
-        if total_secs <= 0:
+        selected = [c for c in self._selected_clips() if c.duration > 0]
+        if not selected:
             self._estimate_label.hide()
             return
-        # Rough: GPU ~4× realtime, CPU ~0.5× realtime
-        best_min  = max(1, int(total_secs / 4 / 60))
-        worst_min = max(1, int(total_secs / 0.5 / 60))
-        self._estimate_label.setText(
-            f"Estimated transcode time:  "
-            f"Best ~{best_min} min (GPU)  ·  Worst ~{worst_min} min (CPU only)"
-        )
+        from core.eta import estimate_merge_seconds, describe_duration
+        from core.ffmpeg_cmd import effective_conform_encoder
+        conform = self._current_conform()
+        try:
+            ff, _ = get_ffmpeg()
+            encoder = effective_conform_encoder(conform, ff, for_concat=True)
+        except Exception:
+            encoder = "software"
+        try:
+            num, den = (conform.fps.split("/") + ["1"])[:2]
+            fps = float(num) / float(den)
+        except Exception:
+            fps = 30.0
+        rows = []
+        for c in selected:
+            try:
+                size = Path(c.path).stat().st_size
+            except OSError:
+                size = 0
+            rows.append((c.duration, c.effective_status() != "ok", size))
+        n_convert = sum(1 for r in rows if r[1])
+        secs = estimate_merge_seconds(rows, conform.width, conform.height, fps,
+                                      conform.codec, encoder)
+        where = "processor" if encoder == "software" else "graphics card"
+        detail = (f"{n_convert} of {len(rows)} clips need converting on the {where}"
+                  if n_convert else "every clip is copied without re-encoding")
+        self._estimate_label.setText(f"Estimated time: {describe_duration(secs)}  ·  {detail}")
         self._estimate_label.show()
 
     # ── Folder scanning ───────────────────────────────────────────────────────
@@ -3057,10 +3078,10 @@ class MergeTab(QWidget):
         self._settings.set("last_merge_track_order", track_order)
 
         # Build stage pills
-        for i in reversed(range(self._stage_row.count())):
-            w = self._stage_row.itemAt(i).widget()
-            if w:
-                w.deleteLater()
+        while self._stage_row.count():
+            item = self._stage_row.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
         self._stage_labels.clear()
 
         p = theme.active_palette()
@@ -3088,7 +3109,6 @@ class MergeTab(QWidget):
             self._stage_labels.append(verify_lbl)
             self._stage_row.addWidget(verify_lbl)
             self._verify_pill = verify_lbl
-        self._stage_row.addStretch()
 
         self._progress_frame.show()
         self._step_label.setText("Starting…")
@@ -3096,6 +3116,8 @@ class MergeTab(QWidget):
         self._pbar.setValue(0)
         self._stats_label.setText("—")
         self._eta_label.setText("Estimating…")
+        self._kind_badge.show()
+        self._thumb_label.setVisible(self._preview_check.isChecked())
         self._start_btn.hide()
         self._cancel_btn.show()
 
@@ -3296,8 +3318,19 @@ class MergeTab(QWidget):
             box.exec()
             if box.clickedButton() is review_btn:
                 self.open_in_review.emit(str(out))
+        elif message == "Cancelled":
+            self._set_status_line("Merge cancelled — nothing was changed.")
         else:
-            QMessageBox.warning(self, "Failed", f"Merge failed:\n{message}")
+            QMessageBox.warning(self, "Merge didn't finish", f"The merge couldn't finish:\n\n{message}")
+
+    def _set_status_line(self, text: str):
+        """Replace the live progress read-out with one quiet sentence."""
+        self._kind_badge.hide()
+        self._pbar.setValue(0)
+        self._stats_label.setText("")
+        self._eta_label.setText("")
+        self._thumb_label.hide()
+        self._step_label.setText(text)
 
     def shutdown(self):
         """Wait out all worker threads (called from MainWindow.closeEvent)."""
