@@ -151,3 +151,64 @@ def test_pcm_audio_falls_back_instead_of_silently_losing_the_track():
     assert got["audio"], (
         f"audio track silently lost — the whole point of the gate. {got}")
     assert abs(got["duration"] - 6.0) < 0.4, f"duration drifted: {got}"
+
+
+def _make_clip_rate(path: Path, freq: int, keyint: int, rate: int, channels: int, dur: int = 3):
+    """Like _make_clip, but with real-camera audio: 48 kHz stereo AAC (what the
+    Luna Ultra, GO 3S and Pixel 4K clips all record) or any other rate/layout."""
+    sp.run([FF, "-y", "-v", "error",
+            "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=25:duration={dur}",
+            "-f", "lavfi", "-i", f"sine=frequency={freq}:duration={dur}:sample_rate={rate}",
+            "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+            "-x265-params", f"keyint={keyint}:log-level=none",
+            "-c:a", "aac", "-ac", str(channels), str(path)], check=True, capture_output=True)
+    return path
+
+
+def test_48k_camera_audio_joins_frame_exact():
+    """48 kHz AAC starts ~21 ms before the video inside MPEG-TS, so a join that
+    advanced by container duration shifted every later clip by half a frame
+    (a decode-time "non monotonically increasing dts" at each splice). The
+    earlier tests only used 44.1 kHz fixtures, which hid this."""
+    from core.ffmpeg_cmd import OutputTrack
+    d = Path(tempfile.mkdtemp())
+    a = _make_clip_rate(d / "a.mp4", 440, 25, 48000, 2)
+    b = _make_clip_rate(d / "b.mp4", 880, 10, 48000, 2)
+    c = _make_clip_rate(d / "c.mp4", 660, 12, 48000, 2)
+    out = d / "master.mov"
+    ok, msg, _ = _run_merge(_clips_for([a, b, c]), out,
+                            plan=OutputPlan(tracks=[OutputTrack("camera")]))
+    assert ok, f"merge failed: {msg}"
+    got = _inspect(out)
+    assert got["decode_errors"] == 0, f"joins are not frame-exact: {got}"
+    assert abs(got["duration"] - 9.0) < 0.1, f"duration drifted: {got}"
+
+
+def test_mixed_sample_rates_and_layouts_are_normalised_to_48k_stereo():
+    """A 44.1 kHz mono clip between 48 kHz stereo clips must not be stream-
+    copied into the shared AAC track (one track can only declare one rate)."""
+    from core.ffmpeg_cmd import OutputTrack
+    d = Path(tempfile.mkdtemp())
+    a = _make_clip_rate(d / "a.mp4", 440, 25, 48000, 2)
+    b = _make_clip_rate(d / "b.mp4", 880, 10, 44100, 1)
+    out = d / "master.mov"
+    ok, msg, _ = _run_merge(_clips_for([a, b]), out,
+                            plan=OutputPlan(tracks=[OutputTrack("camera")]))
+    assert ok, f"merge failed: {msg}"
+    info = sp.run([FP, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                   "stream=sample_rate,channels", "-of", "csv=p=0", str(out)],
+                  capture_output=True, text=True).stdout.strip()
+    assert info == "48000,2", info
+    assert _inspect(out)["decode_errors"] == 0
+    # The declared format alone proves nothing (ffprobe reports segment 1's).
+    # The real symptom was the 44.1 kHz clip playing 9% fast: its 880 Hz tone
+    # came out at 958 Hz and the track ran 0.18 s short, drifting A/V sync.
+    import numpy as np
+    pcm = np.frombuffer(sp.run([FF, "-v", "error", "-i", str(out), "-map", "0:a:0",
+                                "-ac", "1", "-ar", "48000", "-f", "f32le", "-"],
+                               capture_output=True).stdout, np.float32)
+    assert abs(len(pcm) / 48000 - 6.0) < 0.1, f"audio length {len(pcm) / 48000:.3f}s"
+    seg = pcm[int(3.5 * 48000):int(5.5 * 48000)]
+    freqs = np.fft.rfftfreq(len(seg), 1 / 48000)
+    peak = freqs[np.argmax(np.abs(np.fft.rfft(seg)))]
+    assert abs(peak - 880) < 5, f"second clip plays at {peak:.0f} Hz, expected 880"

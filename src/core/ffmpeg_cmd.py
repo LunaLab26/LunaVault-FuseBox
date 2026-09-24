@@ -680,6 +680,28 @@ _TRACK_TITLES = {
 }
 
 
+# Every audio slot in a merged master is 48 kHz stereo (the silence filler is
+# built at exactly this, and every real WAV backup seen so far is 48 kHz), so
+# every segment of a concatenated track agrees on rate and layout.
+SLOT_SAMPLE_RATE = 48000
+SLOT_CHANNELS = 2
+
+
+def camera_audio_matches_slot(clip: "ClipInfo") -> bool:
+    """True when the clip's own camera audio can be stream-copied into the AAC
+    slot unchanged: AAC, 48 kHz, stereo. Unknown rate/layout (0) is trusted,
+    matching how probe failures were treated before."""
+    st = clip.stream
+    if not st:
+        return True
+    codec = (st.audio_codec or "").strip().lower()
+    if codec and codec != "aac":
+        return False
+    rate = getattr(st, "audio_sample_rate", 0) or 0
+    ch = getattr(st, "audio_channels", 0) or 0
+    return (rate in (0, SLOT_SAMPLE_RATE)) and (ch in (0, SLOT_CHANNELS))
+
+
 def _slot_fill(kind: str, clip: ClipInfo, mix: MixSpec) -> tuple:
     """Decide how a clip fills one audio slot. Returns (fill, codec, title).
 
@@ -711,8 +733,12 @@ def _slot_fill(kind: str, clip: ClipInfo, mix: MixSpec) -> tuple:
             # same way a video parameter-set mismatch does. "cam_transcode"
             # maps from the same source index as "copy" but re-encodes to
             # the codec this slot promises, closing that gap.
-            src_codec = (clip.stream.audio_codec or "").strip().lower() if clip.stream else ""
-            if src_codec and src_codec != "aac":
+            # The same invariant covers sample rate and channel layout, not
+            # just the codec name: a Pixel's 44.1 kHz AAC (or a mono / 5.1
+            # AAC) stream-copied between 48 kHz stereo segments is a valid AAC
+            # stream that a concat still mis-times and garbles, since the
+            # joined track declares only ONE rate/layout for every segment.
+            if not camera_audio_matches_slot(clip):
                 return ("cam_transcode", "aac", t)
             return ("copy", "aac", t)
         if has_wav:
@@ -946,8 +972,10 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
             # ALAC segment, real or silent, made it decode clean). s32p is a
             # safe superset of any real source's precision.
             cmd += [f"-c:a:{i}", "alac", f"-sample_fmt:a:{i}", "s32p"]
+            cmd += [f"-ar:a:{i}", str(SLOT_SAMPLE_RATE), f"-ac:a:{i}", str(SLOT_CHANNELS)]
         else:
             cmd += [f"-c:a:{i}", "aac", f"-b:a:{i}", "256k"]
+            cmd += [f"-ar:a:{i}", str(SLOT_SAMPLE_RATE), f"-ac:a:{i}", str(SLOT_CHANNELS)]
 
     # ── Disposition + titles (first slot is the default track) ────────────────
     for i, (kind, fill, codec, title) in enumerate(fills):
@@ -1227,6 +1255,21 @@ def build_ts_remux_progress_cmd(ff: str, segment: Path, out_ts: Path, codec: str
         cmd += ["-bsf:v", bsf]
     cmd += ["-f", "mpegts", "-progress", str(progress_file), "-nostats", str(out_ts)]
     return cmd
+
+
+def write_concat_list(list_file: Path, files, durations=None) -> None:
+    """Write a concat-demuxer list. When a positive duration is given for a
+    file, a `duration` directive pins where the NEXT file starts to that value
+    (the file's video length) instead of its container length, so every join
+    is frame-exact regardless of how far the audio runs past the video."""
+    durations = list(durations or [])
+    with open(list_file, "w", encoding="utf-8") as f:
+        for i, p in enumerate(files):
+            safe = str(Path(p).resolve()).replace("\\", "/").replace("'", r"'\''")
+            f.write(f"file '{safe}'\n")
+            d = durations[i] if i < len(durations) else 0
+            if d and d > 0:
+                f.write(f"duration {d:.6f}\n")
 
 
 def build_ts_concat_cmd(ff: str, ts_list_file: Path, chapters_file: Path,

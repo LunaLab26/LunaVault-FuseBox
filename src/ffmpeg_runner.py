@@ -29,6 +29,7 @@ from core.progress import read_progress, parse_progress
 from core.eta import ConservativeEta
 from core.sync_advanced import analyze_sync
 from core.ffmpeg_cmd import (
+    write_concat_list,
     hms_to_seconds, MixSpec, OutputPlan, SLOWMO_RATIO,
     build_mux_cmd, build_mux_cmd_plan, build_concat_reencode_cmd,
     build_whatsapp_cmd,
@@ -536,10 +537,8 @@ class MergeWorker(QThread):
                             pass
                     sources = [Path(c.path) for c, _ in pairs]
                     arch_cmd_builder = lambda lf: build_archival_concat_cmd(ff, lf, interm)
-                with open(arch_list, "w", encoding="utf-8") as f:
-                    for sp in sources:
-                        safe = str(Path(sp).resolve()).replace("\\", "/").replace("'", r"'\''")
-                        f.write(f"file '{safe}'\n")
+                arch_vdurs = [probe_video_stream_duration(fp_arch, str(Path(c.path))) for c, _ in pairs]
+                write_concat_list(arch_list, sources, arch_vdurs)
                 if not self._run_stage(arch_cmd_builder(arch_list),
                                        temp_dir, progress_file,
                                        f"Archiving original files, group {gi + 1}/{len(groups)} "
@@ -737,6 +736,7 @@ class MergeWorker(QThread):
         # conform target's, when transcoded) — needed by the TS-remux step below
         # to pick the right Annex-B bitstream filter per segment.
         temp_clip_codecs: list[str] = []
+        temp_clip_vdurs: list[float] = []   # measured video length per temp clip (join offsets)
         cumulative_duration = 0.0
         # Measured concat positions (see manifest.ClipEntry.concat_start): the
         # concat demuxer advances each segment by the temp FILE's container
@@ -848,10 +848,16 @@ class MergeWorker(QThread):
             # every preceding duration was actually measured) — recovery then
             # falls back to the modelled video offsets, exactly as before.
             file_dur, wav_dur = probe_concat_segment(fp, str(out_clip), wav_slot)
+            # Every join list pins each segment's length to its VIDEO duration
+            # (see core.ffmpeg_cmd.write_concat_list), so the recovery cursor
+            # must advance by that same value, not the container duration.
+            vdur = probe_video_stream_duration(fp, str(out_clip)) if self._plan.include_video else 0.0
+            temp_clip_vdurs.append(vdur)
+            step = vdur if vdur > 0 else file_dur
             clip._concat_start = concat_cursor if concat_measured else None
             clip._wav_seg_duration = wav_dur if wav_dur > 0 else None
-            if file_dur > 0:
-                concat_cursor += file_dur
+            if step > 0:
+                concat_cursor += step
             else:
                 concat_measured = False
 
@@ -873,10 +879,7 @@ class MergeWorker(QThread):
         concat_file   = temp_dir / "concat_list.txt"
         chapters_file = temp_dir / "chapters.txt"
 
-        with open(concat_file, "w", encoding="utf-8") as f:
-            for p in temp_clips:
-                safe = str(p.resolve()).replace("\\", "/").replace("'", r"'\''")
-                f.write(f"file '{safe}'\n")
+        write_concat_list(concat_file, temp_clips, temp_clip_vdurs)
 
         with open(chapters_file, "w", encoding="utf-8") as f:
             f.write(";FFMETADATA1\n")
@@ -1033,10 +1036,7 @@ class MergeWorker(QThread):
 
                 if ts_ok:
                     ts_list_file = temp_dir / "concat_list_ts.txt"
-                    with open(ts_list_file, "w", encoding="utf-8") as f:
-                        for tp in ts_clips:
-                            safe = str(tp.resolve()).replace("\\", "/").replace("'", r"'\''")
-                            f.write(f"file '{safe}'\n")
+                    write_concat_list(ts_list_file, ts_clips, temp_clip_vdurs)
                     cmd = build_ts_concat_cmd(ff, ts_list_file, chapters_file, baseline_target,
                                               progress_file, extra_out_args=embed, tag_v=tag_v)
                 else:
@@ -1093,10 +1093,7 @@ class MergeWorker(QThread):
 
                 if split_ok:
                     video_list_file = temp_dir / "concat_list_ts_video.txt"
-                    with open(video_list_file, "w", encoding="utf-8") as f:
-                        for tp in ts_video_clips:
-                            safe = str(tp.resolve()).replace("\\", "/").replace("'", r"'\''")
-                            f.write(f"file '{safe}'\n")
+                    write_concat_list(video_list_file, ts_video_clips, temp_clip_vdurs)
                     video_part = temp_dir / "video_part.mov"
                     vpart_cmd = build_ts_concat_cmd(ff, video_list_file, no_chapters,
                                                     video_part, progress_file, tag_v=tag_v)

@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-09-24 01:38"
+LAST_UPDATED = "2026-09-24 01:55"
 
 
 @dataclass
@@ -25,6 +25,28 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-09-24",
+        title="v1.4.009 — sound from phones no longer plays too fast, and clips join frame-exactly",
+        summary="Two real audio/timing problems in merged masters, found with real family footage. "
+              "A phone clip recorded with 44.1 kHz sound (common on Android phones) played about 9% "
+              "too fast and high-pitched once merged with camera clips, and the sound drifted out "
+              "of sync after it. Separately, every join between two ordinary camera clips nudged "
+              "the next clip half a frame late. Both are fixed.",
+        details=[
+            "Fixed: a clip whose sound wasn't 48 kHz stereo (a Pixel phone's 44.1 kHz, a mono "
+              "clip, or 5.1 surround) was copied as-is into the merged soundtrack, which can only "
+              "have one format. Its sound played at the wrong speed (a test tone of 880 Hz came "
+              "out at 958 Hz) and the soundtrack ended up 0.18 s short per clip, pulling the "
+              "picture and sound apart. Such clips are now converted to 48 kHz stereo.",
+            "Fixed: at every join between clips, the next clip started half a frame (~21 ms) late "
+              "because the join measured each clip including a few milliseconds of audio that "
+              "starts before the picture. Joins now use each clip's exact picture length, so "
+              "every clip starts exactly where the last one ended. This affected ordinary 48 kHz "
+              "camera footage, which the app's own tests never used (they used 44.1 kHz test "
+              "tones, which happen to line up).",
+        ],
+    ),
     HistoryEntry(
         date="2026-09-24",
         title="v1.4.008 — honest merge progress, a faster converter, and a calm cancel",
