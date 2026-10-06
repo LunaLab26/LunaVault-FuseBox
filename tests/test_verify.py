@@ -331,3 +331,19 @@ if __name__ == "__main__":
     test_probe_video_stream_count_counts_streams()
     test_probe_video_stream_count_error_is_zero()
     print("test_verify: all tests passed")
+
+
+def test_frame_exact_duration_snaps_a_cut_to_whole_frames():
+    import subprocess as sp, tempfile
+    from pathlib import Path
+    from core.binaries import get_ffmpeg
+    from core.verify import probe_frame_exact_duration
+    ff, fp = get_ffmpeg()
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "c.mov"
+        # 30 fps source conformed to 29.97 and cut at 6.014 s, as a real Pixel clip was
+        sp.run([ff, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=30:d=7",
+                "-vf", "fps=30000/1001", "-c:v", "libx264", "-t", "6.014", str(out)], check=True)
+        d_exact = probe_frame_exact_duration(fp, str(out))
+    frames = d_exact * 30000 / 1001
+    assert abs(frames - round(frames)) < 1e-6

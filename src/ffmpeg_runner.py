@@ -49,7 +49,7 @@ from core.verify import (
     build_video_es_cmd, build_audio_pcm_cmd, md5_of_file,
     ClipVerifyResult, StreamCheck, write_verify_log,
     probe_rotation, probe_key_tags, tags_equal, probe_video_codec,
-    probe_keyframe_times, probe_video_stream_duration,
+    probe_keyframe_times, probe_video_stream_duration, probe_frame_exact_duration,
     probe_audio_stream_count, probe_video_stream_count,
     build_decoded_video_md5_cmd, build_decoded_audio_md5_cmd, decoded_md5,
     predict_unverifiable, _PREDICTED_PREFIX,
@@ -853,7 +853,7 @@ class MergeWorker(QThread):
             # Every join list pins each segment's length to its VIDEO duration
             # (see core.ffmpeg_cmd.write_concat_list), so the recovery cursor
             # must advance by that same value, not the container duration.
-            vdur = probe_video_stream_duration(fp, str(out_clip)) if self._plan.include_video else 0.0
+            vdur = probe_frame_exact_duration(fp, str(out_clip)) if self._plan.include_video else 0.0
             temp_clip_vdurs.append(vdur)
             step = vdur if vdur > 0 else file_dur
             clip._concat_start = concat_cursor if concat_measured else None

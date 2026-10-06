@@ -172,6 +172,33 @@ def probe_video_stream_duration(ffprobe_bin: str, path: str, video_stream_index:
     return 0.0
 
 
+def probe_frame_exact_duration(ffprobe_bin: str, path: str, **kwargs) -> float:
+    """A segment's video length snapped to a whole number of frames
+    (nb_frames / frame rate), for pinning concat joins. A stream cut with -t
+    can report a length that isn't a frame multiple (6.014 s at 29.97 fps);
+    the next segment then starts mid-frame, rounds onto the previous clip's
+    last frame, and the join carries two frames with the same timestamp.
+    Falls back to the reported duration when the two disagree by more than a
+    frame (variable frame rate) or a field is missing."""
+    try:
+        r = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=duration,nb_frames,r_frame_rate", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30, **kwargs)
+        st = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
+        dur = float(st.get("duration") or 0)
+        frames = int(st.get("nb_frames") or 0)
+        num, _, den = (st.get("r_frame_rate") or "0/1").partition("/")
+        fps = float(num) / float(den or 1)
+    except Exception:
+        return probe_video_stream_duration(ffprobe_bin, path, **kwargs)
+    if dur > 0 and frames > 0 and fps > 0:
+        snapped = frames / fps
+        if abs(snapped - dur) <= 1.5 / fps:
+            return snapped
+    return dur
+
+
 def probe_audio_stream_count(ffprobe_bin: str, path: str, **kwargs) -> int:
     """How many audio streams a file already has — needed before appending
     more (build_wav_archival_mux_cmd's "preserve WAV in full" pass) so the

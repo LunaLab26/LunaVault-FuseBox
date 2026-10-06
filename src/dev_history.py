@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 16:44"
+LAST_UPDATED = "2026-10-06 16:45"
 
 
 @dataclass
@@ -25,6 +25,14 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.013 — no doubled frames where a converted phone clip joins the next one",
+        summary="Where a phone clip filmed at 30 fps was converted to the camera's 29.97 fps, the next clip's first frame landed on the same instant as the converted clip's last frame. Players then had two frames competing for one moment at that join, which shows up as a stutter, or one of them is dropped. Joins now land exactly on a frame boundary.",
+        details=[
+            "Fixed: a full decode of a real 5-camera merge reported \"non monotonically increasing dts\" at two joins (frames 180 and 938). Each clip's length at the join is now a whole number of frames.",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-06",
         title="v1.4.012 — phone clips filmed in VP9 can't break the merge any more",
