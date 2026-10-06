@@ -27,6 +27,15 @@ class HistoryEntry:
 HISTORY: list = [
     HistoryEntry(
         date="2026-10-06",
+        title="v1.4.011 — short clips get their WAV backup synced too",
+        summary="A clip shorter than about five seconds skipped the WAV sync measurement and was simply lined up by its end, which on the Luna Ultra is about 0.3 s off. Short clips are now measured as well.",
+        details=[
+            "Fixed: on a real 2-second Luna Ultra clip the WAV backup was 276 ms out of sync. Short clips are now measured with one window covering the whole clip, inside a wider stretch of the WAV, and land within 1 ms of the true position.",
+            "Tested on all 46 real Luna Ultra clips from a family day out: every clip's WAV now syncs within 2 ms.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
         title="v1.4.010 — picture and sound stay in sync across a whole day of clips",
         summary="Merging many clips let the sound slowly slide away from the picture. Each camera clip's sound is a few milliseconds longer or shorter than its picture, and every join added that difference to all the clips after it. Over the 46 Luna Ultra clips of a real family day out, the camera sound would have ended up about half a second early. The WAV backup track could be out by a third of a second too. Every join is now exact.",
         details=[

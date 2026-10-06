@@ -50,6 +50,7 @@ WINDOW_SECS   = 4.0     # length of each analysis window
 N_WINDOWS     = 6       # windows spread across the overlap (≥2 needed for drift)
 MAX_TAU       = 0.50    # max |lag| to consider per window (seconds)
 EDGE_SKIP     = 0.5     # don't sample within this many secs of either end
+MIN_WINDOW_SECS = 1.0   # shortest single window a short clip is still measured with
 
 # A clip/WAV duration difference beyond this is not ordinary pre/post-roll —
 # real shoots show ~0.3-0.4s; this leaves a wide margin before distrusting
@@ -298,30 +299,49 @@ def analyze_sync(ff: str, clip_path: str, wav_path: str,
     overlap_start = max(0.0, -preroll)
     overlap_end = min(clip_dur, wav_dur - preroll)
     overlap = overlap_end - overlap_start
+    win, edge, n_windows = WINDOW_SECS, EDGE_SKIP, N_WINDOWS
     if overlap < WINDOW_SECS + 2 * EDGE_SKIP:
-        res.note = (res.note + "; " if res.note else "") + "overlap too short for analysis; using end-alignment"
-        return res
+        # A short clip still gets measured — one window spanning nearly the
+        # whole overlap. Falling back to end-alignment here was ~0.3 s out on
+        # real 2 s Luna Ultra clips (the WAV also runs on a little past the
+        # camera), far worse than a single short GCC-PHAT window.
+        edge = min(EDGE_SKIP, overlap * 0.05)
+        win = overlap - 2 * edge
+        n_windows = 1
+        if win < MIN_WINDOW_SECS:
+            res.note = (res.note + "; " if res.note else "") + "overlap too short for analysis; using end-alignment"
+            return res
 
-    usable = overlap - WINDOW_SECS - 2 * EDGE_SKIP
-    step = usable / max(1, N_WINDOWS - 1)
+    usable = overlap - win - 2 * edge
+    step = usable / max(1, n_windows - 1)
 
     lags: list[float] = []
     times: list[float] = []
     peaks: list[float] = []
 
-    for i in range(N_WINDOWS):
-        ct = overlap_start + EDGE_SKIP + i * step
+    for i in range(n_windows):
+        ct = overlap_start + edge + i * step
         wt = ct + preroll
         if ct < 0 or wt < 0:
             continue
-        ca = _extract(ff, clip_path, ct, ANALYSIS_SR, WINDOW_SECS)
-        wa = _extract(ff, wav_path,  wt, ANALYSIS_SR, WINDOW_SECS)
+        ca = _extract(ff, clip_path, ct, ANALYSIS_SR, win)
+        if n_windows == 1:
+            # Short clip: widen the WAV window by the search range on both
+            # sides so the camera window's content is wholly inside it — with
+            # equal ~2 s windows a 0.3 s anchor error left too little shared
+            # sound and GCC-PHAT locked onto a false peak (measured: 100 ms out).
+            pad = min(MAX_TAU, wt)
+            wa = _extract(ff, wav_path, wt - pad, ANALYSIS_SR, win + pad + MAX_TAU)
+        else:
+            pad = 0.0
+            wa = _extract(ff, wav_path, wt, ANALYSIS_SR, win)
         if not ca or not wa:
             continue
-        tau, peak = gcc_phat_lag(ca, wa, fs=ANALYSIS_SR, max_tau=MAX_TAU)
+        tau, peak = gcc_phat_lag(ca, wa, fs=ANALYSIS_SR, max_tau=MAX_TAU + pad)
+        tau += pad
         lags.append(tau)
         # time of this window's centre, measured from clip start
-        times.append(ct + WINDOW_SECS / 2.0)
+        times.append(ct + win / 2.0)
         peaks.append(peak)
 
     if not lags:
