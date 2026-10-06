@@ -249,3 +249,12 @@ if __name__ == "__main__":
     test_sidecar_write_and_read()
     _integration_embed_roundtrip()
     print("test_manifest: all tests passed")
+
+
+def test_embed_args_keep_faststart():
+    # They're appended after a command's own "-movflags +faststart"; the last
+    # -movflags wins, so they must carry +faststart themselves.
+    from core.manifest import Manifest, metadata_embed_args
+    args = metadata_embed_args(Manifest(master_filename="m.mov"), is_mov=True)
+    flags = args[args.index("-movflags") + 1]
+    assert "+faststart" in flags and "use_metadata_tags" in flags

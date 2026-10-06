@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 20:55"
+LAST_UPDATED = "2026-10-06 21:01"
 
 
 @dataclass
@@ -25,6 +25,14 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.018 — masters start playing straight away when streamed",
+        summary="A merged master's index (the part a player needs before it can start) was written at the end of the file instead of the beginning. That makes a master slow to start when played from a web page, a cloud folder or a network drive. It's at the front again.",
+        details=[
+            "Fixed: embedding the archive manifest replaced the \"fast start\" flag on every merged master. Found while checking the masters for YouTube upload.",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-06",
         title="v1.4.017 — a much tidier Merge page",

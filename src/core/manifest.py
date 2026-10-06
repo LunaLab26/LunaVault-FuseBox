@@ -407,7 +407,11 @@ def metadata_embed_args(m: Manifest, is_mov: bool = True) -> list:
     unknown metadata keys unless `-movflags use_metadata_tags` is set."""
     args = []
     if is_mov:
-        args += ["-movflags", "use_metadata_tags"]
+        # +faststart too: these args are appended after a command's own
+        # "-movflags +faststart", and the last -movflags replaces earlier ones,
+        # so on its own this silently moved every embedded master's index to
+        # the end of the file (slow to start streaming / progressive playback).
+        args += ["-movflags", "+faststart+use_metadata_tags"]
     args += ["-metadata", f"{MANIFEST_METADATA_KEY}={to_json(m, indent=None)}"]
     return args
 

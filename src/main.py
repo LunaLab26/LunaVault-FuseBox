@@ -35,7 +35,7 @@ import theme
 APP_NAME    = "LunaVault FuseBox"
 # Versioning: v1.4.NNN, incremented by one for every amendment/change (see
 # dev_history.py's running log and LAST_UPDATED stamp).
-APP_VERSION = "1.4.017"
+APP_VERSION = "1.4.018"
 
 
 class _UpdateCheckThread(QThread):
