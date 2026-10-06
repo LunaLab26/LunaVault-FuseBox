@@ -836,6 +836,21 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     # later clip's sound by that much (a real day of ~9 ms-short camera clips
     # drifted ~0.4 s by the last clip).
     vdur       = getattr(clip, "video_duration", 0.0) or dur
+    # A converted clip comes out at the baseline frame rate, so its picture is
+    # a whole number of THOSE frames (4.5 s at 25 fps -> 112 or 113 frames),
+    # not the source length. Cut picture and sound to the same whole-frame
+    # length, or every converted clip leaves the sound a fraction of a frame
+    # off and it adds up (-123 ms after 8 clips at a 25 fps baseline).
+    out_frames = None
+    if not is_conform and plan.include_video and vdur > 0:
+        num, _, den = str(conform.fps or "").partition("/")
+        try:
+            fps_out = float(num) / float(den or 1)
+        except ValueError:
+            fps_out = 0.0
+        if fps_out > 0:
+            out_frames = max(1, round(vdur * fps_out))
+            vdur = out_frames / fps_out
     if mix is None:
         mix = MixSpec(kind=plan.mix_kind, match_levels=plan.mix_match_levels)
 
@@ -1017,6 +1032,8 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     # of bug — a proxy's own duration rarely matches its paired clip's to the
     # millisecond); reproduced directly and confirmed this is the general case,
     # not LRV-specific.
+    if out_frames:
+        cmd += ["-frames:v", str(out_frames)]
     cmd += ["-t", f"{max(0.01, vdur):.6f}"]
     cmd += ["-progress", str(progress_file), "-nostats", str(out)]
     return cmd

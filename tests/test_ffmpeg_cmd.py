@@ -1104,7 +1104,8 @@ def test_plan_video_override_lrv_maps_video_from_second_input():
     assert "-map [v]" in s
     assert "-c:v copy" not in s
     # cut to the CLIP's own duration, not the proxy's own (they rarely match exactly)
-    assert "-t" in cmd and cmd[cmd.index("-t") + 1] == f"{clip.duration:.6f}"
+    t = float(cmd[cmd.index("-t") + 1])   # converted: snapped to whole output frames
+    assert "-frames:v" in cmd and abs(t - clip.duration) < 1 / 23.0
 
 
 def _last_t_value(cmd: list) -> str:
@@ -1153,7 +1154,8 @@ def test_plan_transcoding_clip_with_wav_gets_duration_cutoff():
     clip.wav_path = Path("clip.wav")
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
     assert "-c:v copy" not in " ".join(cmd)   # genuinely transcoding
-    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.6f}"
+    t = float(_last_t_value(cmd))   # converted: snapped to whole output frames
+    assert "-frames:v" in cmd and abs(t - clip.duration) < 1 / 23.0
 
 
 def test_plan_video_override_lrv_ignored_when_no_lrv_paired():

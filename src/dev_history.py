@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 16:45"
+LAST_UPDATED = "2026-10-06 20:31"
 
 
 @dataclass
@@ -25,6 +25,14 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.014 — converted clips keep their sound exactly under the picture",
+        summary="When a clip had to be converted to a different frame rate (for example a 30 fps phone clip joining 25 fps footage), its picture came out a fraction of a frame shorter or longer than its sound, and that difference added up clip after clip. After eight converted clips the sound was 0.12 s early. Converted clips are now cut to a whole number of frames, picture and sound together.",
+        details=[
+            "Fixed: with a 25 fps baseline, a flash-and-beep test drifted to -123 ms after eight converted clips; it now stays within 1 ms. A mixed ten-format test that drifted up to 40 ms now stays within 3.4 ms.",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-06",
         title="v1.4.013 — no doubled frames where a converted phone clip joins the next one",
