@@ -113,6 +113,7 @@ class StreamInfo:
     """All probed metadata for one video file."""
     path: str = ""
     duration: float = 0.0
+    video_duration: float = 0.0   # the video stream's own length (container duration can include audio overrun)
     codec: str = ""
     width: int = 0
     height: int = 0
@@ -268,6 +269,10 @@ def probe(ffprobe_bin: str, path: str) -> StreamInfo:
         if ctype == "video" and not info.codec:
             video_stream = s
             info.codec         = s.get("codec_name", "")
+            try:
+                info.video_duration = float(s.get("duration") or 0) or info.duration
+            except (TypeError, ValueError):
+                info.video_duration = info.duration
             info.width         = s.get("width", 0)
             info.height        = s.get("height", 0)
             info.pix_fmt       = s.get("pix_fmt", "")

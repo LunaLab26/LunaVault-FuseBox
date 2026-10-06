@@ -1,3 +1,4 @@
+import re
 """Tests for core.plan_report — the explanation must match what the builder does."""
 
 import sys
@@ -17,7 +18,8 @@ _AUDIO_SPECS = {"0:a:0", "1:a:0", "[mix]", "[s]"}
 def _audio_map_count(cmd):
     n = 0
     for i, tok in enumerate(cmd):
-        if tok == "-map" and i + 1 < len(cmd) and cmd[i + 1] in _AUDIO_SPECS:
+        if tok == "-map" and i + 1 < len(cmd) and (cmd[i + 1] in _AUDIO_SPECS
+                                                    or re.fullmatch(r"\[a\d+\]", cmd[i + 1])):
             n += 1
     return n
 

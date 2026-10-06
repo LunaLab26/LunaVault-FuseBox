@@ -679,7 +679,7 @@ def test_plan_default_two_lossless_tracks():
                               OutputTrack("mix", enabled=False)])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "-c:a:0 copy" in s and "-c:a:1 alac" in s
+    assert "-c:a:0 alac" in s and "-c:a:1 alac" in s
     assert "[mix]" not in s
     assert "-disposition:a:0 default" in s
 
@@ -688,7 +688,7 @@ def test_plan_mix_appended():
     plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "join=inputs=2" in s and "-c:a:2 aac" in s
+    assert "join=inputs=2" in s and "-c:a:2 alac" in s
     assert "-disposition:a:0 default" in s   # camera still default
 
 
@@ -696,7 +696,7 @@ def test_plan_mix_first_is_default():
     plan = OutputPlan(tracks=[OutputTrack("mix"), OutputTrack("camera"), OutputTrack("wav")])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "-map [mix]" in s and "-c:a:0 aac" in s
+    assert "[mix]apad[a" in s and "-c:a:0 alac" in s
     assert "-disposition:a:0 default" in s
 
 
@@ -714,9 +714,9 @@ def test_plan_primary_override_mix_plus_native_mix_track_uses_split_pads():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
     assert "asplit=2" in s
-    assert "-map [mix0]" in s and "-map [mix1]" in s
+    assert "[mix0]apad[a" in s and "[mix1]apad[a" in s
     assert "-map [mix]" not in s   # the old single-use label must not be referenced twice
-    assert "-c:a:0 aac" in s and "-c:a:2 aac" in s   # both mix-filled slots still encode correctly
+    assert "-c:a:0 alac" in s and "-c:a:2 alac" in s   # both mix-filled slots: exact-length intermediates
 
 
 def test_plan_single_mix_consumer_still_uses_the_plain_mix_label():
@@ -725,7 +725,7 @@ def test_plan_single_mix_consumer_still_uses_the_plain_mix_label():
     plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "-map [mix]" in s
+    assert "[mix]apad[a" in s
     assert "asplit" not in s and "[mix0]" not in s
 
 
@@ -742,7 +742,7 @@ def test_plan_disable_wav_leaves_camera():
                               OutputTrack("mix", enabled=False)])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "-c:a:0 copy" in s and "alac" not in s and "[mix]" not in s
+    assert "-c:a:0 alac" in s and s.count("alac") == 1 and "[mix]" not in s
 
 
 def test_plan_transcode_drops_mix_keeps_audio():
@@ -755,7 +755,7 @@ def test_plan_transcode_drops_mix_keeps_audio():
     s = " ".join(cmd)
     assert "libx265" in s and "scale=3840:2160" in s
     assert "[mix]" not in s                  # mix dropped on transcode
-    assert "-c:a:0 copy" in s and "-c:a:1 alac" in s
+    assert "-c:a:0 alac" in s and "-c:a:1 alac" in s
 
 
 def test_plan_transcode_vaapi_swaps_binary_adds_device_and_hwupload():
@@ -798,10 +798,10 @@ def test_plan_transcode_vaapi_swaps_binary_adds_device_and_hwupload():
     # scale/pad — not spliced in before it.
     vf_str = None
     if "-filter_complex" in cmd:
-        vf_str = cmd[cmd.index("-filter_complex") + 1]
+        vf_str = next(p for p in cmd[cmd.index("-filter_complex") + 1].split(";") if p.endswith("[v]"))
     elif "-vf" in cmd:
         vf_str = cmd[cmd.index("-vf") + 1]
-    assert vf_str is not None and vf_str.rstrip("]").endswith("hwupload")
+    assert vf_str is not None and vf_str.rsplit("[", 1)[0].endswith("hwupload")
     assert "h264_vaapi" in s and "-qp 18" in s
 
 
@@ -855,8 +855,9 @@ def test_plan_hw_decode_plus_hw_encode_full_pipeline():
         assert "-vaapi_device /dev/dri/renderD128" in s                     # hw encode device
         assert "h264_vaapi" in s and "libx264" not in s
         # hwupload is the LAST filter step (after scale/pad), before the encoder
-        vf = cmd[cmd.index("-vf") + 1] if "-vf" in cmd else cmd[cmd.index("-filter_complex") + 1]
-        assert vf.rstrip("]").endswith("hwupload")
+        vf = (cmd[cmd.index("-vf") + 1] if "-vf" in cmd else
+              next(p for p in cmd[cmd.index("-filter_complex") + 1].split(";") if p.endswith("[v]")))
+        assert vf.rsplit("[", 1)[0].endswith("hwupload")
     _with_fake_vaapi("vaapi", body)
 
 
@@ -920,7 +921,7 @@ def test_slowmo_builds_stretched_primary():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
     s = " ".join(cmd)
     assert "atempo=" in s and "[1:a:0]" in s and "[s]" in s
-    assert "-c:a:0 aac" in s            # stretched WAV is the primary track
+    assert "-c:a:0 alac" in s            # stretched WAV is the primary track
     assert "-c:a:1 alac" in s           # original WAV preserved (lossless)
     assert "Synced Audio (WAV stretched to video)" in s
     assert "-disposition:a:0 default" in s
@@ -937,7 +938,7 @@ def test_slowmo_uniform_two_slots():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
     s = " ".join(cmd)
     assert "atempo=" in s and "[s]" in s
-    assert "-c:a:0 aac" in s and "-c:a:1 alac" in s and "-c:a:2" not in s
+    assert "-c:a:0 alac" in s and "-c:a:1 alac" in s and "-c:a:2" not in s
 
 
 def test_normal_clip_is_not_slowmo():
@@ -957,10 +958,10 @@ def test_plan_no_camera_uniform_slots():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
     assert "-map 0:a:0" not in s          # no camera audio to map
-    assert "-c:a:0 aac" in s              # primary = WAV → AAC
+    assert "-c:a:0 alac" in s              # primary = WAV → AAC
     assert "-c:a:1 alac" in s             # backup = WAV → ALAC
     assert "anullsrc" in s                # mix slot silenced to keep the layout
-    assert "-c:a:2 aac" in s
+    assert "-c:a:2 alac" in s
 
 
 def test_plan_no_wav_backup_falls_back_to_camera_audio():
@@ -974,8 +975,8 @@ def test_plan_no_wav_backup_falls_back_to_camera_audio():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
     assert "anullsrc" not in s                       # no silence needed — camera audio covers it
-    assert s.count("-map 0:a:0") == 2                # both slots pull from the same camera input
-    assert "-c:a:0 copy" in s                         # camera slot: stream copy
+    assert s.count("[0:a:0]apad[a") == 2                # both slots pull from the same camera input
+    assert "-c:a:0 alac" in s                         # camera slot: stream copy
     assert "-c:a:1 alac" in s and "-sample_fmt:a:1 s32p" in s   # wav slot: re-encoded lossless
     assert "Backup Audio (from Camera)" in s
 
@@ -1016,7 +1017,7 @@ def test_plan_primary_override_forces_wav_into_default_camera_slot():
     plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "-c:a:0 aac" in s and "Primary Audio (from WAV)" in s
+    assert "-c:a:0 alac" in s and "Primary Audio (from WAV)" in s
     assert "-disposition:a:0 default" in s
     # The WAV-backup slot (index 1) is untouched by the override — still its
     # own normal lossless WAV fill, a separate concern from Primary.
@@ -1053,7 +1054,7 @@ def test_plan_primary_override_ignored_when_source_unavailable():
     plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "-c:a:0 copy" in s          # Auto: camera audio copied, not silence
+    assert "-c:a:0 alac" in s          # Auto: camera audio copied, not silence
 
 
 def test_plan_primary_override_skipped_for_slowmo():
@@ -1103,7 +1104,7 @@ def test_plan_video_override_lrv_maps_video_from_second_input():
     assert "-map [v]" in s
     assert "-c:v copy" not in s
     # cut to the CLIP's own duration, not the proxy's own (they rarely match exactly)
-    assert "-t" in cmd and cmd[cmd.index("-t") + 1] == f"{clip.duration:.3f}"
+    assert "-t" in cmd and cmd[cmd.index("-t") + 1] == f"{clip.duration:.6f}"
 
 
 def _last_t_value(cmd: list) -> str:
@@ -1132,7 +1133,7 @@ def test_plan_normal_clip_with_wav_gets_duration_cutoff():
     clip.stream.duration = 60.0
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
     assert "-c:v copy" in " ".join(cmd)   # the ordinary conforming stream-copy path
-    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.3f}"
+    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.6f}"
 
 
 def test_plan_clip_without_wav_still_gets_duration_cutoff():
@@ -1141,7 +1142,7 @@ def test_plan_clip_without_wav_still_gets_duration_cutoff():
     clip = _ok_clip(with_wav=False)
     clip.stream.duration = 60.0
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
-    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.3f}"
+    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.6f}"
 
 
 def test_plan_transcoding_clip_with_wav_gets_duration_cutoff():
@@ -1152,7 +1153,7 @@ def test_plan_transcoding_clip_with_wav_gets_duration_cutoff():
     clip.wav_path = Path("clip.wav")
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
     assert "-c:v copy" not in " ".join(cmd)   # genuinely transcoding
-    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.3f}"
+    assert "-t" in cmd and _last_t_value(cmd) == f"{clip.duration:.6f}"
 
 
 def test_plan_video_override_lrv_ignored_when_no_lrv_paired():
@@ -1182,7 +1183,7 @@ def test_plan_no_audio_no_wav_silent_uniform_tracks():
     s = " ".join(cmd)
     assert "0:v:0" in s and "-c:v copy" in s
     assert "anullsrc" in s
-    assert "-c:a:0 aac" in s and "-c:a:1 alac" in s   # silent AAC + silent ALAC
+    assert "-c:a:0 alac" in s and "-c:a:1 alac" in s   # silent AAC + silent ALAC
     assert "-sample_fmt:a:1 s32p" in s   # silence-filled ALAC still gets a forced sample format
 
 
@@ -1626,9 +1627,51 @@ def test_cam_transcode_maps_source_and_encodes_aac():
     cmd = build_mux_cmd_plan("ffmpeg", pcm_clip, Path("o.mov"), PF, plan, "crop",
                              conform=ConformSpec(codec="h264", pix_fmt="yuv420p"))
     s = " ".join(cmd)
-    assert "-map 0:a:0" in s
-    assert "-c:a:0 aac" in s
+    assert "[0:a:0]apad[a0]" in s and "-map [a0]" in s
+    assert "-c:a:0 alac" in s       # exact-length intermediate; AAC is encoded once at the join
     assert "-c:a:0 copy" not in s
+
+
+def _timed_clip(vdur, cdur, wav_offset=0.0, with_wav=True, status="ok"):
+    st = StreamInfo(status=status, width=3840, height=2160, duration=cdur, audio_codec="aac",
+                    audio_sample_rate=48000, audio_channels=2)
+    st.video_duration = vdur
+    c = ClipInfo(path=Path("clip.mp4"), wav_path=Path("clip.wav") if with_wav else None, stream=st)
+    c.wav_offset = wav_offset
+    c.wav_duration = cdur
+    return c
+
+
+def test_every_audio_slot_is_padded_and_cut_to_the_video_length():
+    # Container duration (audio overrun) must not set the segment length: each
+    # join is pinned to the video length, so any audio slot that is longer or
+    # shorter than the picture shifts every later clip's sound.
+    clip = _timed_clip(vdur=4.471133, cdur=4.5)
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert fc.count("apad[a") == 3
+    assert cmd[cmd.index("-t", cmd.index("-filter_complex")) + 1] == "4.471133"
+    assert "-c:a:0 copy" not in " ".join(cmd)
+
+
+def test_late_starting_wav_is_delayed_with_real_samples_not_itsoffset():
+    clip = _timed_clip(vdur=10.0, cdur=10.0, wav_offset=0.3)
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    s = " ".join(cmd)
+    assert "-itsoffset" not in s
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "[1:a:0]adelay=300.000:all=1,apad[a1]" in fc       # WAV slot
+    assert "adelay=300.000:all=1" in fc.split("[wav_m]")[0]   # mix's WAV side too
+
+
+def test_early_starting_wav_is_still_trimmed_with_ss():
+    clip = _timed_clip(vdur=10.0, cdur=10.0, wav_offset=-0.42)
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav")])
+    cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
+    i = cmd.index("clip.wav")
+    assert cmd[i - 3:i - 1] == ["-ss", "0.420000"] and "adelay" not in " ".join(cmd)
 
 
 def test_archival_spec_signature_separates_mismatched_audio_codecs():
@@ -1819,3 +1862,12 @@ def test_archival_vp9_sidecar_end_to_end_real_ffmpeg():
     assert _video_md5(c3) == _video_md5(rec3), (
         "c3 recovered from the WRONG archival stream (the index-shift regression the "
         "sidecar redirect introduced) - its video must round-trip byte-exact")
+
+
+def test_join_encodes_camera_and_mix_slots_to_aac_once_and_copies_the_wav():
+    from core.ffmpeg_cmd import final_audio_encode_args
+    plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
+    assert final_audio_encode_args(plan) == ["-c:a:0", "aac", "-b:a:0", "256k",
+                                             "-c:a:2", "aac", "-b:a:2", "256k"]
+    plan = OutputPlan(tracks=[OutputTrack("wav"), OutputTrack("camera"), OutputTrack("mix", enabled=False)])
+    assert final_audio_encode_args(plan) == ["-c:a:1", "aac", "-b:a:1", "256k"]

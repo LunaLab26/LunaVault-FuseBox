@@ -16,7 +16,6 @@ from core.ffmpeg_cmd import OutputPlan, is_slowmo
 # Rough size model
 _ALAC_RATIO   = 0.6      # ALAC ≈ 60% of PCM WAV
 _AAC_BPS      = 256_000  # mix / stretched track
-_CAMERA_BPS   = 192_000  # camera AAC (copy ≈ source)
 _CAM_ALAC_PCM_BPS = 48_000 * 32 * 2   # assumed 48kHz/32-bit/stereo PCM before ALAC compression
 _TRANSCODE_VIDEO_RATIO = 0.85   # 4K HEVC CRF18 ≈ 85% of source size (very rough)
 
@@ -121,7 +120,7 @@ def analyze_clip(clip: ClipInfo, plan: OutputPlan) -> ClipReport:
     if has_cam and not has_wav:
         r.notes.append("No WAV for this clip → WAV-backup slot uses the camera audio instead of silence")
 
-    _codec_label = {"copy": "AAC (copy)", "wav_alac": "ALAC", "wav_aac": "AAC 256k",
+    _codec_label = {"copy": "AAC 256k", "wav_alac": "ALAC", "wav_aac": "AAC 256k",
                     "cam_alac": "ALAC", "stretch": "AAC 256k", "mix": "AAC 256k"}
     had_silence = False
     for kind in (t.kind for t in plan.tracks if t.enabled):
@@ -133,9 +132,7 @@ def analyze_clip(clip: ClipInfo, plan: OutputPlan) -> ClipReport:
             eb = 0
         else:
             label = _codec_label.get(fill, "AAC 256k")
-            if fill == "copy":
-                eb = int(_CAMERA_BPS / 8 * dur)
-            elif fill == "wav_alac":
+            if fill == "wav_alac":
                 eb = int(_wav_bytes(clip) * _ALAC_RATIO)
             elif fill == "cam_alac":
                 eb = int(_CAM_ALAC_PCM_BPS / 8 * _ALAC_RATIO * dur)

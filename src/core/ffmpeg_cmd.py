@@ -52,7 +52,7 @@ def hms_to_seconds(hms: str) -> float:
 # (Phase 2 will add the L/R split track and per-clip drift correction.)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _mix_filtergraph(mix: MixSpec, n_outputs: int = 1) -> str:
+def _mix_filtergraph(mix: MixSpec, n_outputs: int = 1, wav_delay_ms: float = 0.0) -> str:
     """Filter_complex string that turns camera [0:a:0] + WAV [1:a:0] into [mix].
 
     `n_outputs` > 1 fans the SAME derived mix out into that many distinct,
@@ -67,7 +67,7 @@ def _mix_filtergraph(mix: MixSpec, n_outputs: int = 1) -> str:
     cam = "[0:a:0]"
     wav = "[1:a:0]"
     cam_pre = []
-    wav_pre = []
+    wav_pre = [f"adelay={wav_delay_ms:.3f}:all=1"] if wav_delay_ms > 0 else []
     if mix.match_levels:
         cam_pre.append("dynaudnorm=f=200")
         wav_pre.append("dynaudnorm=f=200")
@@ -829,6 +829,13 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     has_wav    = clip.has_wav()
     slowmo     = is_slowmo(clip)
     dur        = clip.duration
+    # Every stream of this clip's segment is cut to the PICTURE's length, and
+    # every audio slot is padded up to it, so each segment's audio is exactly
+    # as long as its video. The joins pin the next clip to the video length,
+    # and an audio slot even a few ms long or short there would shift every
+    # later clip's sound by that much (a real day of ~9 ms-short camera clips
+    # drifted ~0.4 s by the last clip).
+    vdur       = getattr(clip, "video_duration", 0.0) or dur
     if mix is None:
         mix = MixSpec(kind=plan.mix_kind, match_levels=plan.mix_match_levels)
 
@@ -873,14 +880,25 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         cmd += ["-i", str(clip.lrv_path)]
         lrv_idx = next_idx
         next_idx += 1
+    # A WAV that starts AFTER the video (positive offset) is delayed with real
+    # leading silence (adelay) rather than -itsoffset: an -itsoffset only moves
+    # the track's start timestamp, and that gap is lost when the per-clip files
+    # are joined, so this clip's WAV (and every later clip's) would play early.
     wav_idx = None
+    wav_delay_ms = 0.0
     if has_wav:
-        cmd += (["-i", str(clip.wav_path)] if slowmo else clip.wav_flags())
+        if slowmo:
+            cmd += ["-i", str(clip.wav_path)]
+        elif clip.wav_offset > 0.001:
+            cmd += ["-i", str(clip.wav_path)]
+            wav_delay_ms = clip.wav_offset * 1000.0
+        else:
+            cmd += clip.wav_flags()
         wav_idx = next_idx
         next_idx += 1
     silence_idx = None
     if any(f[1] == "silence" for f in fills):
-        cmd += ["-f", "lavfi", "-t", f"{max(dur, 0.1):.3f}",
+        cmd += ["-f", "lavfi", "-t", f"{max(vdur, 0.1):.3f}",
                 "-i", "anullsrc=r=48000:cl=stereo"]
         silence_idx = next_idx
         next_idx += 1
@@ -900,7 +918,7 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     # clip — each needs its OWN single-use filtergraph pad (see
     # _mix_filtergraph's docstring for the crash this avoids).
     mix_fill_count = sum(1 for f in fills if f[1] in ("mix", "mix_alac"))
-    has_fc_audio = any(f[1] in ("stretch", "mix", "mix_alac") for f in fills)
+    has_fc_audio = bool(fills)
     # A plain "-vf" shorthand implicitly picks its own input regardless of any
     # explicit -map, so once video comes from a NON-zero input (the LRV proxy)
     # it must always go through filter_complex (with its input spelled out
@@ -910,29 +928,34 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     if uses_fc_video:
         fc.append(f"[{video_src_idx}:v:0]{','.join(vf_parts)}[v]")
     if any(f[1] == "stretch" for f in fills):
-        factor = (clip.wav_duration / dur) if dur > 0 else 1.0
+        factor = (clip.wav_duration / vdur) if vdur > 0 else 1.0
         fc.append(f"[{wav_idx}:a:0]{atempo_chain(factor)}[s]")
     if mix_fill_count:
-        fc.append(_mix_filtergraph(mix, n_outputs=mix_fill_count))
+        fc.append(_mix_filtergraph(mix, n_outputs=mix_fill_count, wav_delay_ms=wav_delay_ms))
+    wav_delay = [f"adelay={wav_delay_ms:.3f}:all=1"] if wav_delay_ms > 0 else []
+    mix_slot_i = 0
+    for i, (kind, fill, codec, title) in enumerate(fills):
+        if fill in ("copy", "cam_alac", "cam_transcode"):
+            src, pre = "[0:a:0]", []
+        elif fill in ("wav_alac", "wav_aac"):
+            src, pre = f"[{wav_idx}:a:0]", wav_delay
+        elif fill == "stretch":
+            src, pre = "[s]", []
+        elif fill in ("mix", "mix_alac"):
+            src = f"[mix{mix_slot_i}]" if mix_fill_count > 1 else "[mix]"
+            mix_slot_i += 1
+            pre = []
+        else:  # silence
+            src, pre = f"[{silence_idx}:a:0]", []
+        fc.append(f"{src}{','.join(pre + ['apad'])}[a{i}]")
     if fc:
         cmd += ["-filter_complex", ";".join(fc)]
 
     # ── Maps ──────────────────────────────────────────────────────────────────
     if plan.include_video:
         cmd += ["-map", "[v]" if uses_fc_video else f"{video_src_idx}:v:0"]
-    mix_slot_i = 0
-    for (kind, fill, codec, title) in fills:
-        if fill in ("copy", "cam_alac", "cam_transcode"):
-            cmd += ["-map", "0:a:0"]
-        elif fill in ("wav_alac", "wav_aac"):
-            cmd += ["-map", f"{wav_idx}:a:0"]
-        elif fill == "stretch":
-            cmd += ["-map", "[s]"]
-        elif fill in ("mix", "mix_alac"):
-            cmd += ["-map", f"[mix{mix_slot_i}]" if mix_fill_count > 1 else "[mix]"]
-            mix_slot_i += 1
-        else:  # silence
-            cmd += ["-map", f"{silence_idx}:a:0"]
+    for i in range(len(fills)):
+        cmd += ["-map", f"[a{i}]"]
 
     # A source clip carrying a QuickTime chapter track (`tref` type 'chap' on
     # its video/audio track, pointing at a small `text`-handler marker track —
@@ -955,27 +978,21 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
             if not uses_fc_video and vf_parts:
                 cmd += ["-vf", ",".join(vf_parts)]
             cmd += _video_encoder_args(conform, ff, for_concat=for_concat)
-    for i, (kind, fill, codec, title) in enumerate(fills):
-        if fill == "copy":
-            cmd += [f"-c:a:{i}", "copy"]
-        elif codec == "alac":
-            # A fixed sample format is required here, not just the codec name.
-            # Without it, ffmpeg's ALAC encoder auto-picks a bit depth from
-            # whatever it's fed — a real WAV backup (often 24-in-32-bit) encodes
-            # at one depth, while the SILENCE filler used for a clip with no WAV
-            # (`anullsrc`, no format specified) defaults to 16-bit. Concatenating
-            # ALAC segments that declare different bit depths corrupts the
-            # stream at the seam (confirmed directly: decoding a real merge's
-            # WAV-backup track threw hundreds of "invalid element channel
-            # count"/"invalid zero block size" errors — traced to exactly this
-            # 16-bit/24-bit mismatch — and forcing the same sample_fmt on every
-            # ALAC segment, real or silent, made it decode clean). s32p is a
-            # safe superset of any real source's precision.
-            cmd += [f"-c:a:{i}", "alac", f"-sample_fmt:a:{i}", "s32p"]
-            cmd += [f"-ar:a:{i}", str(SLOT_SAMPLE_RATE), f"-ac:a:{i}", str(SLOT_CHANNELS)]
-        else:
-            cmd += [f"-c:a:{i}", "aac", f"-b:a:{i}", "256k"]
-            cmd += [f"-ar:a:{i}", str(SLOT_SAMPLE_RATE), f"-ac:a:{i}", str(SLOT_CHANNELS)]
+    # Every slot is carried as ALAC in the per-clip file, whatever its final
+    # codec: ALAC holds exactly the samples given (no encoder priming, no
+    # padding to a frame boundary), so each segment's audio stays exactly its
+    # picture's length through the join. Slots that end up AAC are encoded
+    # ONCE over the whole joined track (final_audio_encode_args) — per-segment
+    # AAC added ~30 ms of priming and frame padding at every join.
+    #
+    # The fixed sample format matters too: left alone, the ALAC encoder picks
+    # a bit depth from its input (24-in-32 for a real WAV, 16 for the anullsrc
+    # silence filler), and joining ALAC segments that declare different depths
+    # corrupts the track at the seam ("invalid element channel count" decode
+    # errors on a real merge). s32p is a safe superset of any real source.
+    for i in range(len(fills)):
+        cmd += [f"-c:a:{i}", "alac", f"-sample_fmt:a:{i}", "s32p"]
+        cmd += [f"-ar:a:{i}", str(SLOT_SAMPLE_RATE), f"-ac:a:{i}", str(SLOT_CHANNELS)]
 
     # ── Disposition + titles (first slot is the default track) ────────────────
     for i, (kind, fill, codec, title) in enumerate(fills):
@@ -1000,7 +1017,7 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     # of bug — a proxy's own duration rarely matches its paired clip's to the
     # millisecond); reproduced directly and confirmed this is the general case,
     # not LRV-specific.
-    cmd += ["-t", f"{max(0.01, dur):.3f}"]
+    cmd += ["-t", f"{max(0.01, vdur):.6f}"]
     cmd += ["-progress", str(progress_file), "-nostats", str(out)]
     return cmd
 
@@ -1255,6 +1272,18 @@ def build_ts_remux_progress_cmd(ff: str, segment: Path, out_ts: Path, codec: str
         cmd += ["-bsf:v", bsf]
     cmd += ["-f", "mpegts", "-progress", str(progress_file), "-nostats", str(out_ts)]
     return cmd
+
+
+def final_audio_encode_args(plan: "OutputPlan") -> list:
+    """Per-stream codec args for the join step: the per-clip files carry every
+    audio slot as ALAC (see build_mux_cmd_plan), and the camera / mix slots are
+    encoded to AAC here, once, over the whole joined track. Appended after the
+    join's own `-c copy`, so the WAV-backup slot stays a lossless copy."""
+    args = []
+    for i, t in enumerate(t for t in plan.tracks if t.enabled):
+        if t.kind != "wav":
+            args += [f"-c:a:{i}", "aac", f"-b:a:{i}", "256k"]
+    return args
 
 
 def write_concat_list(list_file: Path, files, durations=None) -> None:

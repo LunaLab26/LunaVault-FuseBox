@@ -29,7 +29,7 @@ from core.progress import read_progress, parse_progress
 from core.eta import ConservativeEta
 from core.sync_advanced import analyze_sync
 from core.ffmpeg_cmd import (
-    write_concat_list,
+    write_concat_list, final_audio_encode_args,
     hms_to_seconds, MixSpec, OutputPlan, SLOWMO_RATIO,
     build_mux_cmd, build_mux_cmd_plan, build_concat_reencode_cmd,
     build_whatsapp_cmd,
@@ -314,11 +314,11 @@ class MergeWorker(QThread):
                 size_bytes = 0
             has_cam = clip.has_camera_audio()
             acodec = (st.audio_codec if st else "") or ""
-            # Camera audio is preserved losslessly when it's stream-copied: odd-spec
-            # clips carry their original audio on the archival track (any codec), and
-            # conforming clips keep AAC camera audio via -c:a copy. A conforming clip
-            # with non-AAC camera audio would be a lossy re-encode in the baseline.
-            audio_lossless = has_cam and (status != "ok" or acodec.lower() == "aac")
+            # Camera audio on the baseline is re-encoded to exactly the clip's
+            # picture length (see build_mux_cmd_plan), so it's never lossless
+            # there; odd-spec clips carry their original audio on an archival
+            # track, and _build_and_mux_archival marks every clip it gives one.
+            audio_lossless = has_cam and status != "ok"
             m.clips.append(manifest_mod.ClipEntry(
                 source_filename=clip.path.name,
                 container=clip.path.suffix.lstrip(".").lower(),
@@ -478,6 +478,7 @@ class MergeWorker(QThread):
                 # be bit-exact); a direct stream copy in the final mux IS bit-exact.
                 archival_files.append(Path(pairs[0][0].path))
                 entries_in_group[0].recovery_fidelity = "byte-exact"
+                entries_in_group[0].audio_lossless = entries_in_group[0].has_camera_audio
             else:
                 # Same TS-round-trip reasoning as the baseline concat (see
                 # ffmpeg_runner.run()'s comment and build_ts_remux_cmd's
@@ -551,6 +552,7 @@ class MergeWorker(QThread):
                 # strips SEI/AUD NALs and perturbs AAC priming), not byte-exact.
                 for e in entries_in_group:
                     e.recovery_fidelity = "decode-lossless"
+                    e.audio_lossless = e.has_camera_audio
             groups_entries.append(entries_in_group)
 
         # Which archival intermediates the final container can actually embed
@@ -887,8 +889,8 @@ class MergeWorker(QThread):
                 f.write(f"title={self._title}\n")
             f.write("\n")
             cum_ms = 0
-            for clip in clips:
-                dur_ms = int(clip.duration * 1000)
+            for clip, vdur in zip(clips, temp_clip_vdurs):
+                dur_ms = int(round((vdur if vdur > 0 else clip.duration) * 1000))
                 f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={cum_ms}\nEND={cum_ms+dur_ms}\ntitle={clip.stem}\n\n")
                 cum_ms += dur_ms
 
@@ -918,6 +920,8 @@ class MergeWorker(QThread):
                 manifest, is_mov=str(final_tmp).lower().endswith(".mov"))
             if embed and len(embed[-1]) > self._MANIFEST_EMBED_MAX:
                 embed = None
+        # Per-clip audio arrives as ALAC; the AAC slots are encoded once, here.
+        join_extra = final_audio_encode_args(self._plan) + list(embed or [])
 
         if self._compat_baseline:
             # Watchable-master path: one clean continuous re-encode (H.264 or
@@ -927,7 +931,7 @@ class MergeWorker(QThread):
             # preserve independently-encoded segments' OWN parameter sets
             # through a stream-copy concat) doesn't apply here.
             cmd = build_concat_reencode_cmd(ff, concat_file, chapters_file, baseline_target,
-                                            progress_file, extra_out_args=embed,
+                                            progress_file, extra_out_args=join_extra,
                                             codec=self._compat_codec,
                                             prores_profile=self._compat_prores_profile,
                                             hw_encoder=self._conform.hw_encoder,
@@ -1006,7 +1010,7 @@ class MergeWorker(QThread):
                 self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
                           "Falling back to a direct stream-copy join.")
                 cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
-                                       progress_file, extra_out_args=embed)
+                                       progress_file, extra_out_args=join_extra)
 
             elif ts_mode == "full":
                 ts_clips: list[Path] = []
@@ -1038,7 +1042,7 @@ class MergeWorker(QThread):
                     ts_list_file = temp_dir / "concat_list_ts.txt"
                     write_concat_list(ts_list_file, ts_clips, temp_clip_vdurs)
                     cmd = build_ts_concat_cmd(ff, ts_list_file, chapters_file, baseline_target,
-                                              progress_file, extra_out_args=embed, tag_v=tag_v)
+                                              progress_file, extra_out_args=join_extra, tag_v=tag_v)
                 else:
                     self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
                               "Falling back to a direct stream-copy join.")
@@ -1048,7 +1052,7 @@ class MergeWorker(QThread):
                         except OSError:
                             pass
                     cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
-                                           progress_file, extra_out_args=embed)
+                                           progress_file, extra_out_args=join_extra)
 
             else:  # ts_mode == "split"
                 # This is the common real-world case: the app's default
@@ -1066,10 +1070,9 @@ class MergeWorker(QThread):
                 # into one file in the ORIGINAL track order.
                 self._log("Splitting the join: video"
                           + (f" + track(s) {safe_idx}" if safe_idx else "")
-                          + " via the MPEG-TS route, track(s) "
-                          f"{unsafe_idx} (lossless backup audio — ALAC/PCM/FLAC "
-                          "cannot be carried in MPEG-TS) via a direct stream-copy "
-                          "join.")
+                          + " via the MPEG-TS route, audio track(s) "
+                          f"{unsafe_idx} via a direct join of their exact-length "
+                          "lossless segments (MPEG-TS can't carry ALAC).")
                 no_chapters = temp_dir / "no_chapters.txt"
                 no_chapters.write_text(";FFMETADATA1\n", encoding="utf-8")
 
@@ -1115,7 +1118,7 @@ class MergeWorker(QThread):
                     cmd = build_split_final_mux_cmd(
                         ff, video_part, unsafe_files, unsafe_idx, n_tracks,
                         chapters_file, baseline_target, progress_file,
-                        extra_out_args=embed, tag_v=tag_v)
+                        extra_out_args=join_extra, tag_v=tag_v)
                 else:
                     self._log(f"MPEG-TS split join failed: {ts_skip_reason}. "
                               "Falling back to a direct stream-copy join.")
@@ -1125,7 +1128,7 @@ class MergeWorker(QThread):
                         except OSError:
                             pass
                     cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
-                                           progress_file, extra_out_args=embed)
+                                           progress_file, extra_out_args=join_extra)
 
         thumb = None
         if self._enable_preview:

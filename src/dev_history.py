@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-09-24 01:55"
+LAST_UPDATED = "2026-10-06 16:44"
 
 
 @dataclass
@@ -25,6 +25,17 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.010 — picture and sound stay in sync across a whole day of clips",
+        summary="Merging many clips let the sound slowly slide away from the picture. Each camera clip's sound is a few milliseconds longer or shorter than its picture, and every join added that difference to all the clips after it. Over the 46 Luna Ultra clips of a real family day out, the camera sound would have ended up about half a second early. The WAV backup track could be out by a third of a second too. Every join is now exact.",
+        details=[
+            "Fixed: the camera sound drifted at every join. Measured on real Luna Ultra clips: 0, -17, -18 and -8 ms after just four joins, adding up by each clip's own length difference. With a synthetic flash-and-beep test it reached 272 ms after three joins. Each clip's sound is now padded or trimmed to exactly its picture's length, so the drift is gone: 0.0 ms at every join, on real footage and on the test.",
+            "Fixed: a WAV backup that started after the camera (or stopped before it) put every later clip's WAV sound early. The late start was only a timestamp, and it was lost at the join. It's now real silence, so the WAV track lines up at every join too.",
+            "Changed: on the shared master track, camera sound is now encoded once to AAC 256k (sounds the same), not copied, because a copy can't be cut to an exact length. Your original sound is still kept bit-for-bit on the archival tracks when \"Archival master\" is on, and the WAV backup track is still lossless.",
+            "Fixed: chapter markers now start exactly where each clip's picture starts. Before, they slipped by each clip's extra sound.",
+        ],
+    ),
     HistoryEntry(
         date="2026-09-24",
         title="v1.4.009 — sound from phones no longer plays too fast, and clips join frame-exactly",

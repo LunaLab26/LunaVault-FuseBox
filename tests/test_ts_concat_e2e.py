@@ -92,7 +92,7 @@ def _clips_for(paths):
 
 def test_aac_clips_take_the_ts_route_and_keep_duration_and_audio():
     """Single-track output (camera audio only) — the pure "full" TS-route
-    path, no split needed."""
+    path for the video; audio joins directly as exact-length ALAC."""
     from core.ffmpeg_cmd import OutputTrack
     d = Path(tempfile.mkdtemp())
     a = _make_clip(d / "a.mp4", 440, 25, "aac")
@@ -105,7 +105,10 @@ def test_aac_clips_take_the_ts_route_and_keep_duration_and_audio():
     assert abs(got["duration"] - 6.0) < 0.4, f"duration drifted: {got}"
     assert got["audio"], f"audio track lost: {got}"
     assert got["decode_errors"] == 0, f"master does not decode clean: {got}"
-    assert not notices, f"AAC/HEVC should take the TS route cleanly, got {notices}"
+    # Video takes the TS route; the audio is joined directly as exact-length
+    # ALAC and encoded to AAC once afterwards (see final_audio_encode_args).
+    assert notices and all("Splitting the join" in n for n in notices), notices
+    assert got["audio"] == ["aac"], got
 
 
 def test_default_two_track_output_splits_the_join_for_the_alac_backup_track():
@@ -212,3 +215,59 @@ def test_mixed_sample_rates_and_layouts_are_normalised_to_48k_stereo():
     freqs = np.fft.rfftfreq(len(seg), 1 / 48000)
     peak = freqs[np.argmax(np.abs(np.fft.rfft(seg)))]
     assert abs(peak - 880) < 5, f"second clip plays at {peak:.0f} Hz, expected 880"
+
+
+def _make_overrun_clip(path: Path, video_s: float, audio_s: float, beep_at: float):
+    """A clip whose audio track is longer/shorter than its picture (real cameras
+    differ by ~10-60 ms) with a flash + 1 kHz beep at the same instant."""
+    ev = f"between(t,{beep_at},{beep_at + 0.1})"
+    sp.run([FF, "-y", "-v", "error",
+            "-f", "lavfi", "-i", f"color=c=0x202020:s=320x240:r=25:d={video_s},"
+                                 f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='{ev}'",
+            "-f", "lavfi", "-i", f"aevalsrc='if({ev},0.7*sin(2*PI*1000*t),0)':s=48000:d={audio_s}",
+            "-c:v", "libx265", "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+            "-x265-params", "log-level=none", "-c:a", "aac", "-ac", "2", str(path)],
+           check=True, capture_output=True)
+    return path
+
+
+def _onsets(path: Path, kind: str):
+    if kind == "v":
+        out = sp.run([FF, "-v", "error", "-i", str(path), "-map", "0:v:0", "-vf",
+                      "format=yuv420p,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-",
+                      "-f", "null", "-"], capture_output=True, text=True).stdout
+        t, hits, last = None, [], -9.0
+        for line in out.splitlines():
+            if line.startswith("frame:"):
+                t = float(line.split("pts_time:")[1])
+            elif "YAVG=" in line and float(line.split("=")[1]) > 180:
+                if t - last > 0.5:
+                    hits.append(t)
+                last = t
+        return hits
+    import numpy as np
+    raw = sp.run([FF, "-v", "error", "-i", str(path), "-map", "0:a:0", "-ac", "1", "-ar", "48000",
+                  "-f", "f32le", "-"], capture_output=True).stdout
+    a = np.abs(np.frombuffer(raw, dtype=np.float32))
+    hits, last = [], -9.0
+    for i in np.flatnonzero(a > 0.3):
+        if i / 48000 - last > 0.5:
+            hits.append(i / 48000)
+        last = i / 48000
+    return hits
+
+
+def test_audio_stays_under_its_picture_at_every_join():
+    """Each clip's audio here is 60 ms LONGER than its video (as some cameras
+    record). Joins are pinned to the picture, so the audio used to slide
+    later by the overrun (plus AAC priming) at every join: ~+80 ms per clip."""
+    d = Path(tempfile.mkdtemp())
+    paths = [_make_overrun_clip(d / f"c{i}.mp4", 2.0, 2.06, 1.0) for i in range(4)]
+    out = d / "master.mov"
+    from core.ffmpeg_cmd import OutputTrack
+    ok, msg, _ = _run_merge(_clips_for(paths), out, plan=OutputPlan(tracks=[OutputTrack("camera")]))
+    assert ok, msg
+    v, a = _onsets(out, "v"), _onsets(out, "a")
+    assert len(v) == 4 and len(a) == 4, (v, a)
+    worst = max(abs(x - y) for x, y in zip(a, v))
+    assert worst < 0.025, f"A/V offset per join (s): {[round(x - y, 3) for x, y in zip(a, v)]}"

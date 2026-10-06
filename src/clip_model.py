@@ -121,6 +121,14 @@ class ClipInfo:
         return self.stream.duration if self.stream else 0.0
 
     @property
+    def video_duration(self) -> float:
+        """The picture's own length. Each clip's segment of the master is cut to
+        this so a join never inherits the audio's overrun or shortfall."""
+        if not self.stream:
+            return 0.0
+        return getattr(self.stream, "video_duration", 0.0) or self.stream.duration
+
+    @property
     def name(self) -> str:
         return self.path.name
 
