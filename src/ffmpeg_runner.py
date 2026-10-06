@@ -923,212 +923,205 @@ class MergeWorker(QThread):
         # Per-clip audio arrives as ALAC; the AAC slots are encoded once, here.
         join_extra = final_audio_encode_args(self._plan) + list(embed or [])
 
-        if self._compat_baseline:
-            # Watchable-master path: one clean continuous re-encode (H.264 or
-            # ProRes), so the baseline plays everywhere (no broken concat
-            # splices). See task #13. Re-encoding already produces one coherent
-            # stream end to end, so the TS round-trip below (which exists to
-            # preserve independently-encoded segments' OWN parameter sets
-            # through a stream-copy concat) doesn't apply here.
-            cmd = build_concat_reencode_cmd(ff, concat_file, chapters_file, baseline_target,
-                                            progress_file, extra_out_args=join_extra,
-                                            codec=self._compat_codec,
-                                            prores_profile=self._compat_prores_profile,
-                                            hw_encoder=self._conform.hw_encoder,
-                                            hw_decode=self._conform.hw_decode,
-                                            color_range=getattr(self._conform, "color_range", "tv"))
-        else:
-            # Lossless stream-copy path — route each segment through MPEG-TS
-            # first (build_ts_remux_cmd's docstring has the full root-cause
-            # writeup): a plain MP4 -c copy concat (build_concat_cmd, still kept
-            # for callers that explicitly want it) keeps only the FIRST
-            # segment's HEVC/H.264 parameter sets for the whole track, so a
-            # later segment written by a different encoder — the camera vs.
-            # this app's own libx265 conform, or even two units of the same
-            # camera model — can decode wrong from that point on, invisibly to
-            # ffprobe and often to local playback. TS carries parameter sets
-            # per segment, so this costs nothing in quality and little in time
-            # (still pure stream-copy) while closing that off unconditionally,
-            # not just when a mismatch is detected in advance.
-            #
-            # The route is not unconditional, though, because MPEG-TS cannot
-            # carry every codec and does not say so: the mpegts muxer writes a
-            # codec it has no stream type for as a private `bin_data` stream
-            # and exits 0, so a PCM/FLAC/ALAC audio track or ProRes/DNxHD/VP9
-            # video silently disappears on the way back out to MP4. Losing a
-            # track outright is strictly worse than the parameter-set bug this
-            # fixes — and parameter-set loss is an H.264/HEVC phenomenon
-            # anyway — so anything the TS route cannot carry intact falls back
-            # to the plain MP4 concat, with the reason recorded in the log
-            # rather than swallowed. ts_route_supported screens on codec name
-            # before doing the work; probe.verify_ts_remux confirms per clip
-            # afterwards, covering codecs the static list has never seen.
-            _, fp_gate = get_ffmpeg()
-            tag_v = "hvc1" if (getattr(self._conform, "codec", "hevc") or "hevc").lower() in ("hevc", "h265") else "avc1"
+        # Compatible-master mode re-encodes the JOINED master, not the per-clip
+        # files: read straight through a plain concat, a later segment from a
+        # different encoder (the camera's own HEVC after this app's conformed
+        # clips) decodes with the first segment's parameter sets — measured on
+        # real footage, a camera clip came out as stills changing every 2 s
+        # (ProRes) or with no frames at all, a 6 s hole (H.264). The lossless
+        # join below keeps every segment's parameter sets, so it goes first.
+        join_target = temp_dir / "joined.mov" if self._compat_baseline else baseline_target
+        # Lossless stream-copy path — route each segment through MPEG-TS
+        # first (build_ts_remux_cmd's docstring has the full root-cause
+        # writeup): a plain MP4 -c copy concat (build_concat_cmd, still kept
+        # for callers that explicitly want it) keeps only the FIRST
+        # segment's HEVC/H.264 parameter sets for the whole track, so a
+        # later segment written by a different encoder — the camera vs.
+        # this app's own libx265 conform, or even two units of the same
+        # camera model — can decode wrong from that point on, invisibly to
+        # ffprobe and often to local playback. TS carries parameter sets
+        # per segment, so this costs nothing in quality and little in time
+        # (still pure stream-copy) while closing that off unconditionally,
+        # not just when a mismatch is detected in advance.
+        #
+        # The route is not unconditional, though, because MPEG-TS cannot
+        # carry every codec and does not say so: the mpegts muxer writes a
+        # codec it has no stream type for as a private `bin_data` stream
+        # and exits 0, so a PCM/FLAC/ALAC audio track or ProRes/DNxHD/VP9
+        # video silently disappears on the way back out to MP4. Losing a
+        # track outright is strictly worse than the parameter-set bug this
+        # fixes — and parameter-set loss is an H.264/HEVC phenomenon
+        # anyway — so anything the TS route cannot carry intact falls back
+        # to the plain MP4 concat, with the reason recorded in the log
+        # rather than swallowed. ts_route_supported screens on codec name
+        # before doing the work; probe.verify_ts_remux confirms per clip
+        # afterwards, covering codecs the static list has never seen.
+        _, fp_gate = get_ffmpeg()
+        tag_v = "hvc1" if (getattr(self._conform, "codec", "hevc") or "hevc").lower() in ("hevc", "h265") else "avc1"
 
-            # Which tracks can survive the round-trip is decided from EVERY
-            # clip's actual probed layout, not one representative. The two
-            # are NOT the same thing: every clip shares the same OutputPlan,
-            # but a "copy" fill (the camera track, most commonly) inherits
-            # whatever audio codec that clip's OWN source happens to carry —
-            # which can genuinely differ per clip in a mixed-source merge.
-            # Measured directly: a merge of six AAC-camera clips plus one
-            # ProRes-origin clip (whose camera audio is PCM, copied through
-            # unchanged) — checking only clip[0] (AAC) called track 0 "safe"
-            # for the whole group, the PCM clip then failed the per-clip
-            # verify further down and the ENTIRE join fell back to the plain
-            # concat — reintroducing the very parameter-set-loss corruption
-            # this fix exists to prevent, for a merge that should have taken
-            # the split route cleanly. A track is only as TS-safe as its
-            # least-safe clip: if any clip's audio at a given index isn't
-            # TS-safe, that whole track index routes via the plain per-track
-            # join for every clip, not just the odd one out.
-            per_clip_layout = [probe_stream_codecs(fp_gate, str(p)) for p in temp_clips]
-            video_ok, video_reason = True, ""
-            for (v, _), fallback_codec in zip(per_clip_layout, temp_clip_codecs):
-                ok, reason = ts_route_supported(v or fallback_codec)
-                if not ok:
-                    video_ok, video_reason = False, reason
-                    break
-            n_tracks = max((len(a) for _, a in per_clip_layout), default=0)
-            safe_idx, unsafe_idx = [], []
-            for i in range(n_tracks):
-                codecs_at_i = [a[i] for _, a in per_clip_layout if i < len(a)]
-                if all(audio_codec_ts_safe(ac) for ac in codecs_at_i):
-                    safe_idx.append(i)
-                else:
-                    unsafe_idx.append(i)
-
-            if not video_ok:
-                ts_mode, ts_skip_reason = "none", video_reason
-            elif not unsafe_idx:
-                ts_mode, ts_skip_reason = "full", ""
+        # Which tracks can survive the round-trip is decided from EVERY
+        # clip's actual probed layout, not one representative. The two
+        # are NOT the same thing: every clip shares the same OutputPlan,
+        # but a "copy" fill (the camera track, most commonly) inherits
+        # whatever audio codec that clip's OWN source happens to carry —
+        # which can genuinely differ per clip in a mixed-source merge.
+        # Measured directly: a merge of six AAC-camera clips plus one
+        # ProRes-origin clip (whose camera audio is PCM, copied through
+        # unchanged) — checking only clip[0] (AAC) called track 0 "safe"
+        # for the whole group, the PCM clip then failed the per-clip
+        # verify further down and the ENTIRE join fell back to the plain
+        # concat — reintroducing the very parameter-set-loss corruption
+        # this fix exists to prevent, for a merge that should have taken
+        # the split route cleanly. A track is only as TS-safe as its
+        # least-safe clip: if any clip's audio at a given index isn't
+        # TS-safe, that whole track index routes via the plain per-track
+        # join for every clip, not just the odd one out.
+        per_clip_layout = [probe_stream_codecs(fp_gate, str(p)) for p in temp_clips]
+        video_ok, video_reason = True, ""
+        for (v, _), fallback_codec in zip(per_clip_layout, temp_clip_codecs):
+            ok, reason = ts_route_supported(v or fallback_codec)
+            if not ok:
+                video_ok, video_reason = False, reason
+                break
+        n_tracks = max((len(a) for _, a in per_clip_layout), default=0)
+        safe_idx, unsafe_idx = [], []
+        for i in range(n_tracks):
+            codecs_at_i = [a[i] for _, a in per_clip_layout if i < len(a)]
+            if all(audio_codec_ts_safe(ac) for ac in codecs_at_i):
+                safe_idx.append(i)
             else:
-                ts_mode, ts_skip_reason = "split", ""
+                unsafe_idx.append(i)
 
-            if ts_mode == "none":
+        if not video_ok:
+            ts_mode, ts_skip_reason = "none", video_reason
+        elif not unsafe_idx:
+            ts_mode, ts_skip_reason = "full", ""
+        else:
+            ts_mode, ts_skip_reason = "split", ""
+
+        if ts_mode == "none":
+            self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
+                      "Falling back to a direct stream-copy join.")
+            cmd = build_concat_cmd(ff, concat_file, chapters_file, join_target,
+                                   progress_file, extra_out_args=join_extra)
+
+        elif ts_mode == "full":
+            ts_clips: list[Path] = []
+            ts_ok = True
+            for i, (p_clip, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
+                real_v, real_audios = probe_stream_codecs(fp_gate, str(p_clip))
+                supported, reason = ts_route_supported(real_v or codec)
+                if supported:
+                    for ac in real_audios:
+                        supported, reason = ts_route_supported(real_v or codec, ac)
+                        if not supported:
+                            break
+                if not supported:
+                    ts_ok, ts_skip_reason = False, reason
+                    break
+                out_ts = temp_dir / f"clip_{i+1:02d}.ts"
+                ts_cmd = build_ts_remux_progress_cmd(ff, p_clip, out_ts, codec, progress_file)
+                if not self._run_stage(ts_cmd, temp_dir, progress_file,
+                                       f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
+                                       stage_total, stage_total, clips[i].duration):
+                    return
+                remux_ok, remux_reason = verify_ts_remux(fp, str(p_clip), str(out_ts))
+                if not remux_ok:
+                    ts_ok, ts_skip_reason = False, remux_reason
+                    break
+                ts_clips.append(out_ts)
+
+            if ts_ok:
+                ts_list_file = temp_dir / "concat_list_ts.txt"
+                write_concat_list(ts_list_file, ts_clips, temp_clip_vdurs)
+                cmd = build_ts_concat_cmd(ff, ts_list_file, chapters_file, join_target,
+                                          progress_file, extra_out_args=join_extra, tag_v=tag_v)
+            else:
                 self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
                           "Falling back to a direct stream-copy join.")
-                cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
+                for tp in ts_clips:
+                    try:
+                        tp.unlink()
+                    except OSError:
+                        pass
+                cmd = build_concat_cmd(ff, concat_file, chapters_file, join_target,
                                        progress_file, extra_out_args=join_extra)
 
-            elif ts_mode == "full":
-                ts_clips: list[Path] = []
-                ts_ok = True
-                for i, (p_clip, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
-                    real_v, real_audios = probe_stream_codecs(fp_gate, str(p_clip))
-                    supported, reason = ts_route_supported(real_v or codec)
-                    if supported:
-                        for ac in real_audios:
-                            supported, reason = ts_route_supported(real_v or codec, ac)
-                            if not supported:
-                                break
-                    if not supported:
-                        ts_ok, ts_skip_reason = False, reason
-                        break
-                    out_ts = temp_dir / f"clip_{i+1:02d}.ts"
-                    ts_cmd = build_ts_remux_progress_cmd(ff, p_clip, out_ts, codec, progress_file)
-                    if not self._run_stage(ts_cmd, temp_dir, progress_file,
-                                           f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
-                                           stage_total, stage_total, clips[i].duration):
-                        return
-                    remux_ok, remux_reason = verify_ts_remux(fp, str(p_clip), str(out_ts))
-                    if not remux_ok:
-                        ts_ok, ts_skip_reason = False, remux_reason
-                        break
-                    ts_clips.append(out_ts)
+        else:  # ts_mode == "split"
+            # This is the common real-world case: the app's default
+            # output plan attaches a second "backup audio" track (real
+            # WAV-backed, or a same-camera-audio duplicate) encoded as
+            # ALAC — which MPEG-TS cannot carry at all — alongside a
+            # perfectly TS-safe AAC camera track. Gating the whole join
+            # on "every track survives TS" would mean the parameter-set
+            # fix almost never applies to a default merge. Instead: the
+            # video (+ any TS-safe audio) is TS-routed as normal, each
+            # TS-unsafe track is joined on its own via a plain
+            # stream-copy concat (ALAC/PCM have no parameter-set concept
+            # to lose, so they aren't exposed to the bug the TS route
+            # exists for), and build_split_final_mux_cmd recombines both
+            # into one file in the ORIGINAL track order.
+            self._log("Splitting the join: video"
+                      + (f" + track(s) {safe_idx}" if safe_idx else "")
+                      + " via the MPEG-TS route, audio track(s) "
+                      f"{unsafe_idx} via a direct join of their exact-length "
+                      "lossless segments (MPEG-TS can't carry ALAC).")
+            no_chapters = temp_dir / "no_chapters.txt"
+            no_chapters.write_text(";FFMETADATA1\n", encoding="utf-8")
 
-                if ts_ok:
-                    ts_list_file = temp_dir / "concat_list_ts.txt"
-                    write_concat_list(ts_list_file, ts_clips, temp_clip_vdurs)
-                    cmd = build_ts_concat_cmd(ff, ts_list_file, chapters_file, baseline_target,
-                                              progress_file, extra_out_args=join_extra, tag_v=tag_v)
-                else:
-                    self._log(f"MPEG-TS join skipped: {ts_skip_reason}. "
-                              "Falling back to a direct stream-copy join.")
-                    for tp in ts_clips:
-                        try:
-                            tp.unlink()
-                        except OSError:
-                            pass
-                    cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
-                                           progress_file, extra_out_args=join_extra)
+            ts_video_clips: list[Path] = []
+            split_ok = True
+            for i, (p_clip, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
+                out_ts = temp_dir / f"clip_{i+1:02d}_v.ts"
+                ts_cmd = build_ts_remux_selective_progress_cmd(
+                    ff, p_clip, out_ts, codec, safe_idx, progress_file)
+                if not self._run_stage(ts_cmd, temp_dir, progress_file,
+                                       f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
+                                       stage_total, stage_total, clips[i].duration):
+                    return
+                _, out_audios = probe_stream_codecs(fp, str(out_ts))
+                if len(out_audios) != len(safe_idx):
+                    split_ok, ts_skip_reason = False, (
+                        f"the MPEG-TS remux of {p_clip.name} lost a track "
+                        "the static codec check expected to survive")
+                    break
+                ts_video_clips.append(out_ts)
 
-            else:  # ts_mode == "split"
-                # This is the common real-world case: the app's default
-                # output plan attaches a second "backup audio" track (real
-                # WAV-backed, or a same-camera-audio duplicate) encoded as
-                # ALAC — which MPEG-TS cannot carry at all — alongside a
-                # perfectly TS-safe AAC camera track. Gating the whole join
-                # on "every track survives TS" would mean the parameter-set
-                # fix almost never applies to a default merge. Instead: the
-                # video (+ any TS-safe audio) is TS-routed as normal, each
-                # TS-unsafe track is joined on its own via a plain
-                # stream-copy concat (ALAC/PCM have no parameter-set concept
-                # to lose, so they aren't exposed to the bug the TS route
-                # exists for), and build_split_final_mux_cmd recombines both
-                # into one file in the ORIGINAL track order.
-                self._log("Splitting the join: video"
-                          + (f" + track(s) {safe_idx}" if safe_idx else "")
-                          + " via the MPEG-TS route, audio track(s) "
-                          f"{unsafe_idx} via a direct join of their exact-length "
-                          "lossless segments (MPEG-TS can't carry ALAC).")
-                no_chapters = temp_dir / "no_chapters.txt"
-                no_chapters.write_text(";FFMETADATA1\n", encoding="utf-8")
+            if split_ok:
+                video_list_file = temp_dir / "concat_list_ts_video.txt"
+                write_concat_list(video_list_file, ts_video_clips, temp_clip_vdurs)
+                video_part = temp_dir / "video_part.mov"
+                vpart_cmd = build_ts_concat_cmd(ff, video_list_file, no_chapters,
+                                                video_part, progress_file, tag_v=tag_v)
+                if not self._run_stage(vpart_cmd, temp_dir, progress_file,
+                                       "Joining video (MPEG-TS route)",
+                                       stage_total, stage_total, cumulative_duration):
+                    return
 
-                ts_video_clips: list[Path] = []
-                split_ok = True
-                for i, (p_clip, codec) in enumerate(zip(temp_clips, temp_clip_codecs)):
-                    out_ts = temp_dir / f"clip_{i+1:02d}_v.ts"
-                    ts_cmd = build_ts_remux_selective_progress_cmd(
-                        ff, p_clip, out_ts, codec, safe_idx, progress_file)
-                    if not self._run_stage(ts_cmd, temp_dir, progress_file,
-                                           f"Preparing clips for a lossless join ({i + 1}/{len(temp_clips)})",
-                                           stage_total, stage_total, clips[i].duration):
-                        return
-                    _, out_audios = probe_stream_codecs(fp, str(out_ts))
-                    if len(out_audios) != len(safe_idx):
-                        split_ok, ts_skip_reason = False, (
-                            f"the MPEG-TS remux of {p_clip.name} lost a track "
-                            "the static codec check expected to survive")
-                        break
-                    ts_video_clips.append(out_ts)
-
-                if split_ok:
-                    video_list_file = temp_dir / "concat_list_ts_video.txt"
-                    write_concat_list(video_list_file, ts_video_clips, temp_clip_vdurs)
-                    video_part = temp_dir / "video_part.mov"
-                    vpart_cmd = build_ts_concat_cmd(ff, video_list_file, no_chapters,
-                                                    video_part, progress_file, tag_v=tag_v)
-                    if not self._run_stage(vpart_cmd, temp_dir, progress_file,
-                                           "Joining video (MPEG-TS route)",
+                unsafe_files: list[Path] = []
+                for u in unsafe_idx:
+                    u_out = temp_dir / f"audio_track_{u}.mov"
+                    u_cmd = build_track_concat_progress_cmd(ff, concat_file, u, u_out, progress_file)
+                    if not self._run_stage(u_cmd, temp_dir, progress_file,
+                                           f"Joining backup audio track {u} (direct copy)",
                                            stage_total, stage_total, cumulative_duration):
                         return
+                    unsafe_files.append(u_out)
 
-                    unsafe_files: list[Path] = []
-                    for u in unsafe_idx:
-                        u_out = temp_dir / f"audio_track_{u}.mov"
-                        u_cmd = build_track_concat_progress_cmd(ff, concat_file, u, u_out, progress_file)
-                        if not self._run_stage(u_cmd, temp_dir, progress_file,
-                                               f"Joining backup audio track {u} (direct copy)",
-                                               stage_total, stage_total, cumulative_duration):
-                            return
-                        unsafe_files.append(u_out)
-
-                    cmd = build_split_final_mux_cmd(
-                        ff, video_part, unsafe_files, unsafe_idx, n_tracks,
-                        chapters_file, baseline_target, progress_file,
-                        extra_out_args=join_extra, tag_v=tag_v)
-                else:
-                    self._log(f"MPEG-TS split join failed: {ts_skip_reason}. "
-                              "Falling back to a direct stream-copy join.")
-                    for tp in ts_video_clips:
-                        try:
-                            tp.unlink()
-                        except OSError:
-                            pass
-                    cmd = build_concat_cmd(ff, concat_file, chapters_file, baseline_target,
-                                           progress_file, extra_out_args=join_extra)
+                cmd = build_split_final_mux_cmd(
+                    ff, video_part, unsafe_files, unsafe_idx, n_tracks,
+                    chapters_file, join_target, progress_file,
+                    extra_out_args=join_extra, tag_v=tag_v)
+            else:
+                self._log(f"MPEG-TS split join failed: {ts_skip_reason}. "
+                          "Falling back to a direct stream-copy join.")
+                for tp in ts_video_clips:
+                    try:
+                        tp.unlink()
+                    except OSError:
+                        pass
+                cmd = build_concat_cmd(ff, concat_file, chapters_file, join_target,
+                                       progress_file, extra_out_args=join_extra)
 
         thumb = None
         if self._enable_preview:
@@ -1139,6 +1132,19 @@ class MergeWorker(QThread):
         if not self._run_stage(cmd, temp_dir, progress_file, merge_label,
                                stage_total, stage_total, cumulative_duration, thumb=thumb):
             return
+        if self._compat_baseline:
+            joined_list = temp_dir / "joined_list.txt"
+            write_concat_list(joined_list, [join_target])
+            cmd = build_concat_reencode_cmd(ff, joined_list, chapters_file, baseline_target,
+                                            progress_file, extra_out_args=list(embed or []),
+                                            codec=self._compat_codec,
+                                            prores_profile=self._compat_prores_profile,
+                                            hw_encoder=self._conform.hw_encoder,
+                                            hw_decode=self._conform.hw_decode,
+                                            color_range=getattr(self._conform, "color_range", "tv"))
+            if not self._run_stage(cmd, temp_dir, progress_file, merge_label,
+                                   stage_total, stage_total, cumulative_duration):
+                return
         try:
             self._produced_bytes_base += baseline_target.stat().st_size
         except Exception:

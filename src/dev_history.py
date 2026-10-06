@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 20:31"
+LAST_UPDATED = "2026-10-06 20:46"
 
 
 @dataclass
@@ -25,6 +25,15 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.015 — the \"Compatible playback master\" no longer freezes or loses clips",
+        summary="With \"Compatible playback master\" on, a clip copied straight from the camera could come out broken whenever it followed clips the app had converted. In the H.264 version it vanished entirely: six seconds of a frozen picture while the sound carried on. In the ProRes version it played as still photos that changed every two seconds, and then froze for a second at the end. The compatible master is now made from the properly joined master, so every clip plays.",
+        details=[
+            "Fixed: a real 5-camera merge's H.264 compatible master had 1118 frames instead of 1298 (a 6 s hole); it now has all 1298.",
+            "Fixed: a real July multicam merge's ProRes compatible master showed its last clip as 2-second stills plus a frozen 1 s tail (780 frames for 25 s of footage); it now has 752 frames, none repeated.",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-06",
         title="v1.4.014 — converted clips keep their sound exactly under the picture",

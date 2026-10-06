@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QActionGroup
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget,
     QWidget, QVBoxLayout, QHBoxLayout, QStatusBar, QLabel,
@@ -17,7 +17,7 @@ from core.updates import check_for_update
 import crash_log
 from thread_utils import settle
 from logo_widget import make_logo_widget, make_icon_widget, TripleClickArea
-from theme_toggle import ThemeToggle
+from widgets.nav_tabs import NavTabs
 from legacy_mode_toggle import LegacyModeToggle
 from dev_panel import DeveloperPanel
 from settings import Settings, _settings_path
@@ -35,7 +35,7 @@ import theme
 APP_NAME    = "LunaVault FuseBox"
 # Versioning: v1.4.NNN, incremented by one for every amendment/change (see
 # dev_history.py's running log and LAST_UPDATED stamp).
-APP_VERSION = "1.4.014"
+APP_VERSION = "1.4.015"
 
 
 class _UpdateCheckThread(QThread):
@@ -70,17 +70,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
+        self._tabs = NavTabs()
+        self._tabs.setMenuExtras(self._build_appearance_menu)
 
-        # Theme toggle + logo pinned to top-right corner, level with the tab bar.
-        # A hidden "User friendly / Legacy mode" toggle also lives here — invisible
-        # until the logo is triple-clicked (see TripleClickArea below).
+        # Logo pinned to the header's right. A hidden "User friendly / Legacy
+        # mode" toggle also lives here — invisible until the logo is
+        # triple-clicked (see TripleClickArea below). Appearance (Dark / Light /
+        # Auto) lives in the ⋯ menu rather than as permanent header chrome.
         corner = QWidget()
         corner_lay = QHBoxLayout(corner)
-        corner_lay.setContentsMargins(0, 0, 12, 0)
+        corner_lay.setContentsMargins(0, 0, 0, 0)
         corner_lay.setSpacing(12)
-        corner_lay.addWidget(ThemeToggle(controller), 0, Qt.AlignmentFlag.AlignVCenter)
 
         ui_mode = settings.get("ui_mode", "friendly")
         self._legacy_toggle = LegacyModeToggle(ui_mode)
@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
         self._icon_area = TripleClickArea(make_icon_widget(height=30))
         self._icon_area.tripleClicked.connect(self._reveal_hidden_controls)
         corner_lay.addWidget(self._icon_area, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        self._tabs.addCornerWidget(corner)
 
         self._library       = LibraryView(settings)
         self._add_flow      = AddFlow(settings)
@@ -147,6 +147,7 @@ class MainWindow(QMainWindow):
         link.setOpenExternalLinks(False)
         link.linkActivated.connect(lambda u: open_url(u))
         self._status.addPermanentWidget(link)
+        self._status.show()
 
     def _on_tab_changed(self, idx: int):
         if self._tabs.widget(idx) is self._log_tab:
@@ -180,13 +181,15 @@ class MainWindow(QMainWindow):
             self._tabs.addTab(self._log_tab,       "Log")
             self._tabs.addTab(self._about_tab,     "About")
         else:
+            # Everyday path up front; power tools grouped and quieter; the log
+            # and About step back into the ⋯ menu (PRODUCT_DIRECTION.md app map).
             self._tabs.addTab(self._library,       "Memories")
-            self._tabs.addTab(self._add_flow,      "Add")
-            self._tabs.addTab(self._merge_tab,     "Merge clips")
-            self._tabs.addTab(self._review_tab,    "Review")
-            self._tabs.addTab(self._extract_tab,  "Extract and Recover")
-            self._tabs.addTab(self._log_tab,       "Log")
-            self._tabs.addTab(self._about_tab,     "About")
+            self._tabs.addTab(self._add_flow,      "Add memories")
+            self._tabs.addTab(self._merge_tab,     "Merge", group="tools")
+            self._tabs.addTab(self._review_tab,    "Review", group="tools")
+            self._tabs.addTab(self._extract_tab,  "Recover", group="tools")
+            self._tabs.addTab(self._log_tab,       "Activity log", group="menu")
+            self._tabs.addTab(self._about_tab,     "About FuseBox", group="menu")
         idx = self._tabs.indexOf(current) if current is not None else -1
         self._tabs.setCurrentIndex(idx if idx >= 0 else 0)
         self._tabs.blockSignals(False)
@@ -284,14 +287,31 @@ class MainWindow(QMainWindow):
         self._tabs.setCurrentWidget(self._review_tab)
 
     def _check_ffmpeg(self):
+        """Only speak up when something's wrong — a working install has nothing
+        to report (the bundled ffmpeg's path is in the Activity log instead)."""
         from ffmpeg_runner import get_ffmpeg
         ff, _ = get_ffmpeg()
         if ff == "ffmpeg":
             self._status.showMessage(
-                "ffmpeg not found in bin/ — using system ffmpeg if available"
-            )
+                "FuseBox's video engine (ffmpeg) is missing from its bin folder — "
+                "using the system copy if there is one")
+            self._status.show()
         else:
-            self._status.showMessage(f"ffmpeg: {ff}")
+            self._status.setToolTip(f"ffmpeg: {ff}")
+            self._status.hide()
+
+    def _build_appearance_menu(self, menu):
+        ctrl = theme.controller()
+        if ctrl is None:
+            return
+        menu.addSection("Appearance")
+        group = QActionGroup(menu)
+        for mode, label in (("system", "Match my system"), ("light", "Light"), ("dark", "Dark")):
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(ctrl.mode == mode)
+            act.triggered.connect(lambda _=False, m=mode: ctrl.set_mode(m))
+            group.addAction(act)
 
     def closeEvent(self, event):
         self._add_flow.shutdown()
