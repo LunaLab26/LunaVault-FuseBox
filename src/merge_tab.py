@@ -58,14 +58,22 @@ def _fps_to_ffmpeg(fps_str: str) -> str:
             return frac
     return fps_str or "30"
 
+OUTPUT_SUBFOLDER = "Kept by FuseBox"
+
 # status → (palette attribute name, label)
 STATUS_COLORS = {
-    "ok":        ("ok",        "Stream copy"),
-    "transcode": ("warn",      "Will transcode"),
+    "ok":        ("ok",        "Copied exactly"),
+    "transcode": ("warn",      "Will be converted"),
     "hdr":       ("danger",    "Review — HDR"),
     "error":     ("danger",    "Probe error"),
     "unknown":   ("text_mute", "…"),
 }
+
+def _bold(font):
+    f = QFont(font)
+    f.setBold(True)
+    return f
+
 
 COL_ORDER   = 0
 COL_NAME    = 1
@@ -201,8 +209,9 @@ def _make_status_badge(status: str, conflicts: list) -> QLabel:
     pal = theme.active_palette()
     attr, label = STATUS_COLORS.get(status, ("text_mute", status))
     color = getattr(pal, attr)
-    text = label + ("  " + " · ".join(conflicts) if conflicts else "")
-    lbl  = QLabel(text)
+    lbl  = QLabel(label)
+    if conflicts:
+        lbl.setToolTip("Differs from the baseline: " + ", ".join(conflicts))
     lbl.setStyleSheet(
         f"background:{color}; color:{pal.bg}; border-radius:4px; padding:2px 6px; font-size:11px;"
     )
@@ -225,14 +234,16 @@ def _make_status_button(clip: ClipInfo) -> QPushButton:
         label = label + "  (forced)"
     elif clip.video_source_override == "lrv" and clip.has_lrv():
         label = label + "  (LRV)"
-    text = label + ("  " + " · ".join(conflicts) if conflicts else "")
-    btn = QPushButton(text)
+    # Short on the chip (it has to fit a table cell); the full list of what
+    # differs from the baseline is in the tooltip.
+    btn = QPushButton(label)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setStyleSheet(
         f"QPushButton {{ background:{color}; color:{pal.bg}; border:none; border-radius:4px; "
-        "padding:2px 6px; font-size:11px; }"
+        "padding:2px 8px; font-size:11px; }"
         f"QPushButton:hover {{ background:{color}; border:1px solid {pal.text}; }}")
-    btn.setToolTip("Click to change how this clip's video gets into the master")
+    why = ("Differs from the baseline: " + ", ".join(conflicts) + "\n\n") if conflicts else ""
+    btn.setToolTip(why + "Click to change how this clip's video gets into the master")
     return btn
 
 
@@ -967,27 +978,21 @@ class MergeTab(QWidget):
             ["#", "Clip", "", "Timestamp", "Camera", "Duration", "WAV", "WAV Dur", "Primary", "WAV Offset", "Drift",
              "Status", "↑", "↓"]
         )
-        # Status stays Stretch to absorb leftover width; every other content column is
-        # Interactive so the user can drag-resize it (e.g. widen Clip for a long name) —
-        # utility columns (#, preview, ↑/↓, hidden sync details) stay auto-sized, they're not worth dragging.
-        self._table.header().setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Stretch)
-        # A Stretch section still shrinks to near-nothing once the other columns'
-        # own widths fill the viewport (confirmed directly at the app's own
-        # 1200x850 minimum: Status collapsed to 1-2 visible characters —
-        # "ti", "1s" — hiding the single most important thing a clip's row
-        # conveys, whether it'll stream-copy or transcode). A header-wide
-        # minimum section size protects Status the same as every other
-        # column; once nothing more fits, the table's own horizontal
-        # scrollbar takes over instead of squeezing text unreadable.
-        self._table.header().setMinimumSectionSize(130)
+        # The clip NAME absorbs leftover width; Status (whether a clip is copied
+        # or converted — the most important thing a row says) gets its own
+        # fixed, user-resizable width so it can never be squeezed to a couple
+        # of characters. A 130 px minimum on EVERY column used to guarantee
+        # that, but it forced a sideways scrollbar at any normal window size.
+        self._table.header().setMinimumSectionSize(40)
         for col in (COL_ORDER, COL_PREVIEW, COL_OFFSET, COL_DRIFT, COL_UP, COL_DOWN):
             self._table.header().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         for col, default_width in (
-            (COL_NAME, 220), (COL_TIME, 90), (COL_CAM, 110), (COL_DUR, 70), (COL_WAV, 50),
-            (COL_WAV_DUR, 65), (COL_PRIMARY, 110),
+            (COL_TIME, 90), (COL_CAM, 150), (COL_DUR, 80), (COL_WAV, 60),
+            (COL_WAV_DUR, 80), (COL_PRIMARY, 120), (COL_STATUS, 190),
         ):
             self._table.header().setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self._table.setColumnWidth(col, default_width)
+        self._table.header().setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
@@ -1125,15 +1130,20 @@ class MergeTab(QWidget):
         self._preview_check.stateChanged.connect(
             lambda: self._thumb_label.setVisible(self._preview_check.isChecked())
         )
-        btn_row.addWidget(self._preview_check)
-
         btn_row.addStretch()
 
-        self._gpu_check = QCheckBox("GPU encode")
+        self._gpu_check = QCheckBox("Use the graphics card to convert clips (when it's safe)")
         self._gpu_check.setEnabled(False)
         self._gpu_check.setToolTip("Checking for a usable GPU encoder…")
         self._gpu_check.toggled.connect(self._on_gpu_check_toggled)
-        btn_row.addWidget(self._gpu_check)
+        proc_row = QHBoxLayout()
+        proc_row.addWidget(self._gpu_check)
+        proc_row.addSpacing(18)
+        self._preview_check.setText("Show a live preview while merging")
+        proc_row.addWidget(self._preview_check)
+        proc_row.addStretch()
+        self._archival_box.addSpacing(6)
+        self._archival_box.addLayout(proc_row)
 
         self._show_me_btn = QPushButton("✨ Show me…")
         self._show_me_btn.setFixedHeight(36)
@@ -1178,27 +1188,49 @@ class MergeTab(QWidget):
 
         self._set_loaded(False)        # start on the empty state
         self._update_audio_summary()
+        for radio in self._quality_radios.values():
+            radio.toggled.connect(lambda _on: self._update_archival_summary())
+        self._update_archival_dependency_states()
 
     # ── Layout helpers ────────────────────────────────────────────────────────
 
-    def _section(self, title: str, right: Optional[QWidget] = None):
-        """A titled, bordered group card. Returns (frame, content_layout)."""
+    def _section(self, title: str, right: Optional[QWidget] = None, collapsible: bool = False):
+        """A titled, bordered group card. Returns (frame, content_layout).
+
+        `collapsible` starts it folded: the header becomes a click target with a
+        chevron, and `right` (if given) is shown only while folded — use it for a
+        one-line summary of the settings inside."""
         frame = QFrame()
         frame.setObjectName("section")
         v = QVBoxLayout(frame)
         v.setContentsMargins(12, 9, 12, 11)
         v.setSpacing(8)
-        hdr = QHBoxLayout()
-        lbl = QLabel(title)
+        hdr_w = QWidget()
+        hdr = QHBoxLayout(hdr_w)
+        hdr.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(("▸  " if collapsible else "") + title)
         lbl.setObjectName("sectionTitle")
         hdr.addWidget(lbl)
         if right is not None:
             hdr.addStretch()
             hdr.addWidget(right)
-        v.addLayout(hdr)
-        body = QVBoxLayout()
+        v.addWidget(hdr_w)
+        body_w = QWidget()
+        body = QVBoxLayout(body_w)
+        body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(7)
-        v.addLayout(body)
+        v.addWidget(body_w)
+        if collapsible:
+            hdr_w.setCursor(Qt.CursorShape.PointingHandCursor)
+            body_w.setVisible(False)
+
+            def toggle(_e=None):
+                open_ = not body_w.isVisible()
+                body_w.setVisible(open_)
+                lbl.setText(("▾  " if open_ else "▸  ") + title)
+                if right is not None:
+                    right.setVisible(not open_)
+            hdr_w.mousePressEvent = toggle
         self._sections.append(frame)
         self._section_titles.append(lbl)
         return frame, body
@@ -1311,7 +1343,13 @@ class MergeTab(QWidget):
         Verify MD5 recovery. The first three form a dependency chain (each needs
         the one above it); all default checked so the relationship is discoverable
         by unchecking one and watching what fades, rather than hidden until earned."""
-        frame, box = self._section("ARCHIVAL & DELIVERY")
+        # Folded by default: the app already picks sensible archival settings
+        # for each folder (_auto_select_archival_params); the summary on the
+        # header says what they are, and everything stays one click away.
+        self._archival_summary = QLabel("")
+        frame, box = self._section("ARCHIVE, QUALITY & CHECKS", right=self._archival_summary,
+                                   collapsible=True)
+        self._archival_box = box
 
         self._archival_check = QCheckBox("Archival master")
         self._archival_check.setChecked(True)
@@ -1537,6 +1575,12 @@ class MergeTab(QWidget):
         prores_on = compat_on and self._compat_codec_prores_radio.isChecked()
         for radio in self._prores_profile_radios.values():
             radio.setEnabled(prores_on)
+        # Hidden, not just greyed: choices that don't apply yet are clutter.
+        self._compat_codec_h264_radio.setVisible(compat_on)
+        self._compat_codec_prores_radio.setVisible(compat_on)
+        for radio in self._prores_profile_radios.values():
+            radio.setVisible(prores_on)
+        self._update_archival_summary()
 
     def _update_archival_dependency_states(self):
         """Cascading fade: each setting needs the one above it. Disabling (not
@@ -1555,9 +1599,37 @@ class MergeTab(QWidget):
             self._quality_descs[key].setEnabled(optimize_effective)
         for card in getattr(self, "_quality_cards", []):
             card.setEnabled(optimize_effective)
+            card.setVisible(optimize_effective)
+        self._quality_label.setVisible(optimize_effective)
+        self._optimize_info_btn.setVisible(otpc_effective)
+        if not otpc_effective:
+            self._optimize_info_body.setVisible(False)
 
         self._skip_predictable_verify_check.setEnabled(self._verify_md5_check.isChecked())
+        self._skip_predictable_verify_check.setVisible(self._verify_md5_check.isChecked())
         self._reconform_clips()
+        self._update_archival_summary()
+
+    def _update_archival_summary(self):
+        """One line on the folded section's header saying what it's set to."""
+        if not hasattr(self, "_archival_summary") or not hasattr(self, "_compat_baseline_check"):
+            return
+        parts = []
+        if not self._archival_check.isChecked():
+            parts.append("No archive copy of the originals")
+        elif self._per_clip_archival_check.isChecked():
+            parts.append("Every original kept exactly")
+        else:
+            parts.append("Odd-format originals kept exactly")
+        if self._effective_optimize_baseline():
+            radio = self._quality_radios.get(self._selected_quality_preset())
+            parts.append(f"{radio.text().strip()} quality" if radio else "optimized")
+        if self._compat_baseline_check.isChecked():
+            parts.append("plus a " + ("ProRes" if self._compat_codec_prores_radio.isChecked()
+                                      else "H.264") + " copy")
+        if self._verify_md5_check.isChecked():
+            parts.append("checked afterwards")
+        self._archival_summary.setText("  ·  ".join(parts))
 
     def _on_archival_checkbox_touched(self, *_args):
         """Any real user click on one of the three archival checkboxes opts this
@@ -1970,9 +2042,9 @@ class MergeTab(QWidget):
 
         rec = recommend_baseline(self._spec_groups)
         self._res_label.setText(
-            "Baseline spec — every clip conforms to this; clips that already match are "
-            "copied losslessly and the rest are transcoded to it. Odd-spec originals are "
-            "preserved on their own archival tracks (with “Archival master” on).")
+            "Master format — clips already in this format are copied exactly; the rest are "
+            "converted to it (their originals are still kept exactly when “Archive” is on). "
+            "★ marks the best fit for most of your footage.")
         for g in self._spec_groups:
             btn = QPushButton(g.label() + ("   ★ recommended" if g is rec else ""))
             btn.setCheckable(True)
@@ -2438,6 +2510,15 @@ class MergeTab(QWidget):
             group_item.setExpanded(expanded.get(gid, True))
 
         self._table.blockSignals(False)
+        # WAV columns only earn their space when some clip actually has a WAV.
+        any_wav = any(c.has_wav() for c in self._clips)
+        self._table.setColumnHidden(COL_WAV, not any_wav)
+        self._table.setColumnHidden(COL_WAV_DUR, not any_wav)
+        # Show every row up to a sensible cap instead of a ~3-row peephole.
+        rows = sum(1 + self._table.topLevelItem(i).childCount()
+                   for i in range(self._table.topLevelItemCount()))
+        row_h = max(28, self._table.sizeHintForRow(0) if rows else 28)
+        self._table.setMinimumHeight(min(560, max(200, 48 + rows * row_h)))
 
     def _add_camera_group(self, camera_id: str, label: str, count: int) -> QTreeWidgetItem:
         p = theme.active_palette()
@@ -2448,7 +2529,8 @@ class MergeTab(QWidget):
         item.setToolTip(COL_NAME, "Double-click to rename this camera")
         item.setFlags((item.flags() | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsDropEnabled)
                       & ~Qt.ItemFlag.ItemIsDragEnabled)
-        font = QFont("", -1, QFont.Weight.Bold)
+        font = QFont(self._table.font())     # QFont("") falls back to monospace on Linux
+        font.setBold(True)
         for col in range(N_COLS):
             item.setFont(col, font)
             item.setForeground(col, QColor(p.accent))
@@ -2465,7 +2547,7 @@ class MergeTab(QWidget):
         item.setTextAlignment(COL_ORDER, Qt.AlignmentFlag.AlignCenter)
         if clip.manually_moved:
             item.setForeground(COL_ORDER, QColor(p.accent))
-            item.setFont(COL_ORDER, QFont("", -1, QFont.Weight.Bold))
+            item.setFont(COL_ORDER, _bold(self._table.font()))
 
         item.setText(COL_NAME, clip.stem)
         item.setData(COL_NAME, Qt.ItemDataRole.UserRole, self._clips.index(clip))
@@ -2955,13 +3037,15 @@ class MergeTab(QWidget):
 
     def _suggest_output_paths(self, folder: Path):
         """Recommend an output folder + filename from the just-loaded source
-        folder — the source folder itself, and a `<folder name>.mov` filename.
-        A starting suggestion only: skipped once the user has set their own this
-        session, and always overridable via Browse / editing the filename."""
+        folder — a `Kept by FuseBox` subfolder of it (so the master, manifest,
+        thumbnails and verified.txt sit beside the clips without mixing into
+        them, where a later re-scan would offer the master as a clip), and a
+        `<folder name>.mov` filename. A starting suggestion only: skipped once
+        the user has set their own this session, and always overridable."""
         if getattr(self, "_output_user_set", False):
             return
         try:
-            self._out_dir.setText(str(folder))
+            self._out_dir.setText(str(Path(folder) / OUTPUT_SUBFOLDER))
             self._out_name.setText(f"{Path(folder).name}.mov")
         except Exception:
             pass

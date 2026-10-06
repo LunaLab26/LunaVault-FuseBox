@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 20:49"
+LAST_UPDATED = "2026-10-06 20:55"
 
 
 @dataclass
@@ -25,6 +25,20 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.017 — a much tidier Merge page",
+        summary="The Merge page now fits on one screen. The clip list shows every clip, with no sideways scrolling and plain status labels. About twenty archive, quality, checking and processing options fold into one line that says what they're set to. Merged masters go into their own \"Kept by FuseBox\" folder rather than in among your clips.",
+        details=[
+            "Changed: \"Archive, quality & checks\" (archival master, one track per clip, quality target, MD5 checks, compatible master, graphics card, live preview) is folded by default and summarised on one line. Choices that don't apply yet are hidden rather than greyed out.",
+            "Fixed: the clip list was a ~3-row box with a sideways scrollbar; it now grows to show your clips. The WAV columns only appear when a clip has a WAV.",
+            "Fixed: status chips were cut off mid-word (\"/ill transcode vp9…\"). They now read \"Copied exactly\" or \"Will be converted\", with the technical reason in the tooltip.",
+            "Fixed: camera group names were shown in a typewriter (monospace) font.",
+            "Fixed: Pixel clips without a model tag were grouped as camera \"ISO\" (from \"ISO Media file produced by Google Inc.\"); they're now \"Google Pixel\".",
+            "Changed: the suggested output folder is a \"Kept by FuseBox\" folder inside the source folder, so the master and its files never mix with the clips (where a later re-scan would offer the master as a clip).",
+            "Changed: plainer wording for the master-format chooser.",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-06",
         title="v1.4.016 — a calmer, simpler home: everyday path up front, tools grouped",

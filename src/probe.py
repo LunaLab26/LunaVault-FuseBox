@@ -239,6 +239,12 @@ def _extract_device(fmt_tags: dict, video_tags: dict) -> str:
     # Handler strings can carry a leading length-byte / control char and a codec
     # suffix — e.g. "\x10INS.AVC" (Insta360 X4) or "Ambarella AVC" (Go3s).
     handler = "".join(ch for ch in (video_tags.get("handler_name", "") or "") if ch.isprintable()).strip()
+    m = re.match(r"ISO Media file produced by (.+)", handler, flags=re.I)
+    if m:
+        # Android's muxer label ("ISO Media file produced by Google Inc.") —
+        # the producer is the useful part, not the word "ISO".
+        maker = re.sub(r"[ ,]*(inc|ltd|llc|corp)\.?$", "", m.group(1).strip(), flags=re.I)
+        return "Google Pixel" if maker.lower() == "google" else maker
     if handler.lower() not in _GENERIC_HANDLERS:
         tok = handler.split()[0]                                   # "Ambarella AVC" → "Ambarella"
         tok = re.sub(r"\.(avc|aac|hevc|hvc1|h264|h265)$", "", tok, flags=re.I)  # "INS.AVC" → "INS"
