@@ -119,8 +119,18 @@ class AboutTab(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         outer.addWidget(scroll)
 
+        # Never scroll sideways: the page is one centred reading column, capped
+        # at a comfortable line length, that wraps to whatever width it's given.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        page = QWidget()
+        scroll.setWidget(page)
+        page_lay = QHBoxLayout(page)
+        page_lay.setContentsMargins(0, 0, 0, 0)
         content = QWidget()
-        scroll.setWidget(content)
+        content.setMaximumWidth(920)
+        page_lay.addStretch(1)
+        page_lay.addWidget(content, 100)
+        page_lay.addStretch(1)
         root = QVBoxLayout(content)
         root.setSpacing(20)
         root.setContentsMargins(40, 28, 40, 40)
@@ -131,9 +141,9 @@ class AboutTab(QWidget):
         left_col = QVBoxLayout()
         left_col.setSpacing(8)
         left_col.addStretch()
-        self._tagline = QLabel("Preserve every moment. Losslessly.")
+        self._tagline = QLabel("Your memories, safely kept — and provably yours.")
         left_col.addWidget(self._tagline)
-        ver = QApplication.instance().applicationVersion() if QApplication.instance() else "1.4.015"
+        ver = QApplication.instance().applicationVersion() if QApplication.instance() else "1.4.016"
         self._version_pill = QLabel(f"Version {ver or '1.4.008'}")
         self._version_pill.setFixedWidth(110)
         left_col.addWidget(self._version_pill)

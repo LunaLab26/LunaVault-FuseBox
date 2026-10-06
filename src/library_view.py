@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 import theme
+from logo_widget import make_icon_widget
 from settings import _settings_path
 from core import catalog as catalog_mod
 from core import collection as collection_mod
@@ -187,6 +188,31 @@ class HomeView(QWidget):
         root.addWidget(self._scroll, 1)
         self.refresh()
 
+    def _empty_state(self) -> QWidget:
+        """First-run shelf: one warm line and the single next step, centred."""
+        p = theme.active_palette()
+        box = QWidget()
+        box.setMinimumHeight(420)
+        lay = QVBoxLayout(box)
+        lay.setSpacing(12)
+        lay.addStretch(1)
+        icon = make_icon_widget(height=64)
+        lay.addWidget(icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        head = QLabel("Your shelf is ready")
+        head.setStyleSheet(f"background:transparent; color:{p.text}; font-size:20px; font-weight:600;")
+        lay.addWidget(head, 0, Qt.AlignmentFlag.AlignHCenter)
+        body = QLabel("Add a folder of videos from a day out, a birthday or a quiet afternoon.\n"
+                      "FuseBox checks every clip, keeps them together, and you can get any of them back.")
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setStyleSheet(f"background:transparent; color:{p.text_mute}; font-size:14px;")
+        lay.addWidget(body, 0, Qt.AlignmentFlag.AlignHCenter)
+        cta = _accent_button("＋  Add your first memories")
+        cta.clicked.connect(self.add_memories.emit)
+        lay.addSpacing(6)
+        lay.addWidget(cta, 0, Qt.AlignmentFlag.AlignHCenter)
+        lay.addStretch(2)
+        return box
+
     def _restyle(self):
         """Repaint from the current palette after a theme change and rebuild the
         tiles (each tile bakes in palette colours at build time)."""
@@ -204,10 +230,10 @@ class HomeView(QWidget):
         cat.refresh_statuses()
         n = len(cat.collections)
         self._sub.setText(f"{n} collection{'s' if n != 1 else ''}, all kept" if n else "")
+        self._add_btn.setVisible(bool(n))   # the empty state carries its own call to action
         if not n:
-            empty = QLabel("No memories kept yet. Add some to get started.")
-            empty.setStyleSheet(f"color:{theme.active_palette().text_mute}; padding:24px;")
-            self._grid.addWidget(empty, 0, 0)
+            self._grid.addWidget(self._empty_state(), 0, 0, 1, self._COLS,
+                                 Qt.AlignmentFlag.AlignCenter)
             return
         covers = catalog_mod.covers_dir(app_dir())
         for idx, e in enumerate(cat.collections):

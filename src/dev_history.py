@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 20:46"
+LAST_UPDATED = "2026-10-06 20:49"
 
 
 @dataclass
@@ -25,6 +25,18 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.016 — a calmer, simpler home: everyday path up front, tools grouped",
+        summary="The seven equal tabs across the top are now a short everyday path with the power tools grouped quietly beside it. Memories and Add memories come first. Merge, Review and Recover sit in a smaller Tools group. The Activity log, About, and the Dark/Light choice moved into a ⋯ menu.",
+        details=[
+            "New: the header shows two main destinations (Memories, Add memories) plus a quieter Tools group (Merge, Review, Recover). The Activity log, About FuseBox and Appearance are in the ⋯ menu.",
+            "New: the empty Memories shelf now says what to do next, with one button, centred, instead of a sentence floating at the left.",
+            "Fixed: the About page's letter no longer runs off the right edge with a sideways scrollbar; it's a centred column that wraps to the window.",
+            "Changed: the status bar no longer shows the video engine's file path at the bottom of every page; it only appears if something needs your attention.",
+            "Changed: the log page heading says \"Activity log\" (it records merges and recoveries, not just exports).",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-06",
         title="v1.4.015 — the \"Compatible playback master\" no longer freezes or loses clips",
