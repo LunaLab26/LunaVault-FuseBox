@@ -696,7 +696,7 @@ def test_plan_mix_first_is_default():
     plan = OutputPlan(tracks=[OutputTrack("mix"), OutputTrack("camera"), OutputTrack("wav")])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "[mix]apad[a" in s and "-c:a:0 alac" in s
+    assert "[mix]aresample=async=1:first_pts=0,apad" in s and "-c:a:0 alac" in s
     assert "-disposition:a:0 default" in s
 
 
@@ -714,7 +714,7 @@ def test_plan_primary_override_mix_plus_native_mix_track_uses_split_pads():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
     assert "asplit=2" in s
-    assert "[mix0]apad[a" in s and "[mix1]apad[a" in s
+    assert "[mix0]aresample=async=1:first_pts=0,apad" in s and "[mix1]aresample=async=1:first_pts=0,apad" in s
     assert "-map [mix]" not in s   # the old single-use label must not be referenced twice
     assert "-c:a:0 alac" in s and "-c:a:2 alac" in s   # both mix-filled slots: exact-length intermediates
 
@@ -725,7 +725,7 @@ def test_plan_single_mix_consumer_still_uses_the_plain_mix_label():
     plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
     cmd = build_mux_cmd_plan("ffmpeg", _ok_clip(with_wav=True), Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
-    assert "[mix]apad[a" in s
+    assert "[mix]aresample=async=1:first_pts=0,apad" in s
     assert "asplit" not in s and "[mix0]" not in s
 
 
@@ -975,7 +975,7 @@ def test_plan_no_wav_backup_falls_back_to_camera_audio():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     s = " ".join(cmd)
     assert "anullsrc" not in s                       # no silence needed — camera audio covers it
-    assert s.count("[0:a:0]apad[a") == 2                # both slots pull from the same camera input
+    assert s.count("[0:a:0]aresample=async=1:first_pts=0,apad") == 2                # both slots pull from the same camera input
     assert "-c:a:0 alac" in s                         # camera slot: stream copy
     assert "-c:a:1 alac" in s and "-sample_fmt:a:1 s32p" in s   # wav slot: re-encoded lossless
     assert "Backup Audio (from Camera)" in s
@@ -1105,7 +1105,7 @@ def test_plan_video_override_lrv_maps_video_from_second_input():
     assert "-c:v copy" not in s
     # cut to the CLIP's own duration, not the proxy's own (they rarely match exactly)
     t = float(cmd[cmd.index("-t") + 1])   # converted: snapped to whole output frames
-    assert "-frames:v" in cmd and abs(t - clip.duration) < 1 / 23.0
+    assert "trim=end_frame=" in " ".join(cmd) and abs(t - clip.duration) < 1 / 23.0
 
 
 def _last_t_value(cmd: list) -> str:
@@ -1155,7 +1155,7 @@ def test_plan_transcoding_clip_with_wav_gets_duration_cutoff():
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, OutputPlan(), "crop")
     assert "-c:v copy" not in " ".join(cmd)   # genuinely transcoding
     t = float(_last_t_value(cmd))   # converted: snapped to whole output frames
-    assert "-frames:v" in cmd and abs(t - clip.duration) < 1 / 23.0
+    assert "trim=end_frame=" in " ".join(cmd) and abs(t - clip.duration) < 1 / 23.0
 
 
 def test_plan_video_override_lrv_ignored_when_no_lrv_paired():
@@ -1629,7 +1629,7 @@ def test_cam_transcode_maps_source_and_encodes_aac():
     cmd = build_mux_cmd_plan("ffmpeg", pcm_clip, Path("o.mov"), PF, plan, "crop",
                              conform=ConformSpec(codec="h264", pix_fmt="yuv420p"))
     s = " ".join(cmd)
-    assert "[0:a:0]apad[a0]" in s and "-map [a0]" in s
+    assert "[0:a:0]aresample=async=1:first_pts=0,apad" in s and "-map [a0]" in s
     assert "-c:a:0 alac" in s       # exact-length intermediate; AAC is encoded once at the join
     assert "-c:a:0 copy" not in s
 
@@ -1652,7 +1652,7 @@ def test_every_audio_slot_is_padded_and_cut_to_the_video_length():
     plan = OutputPlan(tracks=[OutputTrack("camera"), OutputTrack("wav"), OutputTrack("mix")])
     cmd = build_mux_cmd_plan("ffmpeg", clip, Path("o.mov"), PF, plan, "crop")
     fc = cmd[cmd.index("-filter_complex") + 1]
-    assert fc.count("apad[a") == 3
+    assert fc.count(",apad,atrim=end=4.471133[a") == 3
     assert cmd[cmd.index("-t", cmd.index("-filter_complex")) + 1] == "4.471133"
     assert "-c:a:0 copy" not in " ".join(cmd)
 
@@ -1664,7 +1664,7 @@ def test_late_starting_wav_is_delayed_with_real_samples_not_itsoffset():
     s = " ".join(cmd)
     assert "-itsoffset" not in s
     fc = cmd[cmd.index("-filter_complex") + 1]
-    assert "[1:a:0]adelay=300.000:all=1,apad[a1]" in fc       # WAV slot
+    assert "[1:a:0]adelay=300.000:all=1,aresample=async=1:first_pts=0,apad,atrim=end=10.000000[a1]" in fc       # WAV slot
     assert "adelay=300.000:all=1" in fc.split("[wav_m]")[0]   # mix's WAV side too
 
 

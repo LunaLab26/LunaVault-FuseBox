@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 21:01"
+LAST_UPDATED = "2026-10-06 21:22"
 
 
 @dataclass
@@ -25,6 +25,14 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.019 — phone clips whose sound starts a moment late stay in sync",
+        summary="Pixel phones start a clip's sound a few hundredths of a second after its picture (20 to 43 ms on the July clips). When such a clip had to be converted, that gap was lost at the join, and the converted clip's sound also came out slightly short. Every clip after it played early: by 183 ms after just four joins of real footage. The gap is now kept as real silence, and each converted clip's sound is exactly as long as its picture.",
+        details=[
+            "Fixed: a real July merge (Pixel 30 fps, Pixel 120 fps, Pixel .LS, Go3S and Luna) drifted -56, -145, -183 ms at its joins. Now every join is at 0 ms, and the Pixel clips keep their own small recorded offset (20 and 43 ms), exactly as filmed.",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-06",
         title="v1.4.018 — masters start playing straight away when streamed",

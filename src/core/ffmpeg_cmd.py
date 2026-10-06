@@ -924,6 +924,11 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
         clip, square_mode, conform,
         src_width=(clip.lrv_width or None) if use_lrv else None,
         src_height=(clip.lrv_height or None) if use_lrv else None)
+    if out_frames:
+        # Exactly out_frames pictures, decided by the filter itself. (-frames:v
+        # as an output option ended the WHOLE segment at the last frame, so the
+        # padded audio never reached the picture's length: -32 ms per clip.)
+        vf_parts = vf_parts + [f"trim=end_frame={out_frames}"]
     if hw_extras and hw_extras.get("filter_suffix"):
         # VAAPI needs the upload onto its hw surface as the LAST step, after
         # every software scale/pad/crop step above has already run.
@@ -962,7 +967,12 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
             pre = []
         else:  # silence
             src, pre = f"[{silence_idx}:a:0]", []
-        fc.append(f"{src}{','.join(pre + ['apad'])}[a{i}]")
+        # aresample first_pts=0: a source whose audio starts a little after its
+        # video (a Pixel's starts 20 ms in) gets that gap as real silence —
+        # left as a timestamp it vanishes at the join and every later clip's
+        # sound plays early. apad + atrim then make the slot exactly vdur long
+        # on its own, without relying on an output-level cut.
+        fc.append(f"{src}{','.join(pre + ['aresample=async=1:first_pts=0', 'apad', f'atrim=end={vdur:.6f}'])}[a{i}]")
     if fc:
         cmd += ["-filter_complex", ";".join(fc)]
 
@@ -1032,9 +1042,11 @@ def build_mux_cmd_plan(ff: str, clip: ClipInfo, out: Path, progress_file: Path,
     # of bug — a proxy's own duration rarely matches its paired clip's to the
     # millisecond); reproduced directly and confirmed this is the general case,
     # not LRV-specific.
-    if out_frames:
-        cmd += ["-frames:v", str(out_frames)]
-    cmd += ["-t", f"{max(0.01, vdur):.6f}"]
+    # The streams are already exact (trim / atrim above); for a converted clip
+    # the output cut sits half a frame past the end so it can never clip the
+    # last picture to float rounding. A copied clip's video still relies on it.
+    t_cut = vdur + 0.5 / fps_out if out_frames else vdur
+    cmd += ["-t", f"{max(0.01, t_cut):.6f}"]
     cmd += ["-progress", str(progress_file), "-nostats", str(out)]
     return cmd
 

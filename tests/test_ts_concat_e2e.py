@@ -271,3 +271,41 @@ def test_audio_stays_under_its_picture_at_every_join():
     assert len(v) == 4 and len(a) == 4, (v, a)
     worst = max(abs(x - y) for x, y in zip(a, v))
     assert worst < 0.025, f"A/V offset per join (s): {[round(x - y, 3) for x, y in zip(a, v)]}"
+
+
+def _make_late_audio_clip(path: Path, video_s: float, beep_at: float):
+    """Pixel-like: 30 fps (so it converts to the 25 fps test baseline), and its
+    audio track starts ~40 ms after the video and stops before it ends —
+    muxed with an offset the way a phone writes it (an -itsoffset on a lavfi
+    source gets normalised away)."""
+    v, a = path.with_suffix(".v.mp4"), path.with_suffix(".a.m4a")
+    sp.run([FF, "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c=0x202020:s=320x240:r=30:d={video_s}",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(v)], check=True, capture_output=True)
+    sp.run([FF, "-y", "-v", "error", "-f", "lavfi", "-i", f"sine=f=440:d={video_s - 0.07}:r=48000",
+            "-c:a", "aac", "-ac", "2", str(a)], check=True, capture_output=True)
+    sp.run([FF, "-y", "-v", "error", "-i", str(v), "-itsoffset", "0.043", "-i", str(a),
+            "-map", "0:v", "-map", "1:a", "-c", "copy", str(path)], check=True, capture_output=True)
+    return path
+
+
+def test_converted_segment_with_late_audio_is_exactly_its_picture_length():
+    """Real Pixel clips' audio starts 20-43 ms after their video. Left as a
+    timestamp that gap vanished at the join, and -frames:v ended the segment
+    before the audio was padded out: a real 5-clip merge drifted -183 ms."""
+    from core.ffmpeg_cmd import OutputTrack, build_mux_cmd_plan
+    d = Path(tempfile.mkdtemp())
+    src = _make_late_audio_clip(d / "p.mp4", 2.0, 1.0)
+    st = sp.run([FP, "-v", "error", "-select_streams", "a", "-show_entries", "stream=start_time",
+                 "-of", "csv=p=0", str(src)], capture_output=True, text=True).stdout.strip()
+    assert float(st) > 0.01, f"fixture should have late-starting audio, got {st}"
+    clip = _clips_for([src])[0]
+    clip.stream.status = "transcode"
+    out = d / "seg.mov"
+    cmd = build_mux_cmd_plan(FF, clip, out, d / "p.txt", OutputPlan(tracks=[OutputTrack("camera")]),
+                             "crop", conform=_SMALL_CONFORM)
+    sp.run(cmd, check=True, capture_output=True)
+    rows = sp.run([FP, "-v", "error", "-show_entries", "stream=codec_type,start_time,duration",
+                   "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.split()
+    got = {r.split(",")[0]: [float(x) for x in r.split(",")[1:3]] for r in rows}
+    assert got["audio"][0] == 0.0, got
+    assert abs(got["audio"][1] - got["video"][1]) < 0.001, got

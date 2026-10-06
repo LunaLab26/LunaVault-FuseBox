@@ -190,7 +190,7 @@ def test_parse_from_format_tags_variants():
 
 def test_metadata_embed_args_shape():
     args = metadata_embed_args(_sample_manifest(), is_mov=True)
-    assert "-movflags" in args and "use_metadata_tags" in args
+    assert "-movflags" in args and "use_metadata_tags" in args[args.index("-movflags") + 1]
     i = args.index("-metadata")
     assert args[i + 1].startswith(f"{MANIFEST_METADATA_KEY}=")
     # Non-MOV output shouldn't force the movflag.
