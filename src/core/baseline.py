@@ -59,16 +59,32 @@ class SpecGroup:
         return f"{(self.codec or '?').upper()} {self.width}×{self.height} {self.bit_depth}-bit {self.fps}fps"
 
 
+# The master is a .mov, and MOV cannot carry these codecs at all (ffmpeg:
+# "vp9 only supported in MP4"), so a spec in one of them can never be a
+# stream-copy baseline. It is offered as the same resolution/frame rate in a
+# codec MOV does hold; its own clips then simply transcode to it.
+MOV_INCOMPATIBLE_CODECS = {"vp8", "vp9", "av1"}
+
+
+def mastering_codec(codec: str, bit_depth: int) -> tuple:
+    """(codec, pix_fmt or None) a baseline should use in place of `codec`."""
+    if (codec or "").lower() not in MOV_INCOMPATIBLE_CODECS:
+        return codec, None
+    return ("hevc", "yuv420p10le") if bit_depth > 8 else ("h264", "yuv420p")
+
+
 def enumerate_specs(clip_specs: list) -> list:
     """Group ClipSpecs into distinct SpecGroups (by codec/res/fps/pix_fmt),
     preserving first-seen order, tallying count + total duration."""
     groups: dict = {}
     for cs in clip_specs:
-        k = (cs.codec.lower(), cs.width, cs.height, cs.fps, (cs.pix_fmt or "").lower())
+        codec, pix = mastering_codec(cs.codec, cs.bit_depth)
+        pix = pix or cs.pix_fmt
+        k = (codec.lower(), cs.width, cs.height, cs.fps, (pix or "").lower())
         g = groups.get(k)
         if g is None:
-            g = SpecGroup(codec=cs.codec, width=cs.width, height=cs.height, fps=cs.fps,
-                          pix_fmt=cs.pix_fmt, bit_depth=cs.bit_depth, color_space=cs.color_space,
+            g = SpecGroup(codec=codec, width=cs.width, height=cs.height, fps=cs.fps,
+                          pix_fmt=pix, bit_depth=cs.bit_depth, color_space=cs.color_space,
                           color_transfer=cs.color_transfer, color_primaries=cs.color_primaries)
             groups[k] = g
         g.clip_count += 1

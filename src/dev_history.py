@@ -27,6 +27,14 @@ class HistoryEntry:
 HISTORY: list = [
     HistoryEntry(
         date="2026-10-06",
+        title="v1.4.012 — phone clips filmed in VP9 can't break the merge any more",
+        summary="Choosing a Pixel phone's VP9 clips as the baseline, or merging a folder made only of them, failed straight away: the master is a .mov file, and .mov can't hold VP9 (or AV1) video at all. Those clips are now offered as the same size and frame rate in H.264 (or HEVC for 10-bit), and are converted to it.",
+        details=[
+            "Fixed: \"ffmpeg failed on PXL_….mp4 … Invalid argument\" when a VP9 spec was picked as the baseline.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
         title="v1.4.011 — short clips get their WAV backup synced too",
         summary="A clip shorter than about five seconds skipped the WAV sync measurement and was simply lined up by its end, which on the Luna Ultra is about 0.3 s off. Short clips are now measured as well.",
         details=[
