@@ -53,7 +53,7 @@ def single(repo: Path, work: Path, case_id: str):
     from settings import Settings
     import merge_tab as mt_mod
     import ffmpeg_runner as fr_mod, subprocess as _sp
-    _cmdlog = open(work / f"{case_id}.cmds.txt", "w")
+    _cmdlog = open(work / f"{case_id}.cmds.txt", "w", encoding="utf-8")
     _P = _sp.Popen
     class _LogPopen(_P):
         def __init__(self, args, *a, **k):
@@ -185,7 +185,7 @@ def check_output(path: Path, set_name: str):
         chk["sync_tracks"] = []
         for ai in range(n_audio):
             r = subprocess.run([sys.executable, str(TOOLS / "av_events.py"), str(path), str(ai)],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
             try:
                 ev = json.loads(r.stdout)
                 offs = [p["offset_ms"] for p in ev["pairs"]]
@@ -211,9 +211,13 @@ def run(repo: Path, work: Path, filt: str = ""):
         t0 = time.time()
         print(f"[{time.strftime('%H:%M:%S')}] START {cid}", flush=True)
         shutil.rmtree(work / cid, ignore_errors=True)
+        # UTF-8 both ways: Windows' default cp1252 can't carry the app's dialog
+        # text (e.g. "⚠", "→"), which crashed a child mid-print before.
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
         p = subprocess.run([sys.executable, __file__, "single", str(repo), str(work), cid],
-                           capture_output=True, text=True, timeout=4000)
-        (work / f"{cid}.log").write_text(p.stdout + "\n--- stderr\n" + p.stderr)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=4000, env=env)
+        (work / f"{cid}.log").write_text(p.stdout + "\n--- stderr\n" + p.stderr, encoding="utf-8")
         res = None
         for line in p.stdout.splitlines()[::-1]:
             if line.startswith("RESULT "):
