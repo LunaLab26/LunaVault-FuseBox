@@ -20,6 +20,11 @@ CASES = [
     ("R1_default",            "R1_luna",           {}),
     ("R1_archival_md5",       "R1_luna",           {"archival": True, "verify": True}),
     ("R2_default",            "R2_cattle_mixed",   {}),
+    # What a user gets by just clicking Start: no checkbox is touched, so the
+    # app's own _auto_select_archival_params decides (for a mixed folder that
+    # is archival + one track per clip + Optimize). "R2_default" above means
+    # "no optional boxes ticked", which is NOT the app default.
+    ("R2_app_default",        "R2_cattle_mixed",   {"app_defaults": True}),
     ("R2_baseline_1080",      "R2_cattle_mixed",   {"baseline": "1920x1080"}),
     ("R2_archival_perclip",   "R2_cattle_mixed",   {"archival": True, "per_clip": True, "verify": True}),
     ("R2_compat_h264",        "R2_cattle_mixed",   {"compat": "h264"}),
@@ -112,25 +117,32 @@ def single(repo: Path, work: Path, case_id: str):
             res["baseline_note"] = f"no group {want}"
     res["baseline"] = mt._chosen_group.label() if mt._chosen_group else None
     pump()
-    mt._archival_check.setChecked(bool(opt.get("archival")))
-    mt._per_clip_archival_check.setChecked(bool(opt.get("per_clip")))
-    if opt.get("optimize"):
-        mt._optimize_baseline_check.setChecked(True)
-        if opt["optimize"] in mt._quality_radios:
-            mt._quality_radios[opt["optimize"]].setChecked(True)
+    if opt.get("app_defaults"):
+        res["app_default_boxes"] = {
+            n: getattr(mt, a).isChecked() for n, a in (
+                ("archival", "_archival_check"), ("per_clip", "_per_clip_archival_check"),
+                ("optimize", "_optimize_baseline_check"), ("verify", "_verify_md5_check"),
+                ("compat", "_compat_baseline_check")) if hasattr(mt, a)}
     else:
-        mt._optimize_baseline_check.setChecked(False)
-    mt._verify_md5_check.setChecked(bool(opt.get("verify")))
-    comp = opt.get("compat")
-    mt._compat_baseline_check.setChecked(bool(comp))
-    if comp:
-        if comp.startswith("prores"):
-            mt._compat_codec_prores_radio.setChecked(True)
-            mt._prores_profile_radios[comp.split(":")[1]].setChecked(True)
+        mt._archival_check.setChecked(bool(opt.get("archival")))
+        mt._per_clip_archival_check.setChecked(bool(opt.get("per_clip")))
+        if opt.get("optimize"):
+            mt._optimize_baseline_check.setChecked(True)
+            if opt["optimize"] in mt._quality_radios:
+                mt._quality_radios[opt["optimize"]].setChecked(True)
         else:
-            mt._compat_codec_h264_radio.setChecked(True)
-    if opt.get("fill") == "blur":
-        mt._fill_combo.setCurrentIndex(1)
+            mt._optimize_baseline_check.setChecked(False)
+        mt._verify_md5_check.setChecked(bool(opt.get("verify")))
+        comp = opt.get("compat")
+        mt._compat_baseline_check.setChecked(bool(comp))
+        if comp:
+            if comp.startswith("prores"):
+                mt._compat_codec_prores_radio.setChecked(True)
+                mt._prores_profile_radios[comp.split(":")[1]].setChecked(True)
+            else:
+                mt._compat_codec_h264_radio.setChecked(True)
+        if opt.get("fill") == "blur":
+            mt._fill_combo.setCurrentIndex(1)
     pump()
     res["table"] = [(c.path.name if hasattr(c, "path") else "?", getattr(c.stream, "status", None))
                     for c in mt._clips]
