@@ -27,6 +27,17 @@ class HistoryEntry:
 HISTORY: list = [
     HistoryEntry(
         date="2026-10-07",
+        title="v1.4.024 — the archive check no longer cries wolf",
+        summary="After a merge with \"Verify\" on, a folder of camera clips with WAV backups always reported that every clip failed to verify, even though nothing was wrong. The check was comparing the master against slightly different stretches of the original sound. It now compares like with like, and those merges verify.",
+        details=[
+            "Fixed: the WAV backup check read the original WAV to its very end, while the master keeps the WAV only for the length of the picture. Both sides are now compared over the same stretch.",
+            "Fixed: the quick pre-check looked at 3 seconds of sound even for shorter clips, running into the next clip.",
+            "Fixed: checks started up to half a millisecond (13 samples) off, from rounding the start time to whole milliseconds.",
+            "Fixed: since v1.4.010 the camera sound on the main track is re-encoded to keep it in sync, so the first clip's camera sound can't be byte-identical. The check now says so up front instead of reporting a failure. With \"One track per clip\" on, the original sound is still kept byte for byte.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
         title="v1.4.023 — clips re-encoded only for delivery say so",
         summary="With \"Optimize baseline for delivery\" on (the default for folders that mix cameras), a clip already in the master format is still re-encoded so every clip plays the same way. Its status said \"Will be converted\", as if it didn't match. It now says \"Converted for delivery\", and the tooltip explains why and that the original is still kept exactly.",
         details=[

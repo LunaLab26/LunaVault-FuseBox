@@ -347,3 +347,15 @@ def test_frame_exact_duration_snaps_a_cut_to_whole_frames():
         d_exact = probe_frame_exact_duration(fp, str(out))
     frames = d_exact * 30000 / 1001
     assert abs(frames - round(frames)) < 1e-6
+
+
+def test_reencoded_baseline_camera_audio_is_predicted_not_failed():
+    # Baseline camera audio is re-encoded to exact length (v1.4.010), so a
+    # first clip recovered from the baseline can't be byte-identical.
+    from types import SimpleNamespace
+    from core.verify import predict_unverifiable
+    entry = SimpleNamespace(recovery_fidelity="decode-lossless", has_camera_audio=True,
+                            audio_lossless=False)
+    plan = SimpleNamespace(video_stream=0, audio_stream=0, video_start=0.0)
+    got = predict_unverifiable(entry, plan, own_archival_track=False, safe_to_read_unbounded=True)
+    assert "Camera audio" in got

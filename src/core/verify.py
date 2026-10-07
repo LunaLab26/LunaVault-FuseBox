@@ -256,10 +256,10 @@ def build_video_es_cmd(ff: str, source: str, out_path: str, codec: str,
     fmt = "hevc" if (codec or "").lower() in ("hevc", "h265") else "h264"
     cmd = [ff, "-y", "-v", "error"]
     if seek is not None:
-        cmd += ["-ss", f"{max(0.0, seek):.3f}"]
+        cmd += ["-ss", f"{max(0.0, seek):.6f}"]   # sample-accurate: a ms-rounded seek put WAV verify 13 samples off
     cmd += ["-i", str(source)]
     if duration is not None:
-        cmd += ["-t", f"{max(0.01, duration):.3f}"]
+        cmd += ["-t", f"{max(0.01, duration):.6f}"]
     cmd += ["-map", f"0:v:{video_stream}", "-c", "copy", "-bsf:v", bsf, "-f", fmt, str(out_path)]
     return cmd
 
@@ -277,10 +277,10 @@ def build_audio_pcm_cmd(ff: str, source: str, out_path: str,
     but that chunk)."""
     cmd = [ff, "-y", "-v", "error"]
     if seek is not None:
-        cmd += ["-ss", f"{max(0.0, seek):.3f}"]
+        cmd += ["-ss", f"{max(0.0, seek):.6f}"]
     cmd += ["-i", str(source)]
     if duration is not None:
-        cmd += ["-t", f"{max(0.01, duration):.3f}"]
+        cmd += ["-t", f"{max(0.01, duration):.6f}"]
     cmd += ["-map", f"0:a:{audio_stream}", "-c:a", "pcm_s16le", "-ar", "48000", "-f", "s16le", str(out_path)]
     return cmd
 
@@ -298,10 +298,10 @@ def build_decoded_video_md5_cmd(ff: str, source: str, video_stream: int = 0,
     survived even when the raw bitstream isn't a byte-for-byte copy."""
     cmd = [ff, "-v", "error"]
     if seek is not None:
-        cmd += ["-ss", f"{max(0.0, seek):.3f}"]
+        cmd += ["-ss", f"{max(0.0, seek):.6f}"]
     cmd += ["-i", str(source)]
     if duration is not None:
-        cmd += ["-t", f"{max(0.01, duration):.3f}"]
+        cmd += ["-t", f"{max(0.01, duration):.6f}"]
     cmd += ["-map", f"0:v:{video_stream}", "-pix_fmt", "yuv420p", "-c:v", "rawvideo", "-f", "md5", "-"]
     return cmd
 
@@ -318,10 +318,10 @@ def build_decoded_audio_md5_cmd(ff: str, source: str, audio_stream: int = 0,
     decoded PCM byte-identical again)."""
     cmd = [ff, "-v", "error"]
     if seek is not None:
-        cmd += ["-ss", f"{max(0.0, seek):.3f}"]
+        cmd += ["-ss", f"{max(0.0, seek):.6f}"]
     cmd += ["-i", str(source)]
     if duration is not None:
-        cmd += ["-t", f"{max(0.01, duration):.3f}"]
+        cmd += ["-t", f"{max(0.01, duration):.6f}"]
     cmd += ["-map", f"0:a:{audio_stream}", "-c:a", "pcm_s16le", "-ar", "48000", "-f", "md5", "-"]
     return cmd
 
@@ -445,6 +445,12 @@ def predict_unverifiable(entry, plan, own_archival_track: bool,
                 "so the recovered audio keeps those samples and every sample after them shifts by "
                 "one AAC frame's worth of time (~20ms). Enable Archival master + \"One track per "
                 "clip\" for a byte-exact copy that avoids this cut entirely.")
+        elif not getattr(entry, "audio_lossless", True):
+            predicted["Camera audio"] = (
+                "expected: camera sound on the shared master track is re-encoded so each clip's "
+                "sound is exactly as long as its picture (no drift at the joins), so it can't be "
+                "byte-identical to the original. Archival master + \"One track per clip\" keeps a "
+                "byte-exact copy of the original sound.")
     return predicted
 
 

@@ -1800,8 +1800,12 @@ class MergeWorker(QThread):
                 try:
                     src_w = verify_dir / f"{clip.stem}_src.wavbackup"
                     rec_w = verify_dir / f"{clip.stem}_rec.wavbackup"
+                    # Same LENGTH as the recovered side too: the master's WAV slot
+                    # is cut to the clip's picture length, while the original WAV
+                    # runs on past it, so an open-ended source decode never matched.
                     src_cmd = build_audio_pcm_cmd(ff, str(clip.wav_path), str(src_w),
-                                                  seek=src_seek, audio_stream=0)
+                                                  seek=src_seek, duration=plan.wav_duration,
+                                                  audio_stream=0)
                     rec_cmd = build_audio_pcm_cmd(ff, str(self._output), str(rec_w),
                                                   seek=plan.wav_start, duration=plan.wav_duration,
                                                   audio_stream=plan.wav_stream)
@@ -1850,9 +1854,12 @@ class MergeWorker(QThread):
                 # every time for that same benign drift. Confirm it with a
                 # cheap short-window scan before spending a full-duration
                 # decode+hash pass on both sides.
+                # A window longer than the clip's own WAV slot runs into the
+                # next clip's audio (a 2.2 s clip vs the default 3 s window).
+                quick_window = min(3.0, plan.wav_duration) if plan.wav_duration else 3.0
                 benign, detail = quick_wav_rounding_check(
                     ff, str(clip.wav_path), str(self._output), plan.wav_start,
-                    plan.wav_stream, src_seek=src_seek, **kwargs)
+                    plan.wav_stream, src_seek=src_seek, window_s=quick_window, **kwargs)
                 if benign:
                     result.checks.append(StreamCheck(
                         "WAV backup", "", "", True,
