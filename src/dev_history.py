@@ -26,6 +26,15 @@ class HistoryEntry:
 
 HISTORY: list = [
     HistoryEntry(
+        date="2026-10-07",
+        title="v1.4.020 — the test suite runs on Windows",
+        summary="Five of the app's own checks could only pass on a Linux machine with an AMD graphics card. They looked for ffmpeg without Windows' \".exe\" ending, or quietly relied on the machine really having Linux's VAAPI video hardware. They now run on Windows too. The app itself is unchanged.",
+        details=[
+            "Fixed: test_binaries creates bin/ffmpeg.exe on Windows, which is the name the app actually looks for there.",
+            "Fixed: the two VAAPI command-building tests fake the encoder probe and render device instead of probing the real machine.",
+        ],
+    ),
+    HistoryEntry(
         date="2026-10-06",
         title="v1.4.019 — phone clips whose sound starts a moment late stay in sync",
         summary="Pixel phones start a clip's sound a few hundredths of a second after its picture (20 to 43 ms on the July clips). When such a clip had to be converted, that gap was lost at the join, and the converted clip's sound also came out slightly short. Every clip after it played early: by 183 ms after just four joins of real footage. The gap is now kept as real silence, and each converted clip's sound is exactly as long as its picture.",

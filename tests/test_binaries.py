@@ -13,8 +13,9 @@ from core import binaries
 def _make_bin(tmp_path, executable=True):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    ff = bindir / "ffmpeg"
-    fp = bindir / "ffprobe"
+    suffix = ".exe" if sys.platform == "win32" else ""   # get_ffmpeg looks for ffmpeg.exe on Windows
+    ff = bindir / f"ffmpeg{suffix}"
+    fp = bindir / f"ffprobe{suffix}"
     ff.write_text("#!/bin/sh\n")
     fp.write_text("#!/bin/sh\n")
     if executable:

@@ -778,6 +778,9 @@ def test_plan_transcode_vaapi_swaps_binary_adds_device_and_hwupload():
         }
 
     ge.hw_encode_plan = fake_plan
+    saved_env = (ge.system_vaapi_ffmpeg, ge.vaapi_render_device)
+    ge.system_vaapi_ffmpeg = lambda: "/usr/bin/ffmpeg"          # so this also runs on
+    ge.vaapi_render_device = lambda: "/dev/dri/renderD128"      # machines without VAAPI
     try:
         clip = ClipInfo(path=Path("c.mp4"),
                         stream=StreamInfo(status="transcode", width=1920, height=1080,
@@ -788,6 +791,7 @@ def test_plan_transcode_vaapi_swaps_binary_adds_device_and_hwupload():
                                  conform=conform)
     finally:
         ge.hw_encode_plan = real_plan_fn
+        ge.system_vaapi_ffmpeg, ge.vaapi_render_device = saved_env
 
     assert cmd[0] == "/usr/bin/ffmpeg"          # swapped from the bundled "ffmpeg_bundled_static"
     i_idx = cmd.index("-i")
@@ -811,7 +815,8 @@ def _with_fake_vaapi(codec_vendor, body):
     encode-vendor resolution. `codec_vendor` is what detect_best_hw returns."""
     import core.gpu_encode as ge
     saved = (ge.system_vaapi_ffmpeg, ge.vaapi_render_device,
-             ge.vaapi_decode_global_args, ge.detect_best_hw)
+             ge.vaapi_decode_global_args, ge.detect_best_hw, ge._cached_probe)
+    ge._cached_probe = lambda ff, enc_name: True   # no real VAAPI probe (Windows has none)
     ge.system_vaapi_ffmpeg = lambda: "/usr/bin/ffmpeg"
     ge.vaapi_render_device = lambda: "/dev/dri/renderD128"
     ge.vaapi_decode_global_args = lambda: ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"]
@@ -820,7 +825,7 @@ def _with_fake_vaapi(codec_vendor, body):
         body()
     finally:
         (ge.system_vaapi_ffmpeg, ge.vaapi_render_device,
-         ge.vaapi_decode_global_args, ge.detect_best_hw) = saved
+         ge.vaapi_decode_global_args, ge.detect_best_hw, ge._cached_probe) = saved
 
 
 def _transcode_clip():
