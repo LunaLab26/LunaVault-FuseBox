@@ -27,6 +27,14 @@ class HistoryEntry:
 HISTORY: list = [
     HistoryEntry(
         date="2026-10-07",
+        title="v1.4.023 — clips re-encoded only for delivery say so",
+        summary="With \"Optimize baseline for delivery\" on (the default for folders that mix cameras), a clip already in the master format is still re-encoded so every clip plays the same way. Its status said \"Will be converted\", as if it didn't match. It now says \"Converted for delivery\", and the tooltip explains why and that the original is still kept exactly.",
+        details=[
+            "Changed: the status chip for a clip whose only difference is the delivery optimisation reads \"Converted for delivery\".",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
         title="v1.4.022 — clip names stay readable on smaller screens",
         summary="On a smaller laptop screen (for example 1366×768 at 125%), the Merge page's clip list squeezed every file name down to \"...\" and camera names to \"Go...\", so you couldn't tell clips apart. Names now keep enough room to read, and the list scrolls sideways when the window is really narrow.",
         details=[

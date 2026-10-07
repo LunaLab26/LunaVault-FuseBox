@@ -60,6 +60,10 @@ def _fps_to_ffmpeg(fps_str: str) -> str:
 
 OUTPUT_SUBFOLDER = "Kept by FuseBox"
 
+# The conflict _reconform_clips adds to a clip that already matches the master
+# format but is re-encoded anyway because "Optimize baseline for delivery" is on.
+OPTIMIZED_FOR_DELIVERY = "optimized for delivery"
+
 # status → (palette attribute name, label)
 STATUS_COLORS = {
     "ok":        ("ok",        "Copied exactly"),
@@ -230,7 +234,11 @@ def _make_status_button(clip: ClipInfo) -> QPushButton:
     attr, label = STATUS_COLORS.get(status, ("text_mute", status))
     color = getattr(pal, attr)
     conflicts = clip.conflicts
-    if clip.video_source_override == "transcode" and not conflicts:
+    delivery_only = status == "transcode" and list(conflicts) == [OPTIMIZED_FOR_DELIVERY]
+    if delivery_only:
+        # It matches the master format; "Will be converted" read as if it didn't.
+        label = "Converted for delivery"
+    elif clip.video_source_override == "transcode" and not conflicts:
         label = label + "  (forced)"
     elif clip.video_source_override == "lrv" and clip.has_lrv():
         label = label + "  (LRV)"
@@ -242,7 +250,12 @@ def _make_status_button(clip: ClipInfo) -> QPushButton:
         f"QPushButton {{ background:{color}; color:{pal.bg}; border:none; border-radius:4px; "
         "padding:2px 8px; font-size:11px; }"
         f"QPushButton:hover {{ background:{color}; border:1px solid {pal.text}; }}")
-    why = ("Differs from the baseline: " + ", ".join(conflicts) + "\n\n") if conflicts else ""
+    if delivery_only:
+        why = ("Already in the master format. It is re-encoded because \"Optimize baseline for\n"
+               "delivery\" is on, so every clip in the master plays the same way. With\n"
+               "\"Archive\" on, the original is also kept exactly on its own track.\n\n")
+    else:
+        why = ("Differs from the baseline: " + ", ".join(conflicts) + "\n\n") if conflicts else ""
     btn.setToolTip(why + "Click to change how this clip's video gets into the master")
     return btn
 
@@ -2118,7 +2131,7 @@ class MergeTab(QWidget):
             apply_conformance(c.stream, bspec)
             if force_transcode and c.stream.status == "ok":
                 c.stream.status = "transcode"
-                c.stream.conflicts = list(c.stream.conflicts) + ["optimized for delivery"]
+                c.stream.conflicts = list(c.stream.conflicts) + [OPTIMIZED_FOR_DELIVERY]
         self._populate_table()
         self._update_estimate()
 
