@@ -782,6 +782,32 @@ class _CameraGroupTree(QTreeWidget):
         self.setDropIndicatorShown(True)
         self._drag_source_item: Optional[QTreeWidgetItem] = None
 
+    # Narrowest the clip NAME column may get. It stretches to absorb leftover
+    # width, but the fixed columns already need ~990 px, so on a 1366x768
+    # laptop at 125% (about 1090 px of window) a pure stretch left the names
+    # as "..." and the camera-group titles as "Go...". Below this the table
+    # scrolls sideways instead, which keeps every name readable.
+    NAME_MIN_WIDTH = 180
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_name_column()
+
+    def _fit_name_column(self):
+        hdr = self.header()
+        if hdr.count() <= COL_NAME:
+            return
+        others = sum(hdr.sectionSize(c) for c in range(hdr.count())
+                     if c != COL_NAME and not hdr.isSectionHidden(c))
+        room = self.viewport().width() - others
+        want_stretch = room >= self.NAME_MIN_WIDTH
+        mode = hdr.sectionResizeMode(COL_NAME)
+        if want_stretch and mode != QHeaderView.ResizeMode.Stretch:
+            hdr.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        elif not want_stretch and mode == QHeaderView.ResizeMode.Stretch:
+            hdr.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Interactive)
+            self.setColumnWidth(COL_NAME, self.NAME_MIN_WIDTH)
+
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
         self._drag_source_item = self.currentItem()
@@ -987,12 +1013,14 @@ class MergeTab(QWidget):
         for col in (COL_ORDER, COL_PREVIEW, COL_OFFSET, COL_DRIFT, COL_UP, COL_DOWN):
             self._table.header().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         for col, default_width in (
-            (COL_TIME, 90), (COL_CAM, 150), (COL_DUR, 80), (COL_WAV, 60),
+            (COL_TIME, 90), (COL_CAM, 90), (COL_DUR, 80), (COL_WAV, 60),
             (COL_WAV_DUR, 80), (COL_PRIMARY, 120), (COL_STATUS, 190),
         ):
             self._table.header().setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self._table.setColumnWidth(col, default_width)
         self._table.header().setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        # COL_CAM only holds a group's "N clips" count (the camera's name is the
+        # group title in COL_NAME), so it no longer needs 150 px.
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)

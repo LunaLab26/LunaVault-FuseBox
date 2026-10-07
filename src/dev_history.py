@@ -27,6 +27,15 @@ class HistoryEntry:
 HISTORY: list = [
     HistoryEntry(
         date="2026-10-07",
+        title="v1.4.022 — clip names stay readable on smaller screens",
+        summary="On a smaller laptop screen (for example 1366×768 at 125%), the Merge page's clip list squeezed every file name down to \"...\" and camera names to \"Go...\", so you couldn't tell clips apart. Names now keep enough room to read, and the list scrolls sideways when the window is really narrow.",
+        details=[
+            "Fixed: the Clip column now never gets narrower than 180 px; below that the table scrolls sideways instead.",
+            "Changed: the Camera column only shows each camera group's clip count, so it is narrower (90 px instead of 150), leaving more room for names.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
         title="v1.4.021 — a clearer menu button and a clean header on Windows",
         summary="On Windows the header's menu button showed a tiny, faint \"⋯\" that was hard to spot, and the owl logo sat on a slightly lighter square. The button now shows three clear dots, and the logo blends into the header.",
         details=[
