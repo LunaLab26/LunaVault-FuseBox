@@ -55,7 +55,7 @@ class NavTabs(QWidget):
         hl.addLayout(self._corner_slot)
 
         self._more = QToolButton()
-        self._more.setText("⋯")
+        self._more.setText("•••")   # "⋯" (U+22EF) renders tiny in Segoe UI; bullets read on every font
         self._more.setToolTip("Activity log, About FuseBox")
         self._more.setCursor(Qt.CursorShape.PointingHandCursor)
         self._more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -136,6 +136,13 @@ class NavTabs(QWidget):
 
     def addCornerWidget(self, widget):
         """Right-hand header area, before the ⋯ menu."""
+        # A plain QWidget container would otherwise take the app-wide
+        # `QWidget { background:<page bg> }` rule and show as a lighter box on
+        # the header. Scoped by object name so its children keep their styles.
+        if not widget.objectName():
+            widget.setObjectName("NavCorner")
+        widget.setStyleSheet(widget.styleSheet() +
+                             f"QWidget#{widget.objectName()} {{ background:transparent; }}")
         self._corner_slot.insertWidget(self._corner_slot.count() - 1, widget)
 
     def setMenuExtras(self, build):
@@ -186,7 +193,7 @@ class NavTabs(QWidget):
             f"QPushButton[navGroup='tools']:hover {{ color:{p.text}; }}"
             f"QPushButton[navGroup='tools']:checked {{ color:{p.text}; border-bottom:2px solid {p.accent}; }}"
             f"QToolButton {{ background:transparent; color:{p.text_mute}; border:1px solid {p.border}; "
-            f"border-radius:14px; padding:2px 10px; font-size:16px; }}"
+            f"border-radius:14px; padding:2px 10px; font-size:10px; min-height:22px; }}"
             f"QToolButton:hover {{ color:{p.text}; border-color:{p.accent}; }}"
             "QToolButton::menu-indicator { image: none; width:0; }")
         self._divider.setStyleSheet(f"background:{p.border};")

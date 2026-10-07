@@ -27,6 +27,15 @@ class HistoryEntry:
 HISTORY: list = [
     HistoryEntry(
         date="2026-10-07",
+        title="v1.4.021 — a clearer menu button and a clean header on Windows",
+        summary="On Windows the header's menu button showed a tiny, faint \"⋯\" that was hard to spot, and the owl logo sat on a slightly lighter square. The button now shows three clear dots, and the logo blends into the header.",
+        details=[
+            "Fixed: the menu button's \"⋯\" character is drawn very small by Windows' Segoe UI font. It now uses three bullet dots, which every font draws clearly, at 100%, 125% and 150% display scaling.",
+            "Fixed: the header's right-hand corner box took the app-wide page background, leaving a visible square behind the logo.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
         title="v1.4.020 — the test suite runs on Windows",
         summary="Five of the app's own checks could only pass on a Linux machine with an AMD graphics card. They looked for ffmpeg without Windows' \".exe\" ending, or quietly relied on the machine really having Linux's VAAPI video hardware. They now run on Windows too. The app itself is unchanged.",
         details=[
