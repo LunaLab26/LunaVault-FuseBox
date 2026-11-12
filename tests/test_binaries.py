@@ -77,3 +77,27 @@ def test_get_ffmpeg_falls_back_when_bundled_binary_missing(tmp_path, monkeypatch
     out_ff, out_fp = binaries.get_ffmpeg()
     assert out_ff == "ffmpeg"
     assert out_fp == "ffprobe"
+
+
+@pytest.mark.parametrize("text,ok", [
+    ("ffmpeg version 7.0.2-static https://johnvansickle.com/ffmpeg/", True),
+    ("ffmpeg version 7.1.1-full_build-www.gyan.dev Copyright", True),
+    ("ffmpeg version 6.1 Copyright", True),
+    ("ffmpeg version 7.1.2 Copyright", False),
+    ("ffmpeg version 9.0.2-full_build-www.gyan.dev", False),
+    ("ffmpeg version N-120000-gabcdef1234-20260601 Copyright", False),
+    ("", False),
+])
+def test_ffmpeg_join_safety(text, ok):
+    assert binaries.ffmpeg_join_safety(text)[0] is ok
+
+
+def test_check_ffmpeg_script_on_bundled_binary():
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    ff = root / "bin" / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+    if not ff.exists():
+        pytest.skip("no bundled ffmpeg")
+    r = subprocess.run([sys.executable, str(root / "tools" / "check_ffmpeg.py"), str(ff)],
+                       capture_output=True, text=True)
+    assert r.returncode in (0, 1) and ("OK" in r.stdout or "ERROR" in r.stdout)

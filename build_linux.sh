@@ -54,6 +54,8 @@ if ldd "bin/ffmpeg" >/dev/null 2>&1; then
     exit 1
 fi
 chmod +x bin/ffmpeg bin/ffprobe
+# Refuse ffmpeg builds that corrupt mixed-HEVC lossless joins (see core/binaries.py)
+python3 tools/check_ffmpeg.py bin/ffmpeg || exit 1
 echo "  $(bin/ffmpeg -version 2>&1 | head -1)"
 echo ""
 

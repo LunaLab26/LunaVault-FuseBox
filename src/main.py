@@ -35,7 +35,7 @@ import theme
 APP_NAME    = "LunaVault FuseBox"
 # Versioning: v1.4.NNN, incremented by one for every amendment/change (see
 # dev_history.py's running log and LAST_UPDATED stamp).
-APP_VERSION = "1.4.024"
+APP_VERSION = "1.4.025"
 
 
 class _UpdateCheckThread(QThread):
@@ -298,7 +298,13 @@ class MainWindow(QMainWindow):
             self._status.show()
         else:
             self._status.setToolTip(f"ffmpeg: {ff}")
-            self._status.hide()
+            from core.binaries import ffmpeg_join_safety, probe_ffmpeg_version
+            ok, why = ffmpeg_join_safety(probe_ffmpeg_version(ff))
+            if ok:
+                self._status.hide()
+            else:
+                self._status.showMessage("Warning: " + why)
+                self._status.show()
 
     def _build_appearance_menu(self, menu):
         ctrl = theme.controller()

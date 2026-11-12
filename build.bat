@@ -53,6 +53,11 @@ if not exist "bin\ffprobe.exe" (
     echo  [ERROR] bin\ffprobe.exe not found.
     pause & exit /b 1
 )
+python tools\check_ffmpeg.py bin\ffmpeg.exe
+if errorlevel 1 (
+    echo         Use the gyan.dev 7.1.1 release build ^(ffmpeg-7.1.1-full_build^), not a git or 9.x build.
+    pause ^& exit /b 1
+)
 echo  ffmpeg OK.
 echo.
 

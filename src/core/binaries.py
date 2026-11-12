@@ -46,3 +46,51 @@ def get_ffmpeg() -> tuple:
                         pass
         return str(ff), str(fp)
     return "ffmpeg", "ffprobe"
+
+
+# ── ffmpeg version safety ─────────────────────────────────────────────────────
+# From ffmpeg 7.1 on, the mov muxer strips the in-band VPS/SPS/PPS from `hvc1`
+# samples, so a lossless (TS-route) join of HEVC segments that carry different
+# parameter sets keeps only the FIRST segment's sets and the later segments
+# decode as garbage. 7.0.2 and 7.1.1 are verified fine; the 2026 git builds and
+# the 9.0.2 release are not. H.264 (avc1) is unaffected on every build. The
+# canary is tests/test_ffmpeg_cmd.py::test_ts_remux_and_concat_round_trip_real_
+# mixed_encoder_footage. Raise this ceiling only after that test passes on the
+# newer build.
+MAX_SAFE_FFMPEG = (7, 1, 1)
+
+
+def parse_ffmpeg_version(version_text: str):
+    """Release version as an (major, minor, patch) tuple from the first line of
+    `ffmpeg -version`, or None for git/unknown builds ("N-12345-gabcdef")."""
+    import re
+    m = re.search(r"ffmpeg version n?(\d+)\.(\d+)(?:\.(\d+))?", version_text or "",
+                  re.IGNORECASE)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
+def ffmpeg_join_safety(version_text: str):
+    """(ok, message). ok is False for any build not known to keep HEVC parameter
+    sets intact in mixed-encoder lossless joins."""
+    ver = parse_ffmpeg_version(version_text)
+    first = (version_text or "").strip().splitlines()[0] if (version_text or "").strip() else "(no output)"
+    limit = ".".join(map(str, MAX_SAFE_FFMPEG))
+    if ver is None:
+        return False, (f"Unrecognised ffmpeg build ({first}). Git builds are not "
+                       f"verified; use a release up to {limit}.")
+    if ver > MAX_SAFE_FFMPEG:
+        return False, (f"ffmpeg {'.'.join(map(str, ver))} can corrupt lossless "
+                       f"joins of mixed HEVC clips; use {limit} or older.")
+    return True, f"ffmpeg {'.'.join(map(str, ver))} OK"
+
+
+def probe_ffmpeg_version(ffmpeg_path: str, timeout: float = 10.0) -> str:
+    """Raw `ffmpeg -version` output ('' if it can't be run)."""
+    try:
+        r = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True,
+                           timeout=timeout, **no_window())
+        return r.stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return ""

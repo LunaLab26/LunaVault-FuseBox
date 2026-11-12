@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-10-06 21:22"
+LAST_UPDATED = "2026-11-12 08:20"
 
 
 @dataclass
@@ -25,6 +25,17 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-11-12",
+        title="v1.4.025 — protection against a video-engine version that damages merged HEVC",
+        summary="Newer versions of the video engine (ffmpeg 7.1.2 and later, including 9.x) can silently ruin the later clips when lossless-joining HEVC clips from different cameras. FuseBox now ships 7.1.1 or older, refuses to be built with a newer one, and warns at startup if it finds one.",
+        details=[
+            "Why: from ffmpeg 7.1 on, the output file loses the per-clip setup data HEVC needs, so every clip after the first can decode as garbage. Real footage showed 204 decode errors on a Windows build, against 2 with the older engine.",
+            "The Windows release now bundles ffmpeg 7.1.1 and the Linux one 7.0.2, both verified. H.264 is not affected.",
+            "The build scripts run tools/check_ffmpeg.py and stop if the engine is newer than 7.1.1 or is an unverified git build.",
+            "If you run from source with a newer ffmpeg in bin/, the status bar now says so.",
+        ],
+    ),
     HistoryEntry(
         date="2026-10-07",
         title="v1.4.024 — the archive check no longer cries wolf",
