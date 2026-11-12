@@ -3334,3 +3334,200 @@ rather than pursued further this session.
 
   Tests: `test_ffmpeg_cmd.py` (+2). 51 test files, all green (no new file —
   existing file gained tests).
+
+### Task 105 — real bug: `scan_folder()` was MP4-only, silently dropping every other video container from the Merge tab (fixed)
+
+  Found live, driving the app against a real mixed-camera folder (ProRes
+  `.mov`, `.mts`/`.m2ts` action-cam files alongside the usual `.mp4`s): the
+  Merge tab reported fewer clips found than the folder actually held, with no
+  error — `clip_model.py`'s `scan_folder()` globbed literally `folder.glob("*.mp4")`,
+  so a `.mov`/`.m4v`/`.avi`/`.mkv`/`.mts`/`.m2ts` original was invisible to
+  the merge, not conformed, not archived, just silently absent. This also
+  retroactively explained an earlier unexplained discrepancy in the Add
+  flow's clip count vs. its camera-grouping dialog's own sum.
+
+  **The fix.** New `VIDEO_EXTS` constant in `clip_model.py` (`.mp4 .mov .m4v
+  .avi .mkv .mts .m2ts`) as the single source of truth; `scan_folder()`
+  rewritten to `iterdir()` + filter on `VIDEO_EXTS` instead of a single-glob.
+  `add_flow.py`'s own private, duplicate `_VIDEO_EXTS` set replaced with an
+  import of the same constant (one definition, not two that can drift).
+  `merge_tab.py`'s "No MP4 clips were found…" empty-folder dialog corrected
+  to "No video clips were found…" (the old text was itself misleading once
+  the scan actually looks at more than MP4).
+
+  **Verified**: two new unit tests (`test_scan_folder_finds_non_mp4_video_
+  containers`, `test_scan_folder_ignores_non_video_files`) plus a live GUI
+  re-scan of the same real folder — clip count went from "6 found" to the
+  correct "7 found", with the new PRORES camera group appearing.
+
+  Tests: `test_clip_model.py` (+2). Full suite green.
+
+### Task 106 — real bug: an odd-spec archival original (VP9, confirmed; AV1 the same class) aborted the ENTIRE merge instead of just that one archival track (fixed)
+
+  Found live, testing Archival master on a folder including a real
+  VP9-sourced Pixel-phone clip mixed with ordinary HEVC/AAC clips: the merge
+  ran the whole baseline concat successfully, then failed at the very last
+  step —
+
+  ```
+  Merge failed: Finalising archive — combining baseline and originals failed
+  (exit 234). [mov @ ...] vp9 only supported in MP4. [out#0/mov @ ...] Could
+  not write header for output file #0 (incorrect codec parameters ?)
+  ```
+
+  Root cause: `build_final_archival_mux_cmd` (`core/ffmpeg_cmd.py`) embeds
+  every archival track's ORIGINAL codec — the entire point of an archival
+  track is that it's never transcoded — straight into the `.mov` final
+  output with no compatibility check. ffmpeg's MOV muxer refuses a handful of
+  codecs outright (VP9 confirmed directly; AV1 documented the same way), so
+  one odd-spec original anywhere in the folder failed the whole merge, not
+  just its own archival copy.
+
+  **The fix.** New `mov_supports_video_codec()` gate (currently a VP9/AV1
+  denylist against a `.mov`-extension output only — `.mkv` accepts virtually
+  anything, so the check is skipped for a non-MOV final container) and
+  `build_archival_sidecar_cmd()`, which stream-copies one incompatible
+  archival intermediate out to its own standalone `<master>.archival_N.mkv`
+  instead of trying to embed it. `ffmpeg_runner.py`'s `_build_and_mux_archival`
+  routes every archival file through the gate before the final combine step;
+  an incompatible one gets its own sidecar (logged plainly: which codec,
+  which file) and is excluded from the embed list, so the merge as a whole
+  no longer aborts over it.
+
+  **Verified**: real end-to-end `MergeWorker` integration test
+  (`test_archival_vp9_sidecar_end_to_end_real_ffmpeg`) — builds a real
+  `libvpx-vp9` clip alongside a normal HEVC/AAC one, archival on, asserts the
+  merge now succeeds, a `master.archival_1.mkv` sidecar exists with the VP9
+  stream byte-exact (not transcoded), and the master itself decodes clean.
+
+  Tests: `test_ffmpeg_cmd.py` (+2 unit, +1 real-ffmpeg integration). Full
+  suite green (550 passed).
+
+### Task 107 — real bug, found extending Task 106's own test: the VP9-sidecar redirect corrupted recovery for every clip whose archival group came AFTER it (fixed)
+
+  `_build_and_mux_archival` (Task 106) decided which archival intermediates
+  the final `.mov` could embed only AFTER `assign_archival_locations` had
+  already handed out every clip's manifest `archival_track`/
+  `archival_audio_stream` indices against the FULL, un-filtered list. Once a
+  VP9/AV1 track actually got redirected to its own sidecar, it no longer
+  occupied a real video/audio slot in the master — but every later clip's
+  manifest entry still pointed at the OLD (now too-high) stream index.
+  Surfaced live on a real 7-clip GUI merge: the app's own post-merge verify
+  pass reported *"4 of 7 clips did NOT verify"*, with raw ffmpeg bitstream-
+  filter errors (`Error initializing bitstream filter: h264_mp4toannexb`) on
+  exactly the clips downstream of the VP9 one — a real user would have hit
+  the same wrong-stream extraction on a real "Extract and Recover" click, not
+  just in verify.
+
+  **The fix.** Split embeddable vs. sidecar-bound archival intermediates
+  FIRST; `assign_archival_locations` now only runs over the embeddable ones,
+  so master stream indices are never handed out for a track that doesn't
+  live in the master. New `ClipEntry.archival_sidecar` field (filename, next
+  to the master) marks a clip whose archival copy lives in its own
+  standalone file instead — such a clip gets `archival_track = 0` /
+  `archival_audio_stream = (0 or None)` (a sidecar is built the same
+  "0:v -0:a?" shape as any archival track, so these are always LOCAL indices
+  into it, never the master's). `build_recover_clip_cmd` and
+  `build_recover_camera_audio_cmd` (`core/extract.py`) — and the live MD5
+  verify pass's video/rotation/camera-audio checks (`ffmpeg_runner.py`) —
+  resolve that sidecar file instead of the master whenever it's set, so both
+  a real Extract & Recover click and the verify pass work correctly for a
+  sidecar-carried clip.
+
+  **Verified**: extended Task 106's own end-to-end test with a third (H264)
+  clip placed AFTER the VP9 one, and recovered it via the app's real
+  recovery path — confirmed byte-exact against the original. Confirmed the
+  test genuinely catches the regression (stashed the fix, reran: fails with
+  an `AttributeError` before even reaching the byte-compare).
+
+  Tests: `test_ffmpeg_cmd.py` (+1, extended existing test). Full suite green
+  (550 passed; one pre-existing, unrelated VAAPI-hardware-device test
+  failure confirmed present before this change too — environment-dependent
+  on this machine's `/dev/dri` setup, not a regression).
+
+### Known issue — Merge tab's "▶ Start merge" button not rendering/clickable (not fixed, needs a human)
+
+  Hit live while driving a real ~60-clip merge through the GUI: after
+  scanning a folder and configuring settings, the action bar's row (Live
+  preview checkbox + GPU-encode checkbox + Show me…/Pre-flight…/▶ Start merge
+  buttons, `merge_tab.py`'s `btn_row`) renders ONLY the Live preview
+  checkbox — the buttons after it occupy no visible pixels at any scroll
+  position, don't respond to a click or a hover-repaint, and Tab-focus
+  walking the widget order never lands on them either. `_start_btn` should
+  be enabled (`setEnabled(bool(self._clips))`, and clips were loaded) and
+  styled with a bright accent background (`_style_start_btn`), so this reads
+  as a genuine Qt layout/paint bug in this specific row, not a disabled-state
+  styling issue — not root-caused or fixed this round (out of scope: a GUI
+  rendering defect, not a merge-logic one). Worked around for real production
+  use by driving `ffmpeg_runner.MergeWorker` directly from a script (the
+  exact class `_start_merge()` itself calls) rather than through the
+  unusable button. Needs a human with an interactive display to reproduce
+  and bisect — screenshots alone didn't reveal why only that one row's
+  buttons fail to paint.
+
+### Task 108 — two real bugs found by actual Steam Deck testing of the v1.4.006 Linux release (fixed)
+
+  v1.4.006's Linux/Steam Deck build was tested for real on a Steam Deck (not
+  just built and assumed to work) and turned up two genuine problems:
+
+  **Bug A — the release's bundled ffmpeg/ffprobe were dynamically linked, not
+  static.** `bin/ffmpeg` in this checkout had at some point become the
+  distro's own system ffmpeg (`file` confirmed "dynamically linked",
+  `ldd` listed `libavdevice.so.60`, `libavfilter.so.9`, `libavformat.so.60`,
+  `libavcodec.so.60`, `libswresample.so.4`, `libswscale.so.7`, `libavutil.so.58`,
+  `libpostproc.so.57` as dependencies) rather than the static build
+  `build_linux.sh` has always documented (`README.md`/the script both point
+  at johnvansickle's static releases). Packaging from it worked perfectly on
+  the build machine — it already has all those exact libraries — and then
+  failed immediately on a real Steam Deck: `libavdevice.so.60: cannot open
+  shared object file`. A frozen PyInstaller build's OWN bundled Qt/av
+  libraries are a different ABI from the system's, so this isn't fixable by
+  "just install the missing libs" — the fix is shipping a static binary that
+  depends on nothing but the kernel.
+
+  **The fix.** `build_linux.sh` now runs `ldd bin/ffmpeg` before building and
+  refuses to proceed if it succeeds (a static binary makes `ldd` refuse to
+  run at all — "not a dynamic executable" — so a zero exit means dynamically
+  linked, exactly backwards from every other `ldd` use, which is exactly why
+  this needs calling out explicitly rather than trusting the file to be
+  right by convention). The actual v1.4.007 release was rebuilt using a real
+  johnvansickle static `ffmpeg-7.0.2-amd64-static` (confirmed via `file`:
+  "statically linked"; confirmed it has `libx264`/`libx265` via `-encoders`)
+  copied into the package's own `bin/`, independent of whatever `bin/ffmpeg`
+  this repo checkout happens to have for local source-running.
+
+  **Bug B — `get_ffmpeg()` crashed the whole app on launch if the ffmpeg
+  binary wasn't owned by the running user.** Found because of Bug A: the
+  Steam Deck tester's own workaround was pointing `bin/ffmpeg` at a symlink
+  to the system ffmpeg (root-owned) to get a working codec set before this
+  fix existed. `core/binaries.py`'s `get_ffmpeg()` called `ff.chmod(0o755)`
+  unconditionally on every launch, with no existence check on `fp` and no
+  exception handling at all — `chmod` on a path you don't own raises
+  `PermissionError`, uncaught, so the app died before any window appeared,
+  with nothing in `crash.log` to explain why (the crash was in the
+  `_start_gpu_probe` call path, before the crash-logging excepthook was even
+  wired up).
+
+  **The fix.** `get_ffmpeg()` now only calls `chmod` on a binary that isn't
+  already executable (`os.access(path, os.X_OK)`), and wraps the call in
+  `try/except OSError: pass` either way — best-effort, matching the
+  function's actual intent ("make sure it's runnable if we can"), not a hard
+  requirement. A binary that genuinely can't run fails loudly at the actual
+  exec attempt downstream instead of silently here.
+
+  **Also cleaned up while rebuilding**: the previous release zip shipped a
+  `crash.log` and `settings.json` left over from this machine's own
+  smoke-test runs — a fresh download started with someone else's session
+  already in it. Excluded from the v1.4.007 package.
+
+  **Verified**: `test_binaries.py` (new, 4 tests) — already-executable skips
+  `chmod` entirely; a simulated `chmod` failure doesn't raise either way it's
+  reached; the existing bundled-vs-system-`PATH`-fallback lookup still
+  works. Confirmed 2 of the 4 fail without the fix (stashed it, reran). The
+  rebuilt v1.4.007 Linux zip was smoke-tested locally (launches clean,
+  correct version in the title bar) before publishing; the static-vs-dynamic
+  distinction itself can only be confirmed on a machine that genuinely lacks
+  the build machine's libav* — i.e. Steam Deck re-testing, not local.
+
+  Tests: `test_binaries.py` (new, 4 tests). Full suite: 554 passed (1
+  pre-existing unrelated failure).

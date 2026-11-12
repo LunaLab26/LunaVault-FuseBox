@@ -8,6 +8,16 @@ from typing import Optional
 
 from probe import StreamInfo
 
+# Every video container this app is known to receive from a real camera or
+# editor export — kept as the single source of truth so a folder scan and the
+# Add flow's own scan can't drift apart the way they did before this was
+# introduced: scan_folder() below used to glob only "*.mp4", which silently
+# dropped any .mov (a ProRes export, an iPhone/Luna .mov, etc.), .mkv, or
+# other real camera file from the Merge tab's clip list with no warning at
+# all — confirmed directly with a real ProRes export sitting untouched in a
+# folder that reported "6 found" instead of 7.
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".m2ts"}
+
 
 @dataclass
 class ClipInfo:
@@ -111,6 +121,14 @@ class ClipInfo:
         return self.stream.duration if self.stream else 0.0
 
     @property
+    def video_duration(self) -> float:
+        """The picture's own length. Each clip's segment of the master is cut to
+        this so a join never inherits the audio's overrun or shortfall."""
+        if not self.stream:
+            return 0.0
+        return getattr(self.stream, "video_duration", 0.0) or self.stream.duration
+
+    @property
     def name(self) -> str:
         return self.path.name
 
@@ -159,6 +177,23 @@ def _parse_ts(stem: str) -> Optional[int]:
         return None
     h, mn, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
     return h * 3600 + mn * 60 + s
+
+
+_DATE_PATTERN = re.compile(r'_(\d{8})_')
+
+
+def _parse_date(stem: str) -> Optional[str]:
+    """The `_YYYYMMDD_` date embedded in a camera filename, if any. Kept
+    separate from `_parse_ts` (which stays seconds-of-day only — callers like
+    `check_dst_warning`/`_clip_gap_seconds` compare it against a creation_time
+    wall-clock and need exactly that, not a full epoch). Used only to gate
+    the filename-timestamp sort below: without a date, "seconds since
+    midnight" collides across different days and silently scrambles any
+    multi-day folder (confirmed on a real Sept 18 + Sept 19 shoot, where it
+    also shoved a deliberately-renamed, non-timestamped clip meant to sort
+    first to dead last)."""
+    m = _DATE_PATTERN.search(stem)
+    return m.group(1) if m else None
 
 
 _KEY_DATE = re.compile(r"(\d{8})")
@@ -260,31 +295,49 @@ def order_clips_by_time(clips: list) -> list:
               for c in clips}
     if clips and all(epochs[id(c)] is not None for c in clips):
         clips.sort(key=lambda c: epochs[id(c)])
-    else:
-        clips.sort(key=lambda c: (c.filename_ts if c.filename_ts is not None else 99999999, c.name))
+    elif clips and all(_parse_date(c.path.stem) is not None and c.filename_ts is not None for c in clips):
+        # Full date+time available for every clip — a real, unambiguous total
+        # order. Only safe to use when ALL clips qualify (mirrors the
+        # creation_time branch above): a single clip missing a date (any
+        # filename that isn't the camera's own dump convention, e.g. a
+        # ProRes export renamed to force a specific position) would otherwise
+        # make date-less "seconds since midnight" sorting collide across
+        # days and scramble the whole list — so when even one clip can't be
+        # dated, leave the existing (alphabetical) order untouched instead.
+        clips.sort(key=lambda c: (_parse_date(c.path.stem), c.filename_ts, c.name))
     for i, c in enumerate(clips):
         c.order_idx = i
     return clips
 
 
 def scan_folder(folder: Path) -> list:
-    mp4s = sorted(folder.glob("*.mp4"), key=lambda p: p.name.lower())
+    videos = sorted(
+        (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS),
+        key=lambda p: p.name.lower(),
+    )
     wavs = sorted(folder.glob("*.wav"), key=lambda p: p.name.lower())
     wav_stems = {w.stem: w for w in wavs}
     lrvs = sorted(folder.glob("*.lrv"), key=lambda p: p.name.lower())
     lrv_stems = {l.stem: l for l in lrvs}
 
     clips = []
-    for mp4 in mp4s:
-        wav = _pair_wav(mp4.stem, wav_stems)
-        lrv = _pair_lrv(mp4.stem, lrv_stems)
-        ts  = _parse_ts(mp4.stem)
-        clips.append(ClipInfo(path=mp4, wav_path=wav, lrv_path=lrv, filename_ts=ts))
+    for video in videos:
+        wav = _pair_wav(video.stem, wav_stems)
+        lrv = _pair_lrv(video.stem, lrv_stems)
+        ts  = _parse_ts(video.stem)
+        clips.append(ClipInfo(path=video, wav_path=wav, lrv_path=lrv, filename_ts=ts))
 
-    clips.sort(key=lambda c: (
-        c.filename_ts if c.filename_ts is not None else 99999999,
-        c.name,
-    ))
+    # Clips are already in filename/alphabetical order from the `sorted()`
+    # call above (which respects any deliberate numeric-prefix naming the
+    # user applied to force a position). Only override that with a
+    # timestamp-based order when EVERY clip has a full, unambiguous
+    # date+time to sort by — same all-or-nothing rule as order_clips_by_time
+    # below. A partial resort (sentinel-ing undated clips to "last") used to
+    # scramble any multi-day folder and shove non-timestamped filenames
+    # (e.g. a ProRes export renamed "000_..." to force it first) to dead
+    # last instead.
+    if clips and all(_parse_date(c.path.stem) is not None and c.filename_ts is not None for c in clips):
+        clips.sort(key=lambda c: (_parse_date(c.path.stem), c.filename_ts, c.name))
     for i, c in enumerate(clips):
         c.order_idx = i
     return clips

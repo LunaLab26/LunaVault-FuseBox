@@ -331,3 +331,31 @@ if __name__ == "__main__":
     test_probe_video_stream_count_counts_streams()
     test_probe_video_stream_count_error_is_zero()
     print("test_verify: all tests passed")
+
+
+def test_frame_exact_duration_snaps_a_cut_to_whole_frames():
+    import subprocess as sp, tempfile
+    from pathlib import Path
+    from core.binaries import get_ffmpeg
+    from core.verify import probe_frame_exact_duration
+    ff, fp = get_ffmpeg()
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "c.mov"
+        # 30 fps source conformed to 29.97 and cut at 6.014 s, as a real Pixel clip was
+        sp.run([ff, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=30:d=7",
+                "-vf", "fps=30000/1001", "-c:v", "libx264", "-t", "6.014", str(out)], check=True)
+        d_exact = probe_frame_exact_duration(fp, str(out))
+    frames = d_exact * 30000 / 1001
+    assert abs(frames - round(frames)) < 1e-6
+
+
+def test_reencoded_baseline_camera_audio_is_predicted_not_failed():
+    # Baseline camera audio is re-encoded to exact length (v1.4.010), so a
+    # first clip recovered from the baseline can't be byte-identical.
+    from types import SimpleNamespace
+    from core.verify import predict_unverifiable
+    entry = SimpleNamespace(recovery_fidelity="decode-lossless", has_camera_audio=True,
+                            audio_lossless=False)
+    plan = SimpleNamespace(video_stream=0, audio_stream=0, video_start=0.0)
+    got = predict_unverifiable(entry, plan, own_archival_track=False, safe_to_read_unbounded=True)
+    assert "Camera audio" in got

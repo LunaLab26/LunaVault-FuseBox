@@ -13,7 +13,7 @@ extend the newest HISTORY entry for anything user-visible.
 from dataclasses import dataclass, field
 
 # Timestamp of the most recent change to the app. Update on every amendment.
-LAST_UPDATED = "2026-07-19 22:10"
+LAST_UPDATED = "2026-11-12 08:20"
 
 
 @dataclass
@@ -25,6 +25,272 @@ class HistoryEntry:
 
 
 HISTORY: list = [
+    HistoryEntry(
+        date="2026-11-12",
+        title="v1.4.025 — protection against a video-engine version that damages merged HEVC",
+        summary="Newer versions of the video engine (ffmpeg 7.1.2 and later, including 9.x) can silently ruin the later clips when lossless-joining HEVC clips from different cameras. FuseBox now ships 7.1.1 or older, refuses to be built with a newer one, and warns at startup if it finds one.",
+        details=[
+            "Why: from ffmpeg 7.1 on, the output file loses the per-clip setup data HEVC needs, so every clip after the first can decode as garbage. Real footage showed 204 decode errors on a Windows build, against 2 with the older engine.",
+            "The Windows release now bundles ffmpeg 7.1.1 and the Linux one 7.0.2, both verified. H.264 is not affected.",
+            "The build scripts run tools/check_ffmpeg.py and stop if the engine is newer than 7.1.1 or is an unverified git build.",
+            "If you run from source with a newer ffmpeg in bin/, the status bar now says so.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
+        title="v1.4.024 — the archive check no longer cries wolf",
+        summary="After a merge with \"Verify\" on, a folder of camera clips with WAV backups always reported that every clip failed to verify, even though nothing was wrong. The check was comparing the master against slightly different stretches of the original sound. It now compares like with like, and those merges verify.",
+        details=[
+            "Fixed: the WAV backup check read the original WAV to its very end, while the master keeps the WAV only for the length of the picture. Both sides are now compared over the same stretch.",
+            "Fixed: the quick pre-check looked at 3 seconds of sound even for shorter clips, running into the next clip.",
+            "Fixed: checks started up to half a millisecond (13 samples) off, from rounding the start time to whole milliseconds.",
+            "Fixed: since v1.4.010 the camera sound on the main track is re-encoded to keep it in sync, so the first clip's camera sound can't be byte-identical. The check now says so up front instead of reporting a failure. With \"One track per clip\" on, the original sound is still kept byte for byte.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
+        title="v1.4.023 — clips re-encoded only for delivery say so",
+        summary="With \"Optimize baseline for delivery\" on (the default for folders that mix cameras), a clip already in the master format is still re-encoded so every clip plays the same way. Its status said \"Will be converted\", as if it didn't match. It now says \"Converted for delivery\", and the tooltip explains why and that the original is still kept exactly.",
+        details=[
+            "Changed: the status chip for a clip whose only difference is the delivery optimisation reads \"Converted for delivery\".",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
+        title="v1.4.022 — clip names stay readable on smaller screens",
+        summary="On a smaller laptop screen (for example 1366×768 at 125%), the Merge page's clip list squeezed every file name down to \"...\" and camera names to \"Go...\", so you couldn't tell clips apart. Names now keep enough room to read, and the list scrolls sideways when the window is really narrow.",
+        details=[
+            "Fixed: the Clip column now never gets narrower than 180 px; below that the table scrolls sideways instead.",
+            "Changed: the Camera column only shows each camera group's clip count, so it is narrower (90 px instead of 150), leaving more room for names.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
+        title="v1.4.021 — a clearer menu button and a clean header on Windows",
+        summary="On Windows the header's menu button showed a tiny, faint \"⋯\" that was hard to spot, and the owl logo sat on a slightly lighter square. The button now shows three clear dots, and the logo blends into the header.",
+        details=[
+            "Fixed: the menu button's \"⋯\" character is drawn very small by Windows' Segoe UI font. It now uses three bullet dots, which every font draws clearly, at 100%, 125% and 150% display scaling.",
+            "Fixed: the header's right-hand corner box took the app-wide page background, leaving a visible square behind the logo.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-07",
+        title="v1.4.020 — the test suite runs on Windows",
+        summary="Five of the app's own checks could only pass on a Linux machine with an AMD graphics card. They looked for ffmpeg without Windows' \".exe\" ending, or quietly relied on the machine really having Linux's VAAPI video hardware. They now run on Windows too. The app itself is unchanged.",
+        details=[
+            "Fixed: test_binaries creates bin/ffmpeg.exe on Windows, which is the name the app actually looks for there.",
+            "Fixed: the two VAAPI command-building tests fake the encoder probe and render device instead of probing the real machine.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.019 — phone clips whose sound starts a moment late stay in sync",
+        summary="Pixel phones start a clip's sound a few hundredths of a second after its picture (20 to 43 ms on the July clips). When such a clip had to be converted, that gap was lost at the join, and the converted clip's sound also came out slightly short. Every clip after it played early: by 183 ms after just four joins of real footage. The gap is now kept as real silence, and each converted clip's sound is exactly as long as its picture.",
+        details=[
+            "Fixed: a real July merge (Pixel 30 fps, Pixel 120 fps, Pixel .LS, Go3S and Luna) drifted -56, -145, -183 ms at its joins. Now every join is at 0 ms, and the Pixel clips keep their own small recorded offset (20 and 43 ms), exactly as filmed.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.018 — masters start playing straight away when streamed",
+        summary="A merged master's index (the part a player needs before it can start) was written at the end of the file instead of the beginning. That makes a master slow to start when played from a web page, a cloud folder or a network drive. It's at the front again.",
+        details=[
+            "Fixed: embedding the archive manifest replaced the \"fast start\" flag on every merged master. Found while checking the masters for YouTube upload.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.017 — a much tidier Merge page",
+        summary="The Merge page now fits on one screen. The clip list shows every clip, with no sideways scrolling and plain status labels. About twenty archive, quality, checking and processing options fold into one line that says what they're set to. Merged masters go into their own \"Kept by FuseBox\" folder rather than in among your clips.",
+        details=[
+            "Changed: \"Archive, quality & checks\" (archival master, one track per clip, quality target, MD5 checks, compatible master, graphics card, live preview) is folded by default and summarised on one line. Choices that don't apply yet are hidden rather than greyed out.",
+            "Fixed: the clip list was a ~3-row box with a sideways scrollbar; it now grows to show your clips. The WAV columns only appear when a clip has a WAV.",
+            "Fixed: status chips were cut off mid-word (\"/ill transcode vp9…\"). They now read \"Copied exactly\" or \"Will be converted\", with the technical reason in the tooltip.",
+            "Fixed: camera group names were shown in a typewriter (monospace) font.",
+            "Fixed: Pixel clips without a model tag were grouped as camera \"ISO\" (from \"ISO Media file produced by Google Inc.\"); they're now \"Google Pixel\".",
+            "Changed: the suggested output folder is a \"Kept by FuseBox\" folder inside the source folder, so the master and its files never mix with the clips (where a later re-scan would offer the master as a clip).",
+            "Changed: plainer wording for the master-format chooser.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.016 — a calmer, simpler home: everyday path up front, tools grouped",
+        summary="The seven equal tabs across the top are now a short everyday path with the power tools grouped quietly beside it. Memories and Add memories come first. Merge, Review and Recover sit in a smaller Tools group. The Activity log, About, and the Dark/Light choice moved into a ⋯ menu.",
+        details=[
+            "New: the header shows two main destinations (Memories, Add memories) plus a quieter Tools group (Merge, Review, Recover). The Activity log, About FuseBox and Appearance are in the ⋯ menu.",
+            "New: the empty Memories shelf now says what to do next, with one button, centred, instead of a sentence floating at the left.",
+            "Fixed: the About page's letter no longer runs off the right edge with a sideways scrollbar; it's a centred column that wraps to the window.",
+            "Changed: the status bar no longer shows the video engine's file path at the bottom of every page; it only appears if something needs your attention.",
+            "Changed: the log page heading says \"Activity log\" (it records merges and recoveries, not just exports).",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.015 — the \"Compatible playback master\" no longer freezes or loses clips",
+        summary="With \"Compatible playback master\" on, a clip copied straight from the camera could come out broken whenever it followed clips the app had converted. In the H.264 version it vanished entirely: six seconds of a frozen picture while the sound carried on. In the ProRes version it played as still photos that changed every two seconds, and then froze for a second at the end. The compatible master is now made from the properly joined master, so every clip plays.",
+        details=[
+            "Fixed: a real 5-camera merge's H.264 compatible master had 1118 frames instead of 1298 (a 6 s hole); it now has all 1298.",
+            "Fixed: a real July multicam merge's ProRes compatible master showed its last clip as 2-second stills plus a frozen 1 s tail (780 frames for 25 s of footage); it now has 752 frames, none repeated.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.014 — converted clips keep their sound exactly under the picture",
+        summary="When a clip had to be converted to a different frame rate (for example a 30 fps phone clip joining 25 fps footage), its picture came out a fraction of a frame shorter or longer than its sound, and that difference added up clip after clip. After eight converted clips the sound was 0.12 s early. Converted clips are now cut to a whole number of frames, picture and sound together.",
+        details=[
+            "Fixed: with a 25 fps baseline, a flash-and-beep test drifted to -123 ms after eight converted clips; it now stays within 1 ms. A mixed ten-format test that drifted up to 40 ms now stays within 3.4 ms.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.013 — no doubled frames where a converted phone clip joins the next one",
+        summary="Where a phone clip filmed at 30 fps was converted to the camera's 29.97 fps, the next clip's first frame landed on the same instant as the converted clip's last frame. Players then had two frames competing for one moment at that join, which shows up as a stutter, or one of them is dropped. Joins now land exactly on a frame boundary.",
+        details=[
+            "Fixed: a full decode of a real 5-camera merge reported \"non monotonically increasing dts\" at two joins (frames 180 and 938). Each clip's length at the join is now a whole number of frames.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.012 — phone clips filmed in VP9 can't break the merge any more",
+        summary="Choosing a Pixel phone's VP9 clips as the baseline, or merging a folder made only of them, failed straight away: the master is a .mov file, and .mov can't hold VP9 (or AV1) video at all. Those clips are now offered as the same size and frame rate in H.264 (or HEVC for 10-bit), and are converted to it.",
+        details=[
+            "Fixed: \"ffmpeg failed on PXL_….mp4 … Invalid argument\" when a VP9 spec was picked as the baseline.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.011 — short clips get their WAV backup synced too",
+        summary="A clip shorter than about five seconds skipped the WAV sync measurement and was simply lined up by its end, which on the Luna Ultra is about 0.3 s off. Short clips are now measured as well.",
+        details=[
+            "Fixed: on a real 2-second Luna Ultra clip the WAV backup was 276 ms out of sync. Short clips are now measured with one window covering the whole clip, inside a wider stretch of the WAV, and land within 1 ms of the true position.",
+            "Tested on all 46 real Luna Ultra clips from a family day out: every clip's WAV now syncs within 2 ms.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-10-06",
+        title="v1.4.010 — picture and sound stay in sync across a whole day of clips",
+        summary="Merging many clips let the sound slowly slide away from the picture. Each camera clip's sound is a few milliseconds longer or shorter than its picture, and every join added that difference to all the clips after it. Over the 46 Luna Ultra clips of a real family day out, the camera sound would have ended up about half a second early. The WAV backup track could be out by a third of a second too. Every join is now exact.",
+        details=[
+            "Fixed: the camera sound drifted at every join. Measured on real Luna Ultra clips: 0, -17, -18 and -8 ms after just four joins, adding up by each clip's own length difference. With a synthetic flash-and-beep test it reached 272 ms after three joins. Each clip's sound is now padded or trimmed to exactly its picture's length, so the drift is gone: 0.0 ms at every join, on real footage and on the test.",
+            "Fixed: a WAV backup that started after the camera (or stopped before it) put every later clip's WAV sound early. The late start was only a timestamp, and it was lost at the join. It's now real silence, so the WAV track lines up at every join too.",
+            "Changed: on the shared master track, camera sound is now encoded once to AAC 256k (sounds the same), not copied, because a copy can't be cut to an exact length. Your original sound is still kept bit-for-bit on the archival tracks when \"Archival master\" is on, and the WAV backup track is still lossless.",
+            "Fixed: chapter markers now start exactly where each clip's picture starts. Before, they slipped by each clip's extra sound.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-09-24",
+        title="v1.4.009 — sound from phones no longer plays too fast, and clips join frame-exactly",
+        summary="Two real audio/timing problems in merged masters, found with real family footage. "
+              "A phone clip recorded with 44.1 kHz sound (common on Android phones) played about 9% "
+              "too fast and high-pitched once merged with camera clips, and the sound drifted out "
+              "of sync after it. Separately, every join between two ordinary camera clips nudged "
+              "the next clip half a frame late. Both are fixed.",
+        details=[
+            "Fixed: a clip whose sound wasn't 48 kHz stereo (a Pixel phone's 44.1 kHz, a mono "
+              "clip, or 5.1 surround) was copied as-is into the merged soundtrack, which can only "
+              "have one format. Its sound played at the wrong speed (a test tone of 880 Hz came "
+              "out at 958 Hz) and the soundtrack ended up 0.18 s short per clip, pulling the "
+              "picture and sound apart. Such clips are now converted to 48 kHz stereo.",
+            "Fixed: at every join between clips, the next clip started half a frame (~21 ms) late "
+              "because the join measured each clip including a few milliseconds of audio that "
+              "starts before the picture. Joins now use each clip's exact picture length, so "
+              "every clip starts exactly where the last one ended. This affected ordinary 48 kHz "
+              "camera footage, which the app's own tests never used (they used 44.1 kHz test "
+              "tones, which happen to line up).",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-09-24",
+        title="v1.4.008 — honest merge progress, a faster converter, and a calm cancel",
+        summary="Testing with real family footage from four different cameras showed the Merge "
+              "tab saying a clip was being converted on the graphics card when it was really "
+              "the (much slower) processor, and promising a ~4 minute merge that was on course "
+              "to take over six hours. The progress now names what's really doing the work, "
+              "the time estimate is based on measured speeds, and converting is roughly twice "
+              "as fast with no visible quality loss.",
+        details=[
+            "Fixed: progress said \"GPU: VAAPI\" while the processor was doing the converting. "
+              "The app deliberately avoids the graphics card for 10-bit HEVC (it corrupts the "
+              "joins between clips on AMD hardware), but the label never found out. The label "
+              "and the converter now share one decision, so they can't disagree.",
+            "Faster: converting clips on the processor now uses a quicker encoder setting at a "
+              "slightly higher quality level. Measured on real 4K footage: 1.3-2x faster, and "
+              "a closer match to the original than before (at the cost of slightly larger files).",
+            "Fixed: the \"Estimated transcode time\" was a guess based only on total length, so it "
+              "said ~4 minutes for a merge that would take hours. The estimate now counts only "
+              "the clips that actually need converting, uses the output resolution and whether "
+              "the graphics card will really be used, and names that clearly.",
+            "Fixed: with lots of clips, the row of per-clip progress badges grew wider than the "
+              "window and pushed the Start merge / Cancel buttons off the right-hand edge. The "
+              "badges now wrap onto extra lines. (Very likely the long-standing \"Start merge "
+              "button is missing\" report.)",
+            "Fixed: cancelling a merge showed a red \"Merge failed\" warning. Cancelling now "
+              "just says so quietly, and the app waits for ffmpeg to actually stop before "
+              "tidying up its temporary files.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-09-21",
+        title="v1.4.007 — real Steam Deck testing found a crash-on-launch and a broken Linux "
+              "download; both fixed",
+        summary="Real testing on a Steam Deck (not just this machine) turned up two problems "
+              "with the Linux/Steam Deck build specifically. First, the downloadable build's "
+              "ffmpeg was accidentally built in a way that only runs on the exact system it was "
+              "packaged on — it wouldn't even start on a Steam Deck. Second, an unrelated fix "
+              "(swapping in a working ffmpeg by hand) exposed a genuine crash-on-launch bug: if "
+              "the app's ffmpeg isn't owned by the account running it, the app failed instantly "
+              "with no window and no explanation. Both are fixed, and the Linux download is "
+              "rebuilt correctly.",
+        details=[
+            "Fixed: the Linux/Steam Deck download's bundled ffmpeg was accidentally built in a "
+              "way that only works on the exact machine it was packaged on — every Steam Deck "
+              "(and most other Linux machines) reported it missing several core libraries and "
+              "refused to run at all. The download is now built with a properly portable ffmpeg "
+              "that works the same way everywhere, the same way earlier Linux releases did.",
+            "Fixed: if the app's ffmpeg wasn't owned by the account trying to run it — for "
+              "example, someone had pointed it at their system's own copy instead of the bundled "
+              "one — the app crashed the instant it launched, with no window and no error "
+              "message to explain why. The app no longer needs to touch that file's permissions "
+              "unless it actually has to, and never crashes over it either way.",
+            "Also cleaned up the Linux download itself: a leftover settings file and log from "
+              "testing were accidentally included in the previous build. A fresh download no "
+              "longer starts with someone else's test session already in it.",
+        ],
+    ),
+    HistoryEntry(
+        date="2026-09-21",
+        title="v1.4.006 — merge splices are byte-safe across mixed cameras, and every video "
+              "format is found again",
+        summary="A round of testing against real, mixed-camera footage (four different "
+              "cameras in one folder, including a VP9 clip and a ProRes master) turned up "
+              "three real bugs, all fixed. Clips saved in anything but .mp4 were silently "
+              "being left out of a merge entirely. A folder with an odd-format original (like "
+              "a VP9 phone clip) could fail the whole merge at the very last step. And a "
+              "narrower version of that same fix could point a clip's \"Extract and Recover\" "
+              "at the wrong data. All three are fixed and covered by new tests run against "
+              "real footage, not just synthetic samples.",
+        details=[
+            "Fixed: the Merge tab only ever looked for .mp4 files, so a .mov, .mkv, .m4v, "
+              ".avi, .mts, or .m2ts original in the same folder was silently skipped — not "
+              "merged, not archived, no error shown. Found on a real folder mixing a GoPro-"
+              "style camera, a phone, and a ProRes master file: the clip count was quietly "
+              "wrong. The Merge tab now looks for every common video format.",
+            "Fixed: a folder containing one VP9 (or AV1) original could fail an Archival "
+              "master merge entirely, right at the final step, over that one clip — even "
+              "though every other clip merged fine. The app's own archival copies always keep "
+              "a clip's exact original file untouched, but a small number of formats (VP9 "
+              "confirmed) can't be embedded inside a .mov master file at all. Rather than "
+              "failing the whole merge, that one archival copy is now saved alongside the "
+              "master as its own small file instead — everything else proceeds normally, and "
+              "nothing about that clip's recoverability is lost.",
+            "Fixed: a side effect of the fix above could point a LATER clip's \"Extract and "
+              "Recover\" (and the app's own post-merge verification) at the wrong data inside "
+              "the master, for any clip that came after an odd-format one in the folder. Found "
+              "before it reached anyone — verification would have reported those later clips "
+              "as unrecoverable, when they were actually fine; extraction would have pulled "
+              "the wrong bytes. Recovery and verification now always find the right data.",
+        ],
+    ),
     HistoryEntry(
         date="2026-07-19",
         title="v1.4.005 — Linux/Steam Deck build fixes: the app now starts on more machines, "

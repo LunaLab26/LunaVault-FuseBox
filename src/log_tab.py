@@ -64,7 +64,7 @@ class LogTab(QWidget):
 
         # Header row
         hdr = QHBoxLayout()
-        title = QLabel("Export Log")
+        title = QLabel("Activity log")
         font = QFont()
         font.setPointSize(13)
         font.setBold(True)

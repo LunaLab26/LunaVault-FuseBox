@@ -53,8 +53,8 @@ def test_legacy_toggle_hidden_by_default_and_friendly_tabs_shown():
     try:
         assert not win._legacy_toggle.isVisible(), "the toggle must be hidden by default"
         labels = [win._tabs.tabText(i) for i in range(win._tabs.count())]
-        assert labels == ["Memories", "Add", "Merge clips", "Review",
-                          "Extract and Recover", "Log", "About"]
+        assert labels == ["Memories", "Add memories", "Merge", "Review",
+                          "Recover", "Activity log", "About FuseBox"]
     finally:
         win.close()
     print("ok: test_legacy_toggle_hidden_by_default_and_friendly_tabs_shown")
@@ -101,8 +101,8 @@ def test_switching_back_to_friendly_restores_all_tabs_and_widgets_survive():
         assert win._merge_tab is not None
         win._legacy_toggle._select("friendly")
         labels = [win._tabs.tabText(i) for i in range(win._tabs.count())]
-        assert labels == ["Memories", "Add", "Merge clips", "Review",
-                          "Extract and Recover", "Log", "About"]
+        assert labels == ["Memories", "Add memories", "Merge", "Review",
+                          "Recover", "Activity log", "About FuseBox"]
         assert s.get("ui_mode") == "friendly"
     finally:
         win.close()

@@ -190,3 +190,80 @@ if __name__ == "__main__":
     test_scan_folder_pairs_lrv_cross_brand_by_clip_key()
     test_scan_folder_no_lrv_leaves_it_unset()
     print("test_clip_model: all tests passed")
+
+
+# ── scan_folder: non-MP4 video containers ────────────────────────────────────
+
+def test_scan_folder_finds_non_mp4_video_containers():
+    """scan_folder() used to glob only "*.mp4", silently dropping any other
+    real camera/editor container from the Merge tab's clip list with no
+    warning at all — confirmed directly with a real ProRes .mov export
+    sitting untouched in a folder that reported fewer clips found than
+    files present. Every extension in clip_model.VIDEO_EXTS must be found,
+    matching what add_flow's own "Found N videos" count already promises."""
+    from clip_model import VIDEO_EXTS
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d)
+        names = [f"clip_{i}{ext}" for i, ext in enumerate(sorted(VIDEO_EXTS))]
+        for name in names:
+            (folder / name).write_bytes(b"")
+        clips = scan_folder(folder)
+        assert len(clips) == len(VIDEO_EXTS)
+        found_exts = {c.path.suffix.lower() for c in clips}
+        assert found_exts == VIDEO_EXTS
+
+
+def test_scan_folder_ignores_non_video_files():
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d)
+        (folder / "clip.mov").write_bytes(b"")
+        (folder / "notes.txt").write_bytes(b"")
+        (folder / "cover.jpg").write_bytes(b"")
+        clips = scan_folder(folder)
+        assert len(clips) == 1
+        assert clips[0].path.name == "clip.mov"
+
+
+def test_scan_folder_preserves_alphabetical_order_for_multi_day_folder_with_undated_clip():
+    """Real-world regression: a Sept 18 + Sept 19 multi-day shoot, staged
+    with numeric filename prefixes to force order, plus a ProRes export
+    renamed "000_prores.mov" (no embedded timestamp at all) to force it
+    first. scan_folder() used to re-sort everything by filename_ts alone
+    (seconds-since-midnight, no date) — colliding same-time-of-day clips
+    from different days, and sentinel-ing the undated ProRes clip to dead
+    last instead of keeping it first. It must now leave the already-correct
+    alphabetical order untouched whenever any clip lacks a full date+time."""
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d)
+        names = [
+            "000_prores.mov",
+            "001_VID_20260918_235900_001.mp4",
+            "002_VID_20260919_000100_002.mp4",
+            "003_VID_20260919_172719_125.mp4",
+        ]
+        for name in names:
+            (folder / name).write_bytes(b"")
+        clips = scan_folder(folder)
+        assert [c.path.name for c in clips] == names
+
+
+def test_scan_folder_sorts_by_date_and_time_when_every_clip_has_both():
+    """When every clip DOES carry a full `_YYYYMMDD_HHMMSS_` timestamp, an
+    out-of-alphabetical-order dump (e.g. two camera folders merged without
+    a forced numeric prefix) should still sort into real chronological
+    order, spanning midnight into the next day correctly."""
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d)
+        names = [
+            "VID_20260919_000100_002.mp4",   # day 2, 00:01 — should sort AFTER day 1 23:59
+            "VID_20260918_235900_001.mp4",   # day 1, 23:59
+            "VID_20260919_172719_125.mp4",   # day 2, 17:27
+        ]
+        for name in names:
+            (folder / name).write_bytes(b"")
+        clips = scan_folder(folder)
+        assert [c.path.name for c in clips] == [
+            "VID_20260918_235900_001.mp4",
+            "VID_20260919_000100_002.mp4",
+            "VID_20260919_172719_125.mp4",
+        ]

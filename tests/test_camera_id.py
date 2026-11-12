@@ -75,3 +75,9 @@ if __name__ == "__main__":
             fn()
             print("ok:", name)
     print("test_camera_id: all tests passed")
+
+
+def test_android_iso_media_handler_names_the_maker_not_iso():
+    from probe import _extract_device
+    assert _extract_device({}, {"handler_name": "ISO Media file produced by Google Inc."}) == "Google Pixel"
+    assert _extract_device({}, {"handler_name": "ISO Media file produced by Samsung Inc."}) == "Samsung"

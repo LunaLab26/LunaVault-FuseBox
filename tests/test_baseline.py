@@ -83,3 +83,18 @@ if __name__ == "__main__":
             fn(); print("ok:", name)
     _real_folder_check()
     print("test_baseline: all tests passed")
+
+
+def test_vp9_and_av1_specs_become_mov_safe_baselines():
+    # MOV can't hold VP9/AV1, so a stream-copy baseline in them always failed.
+    specs = [ClipSpec("vp9", 1920, 1080, "30", "yuv420p", 8, duration=6.0),
+             ClipSpec("av1", 3840, 2160, "30", "yuv420p10le", 10, duration=5.0)]
+    groups = enumerate_specs(specs)
+    assert [(g.codec, g.pix_fmt) for g in groups] == [("h264", "yuv420p"), ("hevc", "yuv420p10le")]
+
+
+def test_vp9_group_merges_with_matching_h264_group():
+    specs = [ClipSpec("vp9", 1920, 1080, "30", "yuv420p", 8, duration=6.0),
+             ClipSpec("h264", 1920, 1080, "30", "yuv420p", 8, duration=4.0)]
+    groups = enumerate_specs(specs)
+    assert len(groups) == 1 and groups[0].clip_count == 2

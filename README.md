@@ -82,8 +82,12 @@ On Linux / Steam Deck the helper script sets up a virtual environment for you:
 
 Place a static `ffmpeg` + `ffprobe` (GPL build, with libx264/libx265) in `bin/`:
 
-- Windows: from https://www.gyan.dev/ffmpeg/builds/ → `bin/ffmpeg.exe`, `bin/ffprobe.exe`
-- Linux: from https://johnvansickle.com/ffmpeg/ → `bin/ffmpeg`, `bin/ffprobe`
+- Windows: from https://www.gyan.dev/ffmpeg/builds/ → `bin/ffmpeg.exe`, `bin/ffprobe.exe`. **Use the 7.1.1 release build** (`ffmpeg-7.1.1-full_build`, under "older releases"), not the latest or a git build.
+- Linux: from https://johnvansickle.com/ffmpeg/ → `bin/ffmpeg`, `bin/ffprobe` (7.0.2 is what releases ship)
+
+**Do not use ffmpeg newer than 7.1.1.** From 7.1 on, the mov muxer drops HEVC parameter
+sets, which corrupts lossless joins of mixed-encoder HEVC clips. The build scripts run
+`tools/check_ffmpeg.py` and refuse a newer build; the app also warns at startup.
 
 ## Build a standalone app
 

@@ -100,3 +100,23 @@ if __name__ == "__main__":
             fn()
             print("ok:", name)
     print("test_merge_tab_primary: all tests passed")
+
+
+# ── status chip: a matching clip re-encoded only for delivery (v1.4.023) ────
+
+def test_status_chip_says_converted_for_delivery_when_only_optimize_applies():
+    from merge_tab import _make_status_button, OPTIMIZED_FOR_DELIVERY
+    clip = ClipInfo(path=Path("x.mp4"),
+                    stream=StreamInfo(status="transcode", conflicts=[OPTIMIZED_FOR_DELIVERY]))
+    btn = _make_status_button(clip)
+    assert btn.text() == "Converted for delivery"
+    assert "Optimize baseline for" in btn.toolTip()
+
+
+def test_status_chip_keeps_will_be_converted_for_a_real_mismatch():
+    from merge_tab import _make_status_button, OPTIMIZED_FOR_DELIVERY
+    clip = ClipInfo(path=Path("x.mp4"),
+                    stream=StreamInfo(status="transcode", conflicts=["codec h264", OPTIMIZED_FOR_DELIVERY]))
+    btn = _make_status_button(clip)
+    assert btn.text() == "Will be converted"
+    assert "Differs from the baseline" in btn.toolTip()

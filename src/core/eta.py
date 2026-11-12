@@ -101,3 +101,48 @@ def format_completion(eta_secs: Optional[float], now: Optional[datetime] = None)
         return "—"
     when = (now or datetime.now()) + timedelta(seconds=eta_secs)
     return when.strftime("%H:%M, %A %d %B %Y")
+
+
+# Pre-merge time estimate. Encode speeds measured on a Steam Deck (Zen 2 4c/8t,
+# Radeon 680M-class) at 3840x2160, in output frames per second. Other machines
+# are usually faster, so this errs long — the same "surprise early, never late"
+# stance as ConservativeEta above.
+_UHD_PIXELS = 3840 * 2160
+_ENCODE_FPS_AT_UHD = {
+    ("software", "hevc"): 5.0,    # libx265 veryfast, 10-bit
+    ("software", "h264"): 14.0,   # libx264 veryfast
+    ("gpu", "hevc"): 45.0,
+    ("gpu", "h264"): 50.0,
+}
+_COPY_BYTES_PER_SEC = 150e6
+
+
+def estimate_merge_seconds(clips, width: int, height: int, fps: float,
+                           codec: str, encoder: str) -> float:
+    """Rough wall-clock seconds for a merge. `clips` is an iterable of
+    (duration_s, needs_transcode, size_bytes). Only transcoded clips pay the
+    encode cost (scaled by output pixel count); copied clips cost I/O only.
+    `encoder` is core.ffmpeg_cmd.effective_conform_encoder's answer."""
+    codec = "hevc" if (codec or "hevc").lower() in ("hevc", "h265") else "h264"
+    kind = "software" if encoder == "software" else "gpu"
+    enc_fps = _ENCODE_FPS_AT_UHD[(kind, codec)] * _UHD_PIXELS / max(1, width * height)
+    total = 0.0
+    total_bytes = 0
+    for dur, needs_transcode, size in clips:
+        total_bytes += size or 0
+        if needs_transcode and dur > 0:
+            total += dur * fps / enc_fps
+    # every byte is read once for the clip pass and once more for the final join
+    return total + 2 * total_bytes / _COPY_BYTES_PER_SEC
+
+
+def describe_duration(seconds: float) -> str:
+    """'under a minute' / 'about 12 minutes' / 'about 2 h 10 min'."""
+    if seconds < 60:
+        return "under a minute"
+    minutes = int(round(seconds / 60))
+    if minutes < 90:
+        return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+    h, m = divmod(minutes, 60)
+    m = int(round(m / 10) * 10) % 60
+    return f"about {h} h {m} min" if m else f"about {h} h"

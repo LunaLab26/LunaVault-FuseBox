@@ -36,7 +36,8 @@ def test_suggests_source_folder_and_folder_named_file():
     try:
         folder = Path(tempfile.mkdtemp(prefix="Summer holiday "))
         mt._suggest_output_paths(folder)
-        assert mt._out_dir.text() == str(folder), "output folder should be the loaded source folder"
+        assert mt._out_dir.text() == str(folder / "Kept by FuseBox"), \
+            "output goes in a subfolder of the source, never among the clips themselves"
         assert mt._out_name.text() == f"{folder.name}.mov", "filename should be <folder name>.mov"
     finally:
         mt.shutdown()
